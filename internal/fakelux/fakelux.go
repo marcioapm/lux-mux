@@ -298,10 +298,6 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "bad_request", err.Error())
 		return
 	}
-	if sp.Image.Ref == "" {
-		writeErr(w, 422, "invalid_spec", "image.ref is required")
-		return
-	}
 	s.mu.Lock()
 	refuse := s.Refuse
 	s.mu.Unlock()
@@ -309,11 +305,34 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 422, "invalid_spec", refuse)
 		return
 	}
-	if s.SubmitHook != nil && req.URL.Query().Get("validateOnly") != "true" {
+	// luxd's order: Normalize, then (validateOnly) the pool and size, or
+	// (a submit) the secret values, then the pool and size.
+	validateOnly := req.URL.Query().Get("validateOnly") == "true"
+	if _, e := normalized(sp); e != nil {
+		e.write(w)
+		return
+	}
+	if !validateOnly {
+		if e := missingSecrets(sp); e != nil {
+			e.write(w)
+			return
+		}
+	}
+	s.mu.Lock()
+	pool, from, known := s.resolvePool(sp.Placement.Pool)
+	s.mu.Unlock()
+	stored := sp
+	stored.Resources.Size = ""
+	sizing, e := resolveSize(pool, sp.Resources, &stored.Resources)
+	if e != nil {
+		e.write(w)
+		return
+	}
+	if s.SubmitHook != nil && !validateOnly {
 		s.SubmitHook()
 	}
-	if req.URL.Query().Get("validateOnly") == "true" {
-		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: sp.Placement.Pool}
+	if validateOnly {
+		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: pool.Name}
 		if sp.Placement.Pool == "busy" {
 			ans.WouldStartNow = false
 			ans.Blockers = []api.AdmissionBlocker{{Code: "not_enough_spare", Hosts: 2}}
@@ -324,7 +343,8 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	s.seq++
 	id := fmt.Sprintf("run_%04d", s.seq)
-	run := &api.Run{ID: id, Name: sp.Name, Labels: sp.Labels, Spec: sp, CreatedAt: time.Now().Add(time.Duration(s.seq) * time.Millisecond), Pool: sp.Placement.Pool}
+	run := &api.Run{ID: id, Name: sp.Name, Labels: sp.Labels, Spec: stored, CreatedAt: time.Now().Add(time.Duration(s.seq) * time.Millisecond),
+		Pool: pool.Name, Sizing: sizing}
 	for _, sec := range sp.Secrets {
 		run.Secrets = append(run.Secrets, api.SecretRef{Name: sec.Name})
 	}
@@ -336,11 +356,12 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.order = append(s.order, id)
 	s.submits = append(s.submits, sp)
 	run.State = "submitted"
-	pool, from, known := s.resolvePool(sp.Placement.Pool)
-	run.Pool = pool.Name
 	ev := map[string]any{"by": Actor, "pool": pool.Name, "poolFrom": from}
 	if known {
 		ev["poolOwner"] = "tenant"
+	}
+	if sizing != nil {
+		ev["size"] = sizing.Resolved.Size
 	}
 	s.event(run, luxapi.EventSubmitted, ev)
 	s.setStage(fr, "waiting")

@@ -70,7 +70,7 @@ func TestSubmitEventsAsLuxd(t *testing.T) {
 			defer s.Close()
 			s.Hold = true
 			s.SetPools([]api.Pool{{Name: "gpu"}})
-			body := `{"image":{"ref":"alpine"},"placement":{"pool":"` + c.pool + `"}}`
+			body := `{"image":{"ref":"alpine"},"workload":{"command":["sh"]},"placement":{"pool":"` + c.pool + `"}}`
 			resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
@@ -115,7 +115,7 @@ func TestSubmitEventsAsLuxd(t *testing.T) {
 	defer s.Close()
 	s.Hold = true
 	s.SetPools([]api.Pool{{Name: "m", IsDefault: &yes}})
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(`{"image":{"ref":"alpine"}}`))
+	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}
