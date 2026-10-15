@@ -68,6 +68,13 @@ func (dialogs) Choose(m *mux.Mux) (mux.ChooseResult, error) {
 	return mux.ChooseResult{Select: c.Chosen}, err
 }
 
+// Help shows the keys until it is closed.
+func (dialogs) Help(m *mux.Mux) error {
+	_, rows, cols := m.Terminal()
+	_, err := run(m, NewHelp(m.Config(), muxHost{m}.Background, rows, cols))
+	return err
+}
+
 // muxHost is the multiplexer as the dialogs see it.
 type muxHost struct{ m *mux.Mux }
 
