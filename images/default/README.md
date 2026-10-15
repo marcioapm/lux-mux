@@ -32,7 +32,12 @@ are installed with `npm install --global`, as each vendor documents, into
   survive a move to another host. lux hands a fresh volume's root to the
   workload user.
 - **The CLIs are outside the home.** `/opt/npm` belongs to the image, so an
-  empty or restored home never loses or shadows them.
+  empty or restored home never loses or shadows them. It is root-owned and
+  `agent` has no `sudo`, so a plain `npm install -g` fails with `EACCES`;
+  install global packages into the home instead with
+  `npm install -g --prefix ~/.local <package>`. Ubuntu's `~/.profile` puts
+  `~/.local/bin` on the login shell's `PATH` once it exists (open a new
+  window, or `exec bash -l`), and it lives on the home volume.
 - **Caches are outside the home.** `XDG_CACHE_HOME=/tmp/agent-cache`,
   `NPM_CONFIG_CACHE=/tmp/agent-cache/npm` and
   `UV_CACHE_DIR=/tmp/agent-cache/uv` keep npm, uv, pip and other XDG caches
