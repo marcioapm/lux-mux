@@ -47,6 +47,10 @@ func SpecKey(p Profile) string {
 // repositories are cloned and what survives a move.
 const Workspace = "/workspace"
 
+// Home is the default image's agent home, a state volume when the
+// profile's HomeVolume says so.
+const Home = "/home/agent"
+
 // Target says which session (and profile) a Run is made for.
 type Target struct {
 	Session string
@@ -74,8 +78,10 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		},
 		Volumes: []api.Volume{
 			{Name: "workspace", Path: Workspace, Kind: "state"},
-			{Name: "home", Path: "/home/agent", Kind: "state"},
 		},
+	}
+	if p.HomeVolume() {
+		sp.Volumes = append(sp.Volumes, api.Volume{Name: "home", Path: Home, Kind: "state"})
 	}
 	if len(p.Shell) > 0 {
 		sp.Workload.Command = append([]string{}, p.Shell...)

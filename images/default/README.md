@@ -25,10 +25,12 @@ are installed with `npm install --global`, as each vendor documents, into
   the spec names one, and sets `HOME` from that user's `/etc/passwd` entry,
   not from the image's `ENV`. Here that is `agent`, home `/home/agent`.
   (Ubuntu's own uid-1000 user `ubuntu` is removed so uid 1000 is `agent`.)
-- **The home is on a state volume.** luxmux gives every window's Run state
-  volumes at `/workspace` and at `/home/agent`, so `~/.claude`, `~/.codex`,
-  `~/.local/share/opencode`, `~/.config/gh` and shell history survive a move
-  to another host. lux hands a fresh volume's root to the workload user.
+- **The home is on a state volume.** For this image luxmux gives every
+  window's Run state volumes at `/workspace` and at `/home/agent` (a
+  profile's `persist_home = false` drops the second), so `~/.claude`,
+  `~/.codex`, `~/.local/share/opencode`, `~/.config/gh` and shell history
+  survive a move to another host. lux hands a fresh volume's root to the
+  workload user.
 - **The CLIs are outside the home.** `/opt/npm` belongs to the image, so an
   empty or restored home never loses or shadows them.
 - **`/.lux`** is lux's and not in the image: the shim at `/.lux/bin/lux-shim`,

@@ -46,6 +46,7 @@ func TestSpecKeyFields(t *testing.T) {
 		"unrestricted": func(p *Profile) {
 			p.UnrestrictedNetwork = true
 		},
+		"persist home": func(p *Profile) { p.PersistHome = boolPtr(true) },
 	}
 	for name, f := range differ {
 		p := clone()
@@ -63,6 +64,7 @@ func TestSpecKeyFields(t *testing.T) {
 		"warm spare":   func(p *Profile) { p.WarmSpare = true },
 		"secrets from": func(p *Profile) { p.SecretsFrom = "somewhere" },
 		"ref alias":    func(p *Profile) { p.Ref, p.Branch = p.Branch, "" },
+		"home off":     func(p *Profile) { p.PersistHome = boolPtr(false) },
 		"nothing":      func(*Profile) {},
 	}
 	for name, f := range same {
@@ -74,6 +76,20 @@ func TestSpecKeyFields(t *testing.T) {
 	}
 	if SpecKey(Profile{}) != "" {
 		t.Error("a profile without an image has a key")
+	}
+}
+
+// TestSpecKeyStableForCustomImages: a custom-image profile gets no home
+// volume, so its key is the one luxmux 0.1.0 computed and warm spares made
+// by that version are still claimed. The constants were printed by 79e22db.
+func TestSpecKeyStableForCustomImages(t *testing.T) {
+	for want, p := range map[string]Profile{
+		"76d9621a3223b5c5": {Image: "alpine", CPUs: 1},
+		"6d2da9ae44885338": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/a.git", Egress: []string{"github.com"}},
+	} {
+		if got := SpecKey(p); got != want {
+			t.Errorf("SpecKey(%+v) = %s, want the 0.1.0 key %s", p, got, want)
+		}
 	}
 }
 

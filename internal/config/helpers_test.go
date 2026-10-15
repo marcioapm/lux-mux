@@ -11,3 +11,5 @@ func writeFile(t *testing.T, path, s string) {
 		t.Fatal(err)
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }

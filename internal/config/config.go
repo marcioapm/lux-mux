@@ -43,6 +43,29 @@ type Profile struct {
 	// shell may reach, UnrestrictedNetwork lifts the filter.
 	Egress              []string `toml:"egress,omitempty" json:"egress,omitempty"`
 	UnrestrictedNetwork bool     `toml:"unrestricted_network,omitempty" json:"unrestrictedNetwork,omitempty"`
+	// PersistHome puts /home/agent on a state volume. Unset means true
+	// for luxmux's default image and false for any other.
+	PersistHome *bool `toml:"persist_home,omitempty" json:"persistHome,omitempty"`
+}
+
+// HomeVolume reports whether the profile's Runs get the home volume.
+func (p Profile) HomeVolume() bool {
+	if p.PersistHome != nil {
+		return *p.PersistHome
+	}
+	return IsDefaultImage(p.Image)
+}
+
+// IsDefaultImage reports whether ref names luxmux's default image, at any
+// tag or digest.
+func IsDefaultImage(ref string) bool {
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		ref = ref[:i]
+	}
+	return ref == ImageRepository
 }
 
 // Keys holds the optional bindings that work without the prefix.
@@ -57,6 +80,9 @@ type Config struct {
 	Keys           Keys               `toml:"keys,omitempty"`
 	Profiles       map[string]Profile `toml:"profiles,omitempty"`
 }
+
+// ImageRepository is where luxmux's default image is published.
+const ImageRepository = "ghcr.io/marcioapm/luxmux"
 
 // DefaultImage is the image of the built-in profile used when the
 // configuration defines none: the default image tagged with this binary's
@@ -75,7 +101,7 @@ func defaultImage() string {
 // "(devel)", pseudo-versions and pre-releases, which have no published
 // image of their own, map to latest.
 func imageForVersion(version string) string {
-	const prefix = "ghcr.io/marcioapm/luxmux:"
+	const prefix = ImageRepository + ":"
 	if !releaseRe.MatchString(version) {
 		return prefix + "latest"
 	}

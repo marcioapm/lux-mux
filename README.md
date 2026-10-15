@@ -127,18 +127,20 @@ labels = { team = "example" }
 secrets = ["NPM_TOKEN"]
 secrets_from = "~/.config/luxmux/app.env"
 workdir = "/workspace/repos/app"
+persist_home = false           # /home/agent on a state volume; default: true only for luxmux's image
 egress = ["github.com", "registry.npmjs.org"]   # lux denies egress by default
 # unrestricted_network = true
 warm_spare = false
 ```
 
 Each window's Run is a generic tty workload running the profile's shell,
-with state volumes at `/workspace` and `/home/agent`; the repository is cloned to
-`/workspace/repos/<name>` and is the shell's working directory. The default
-image runs as `agent`, with its HOME at `/home/agent`, so agent configuration
-and sessions survive moves too. Custom images choose their own `USER` and
-passwd home; homes elsewhere are not persisted by these volumes.
-
+with a state volume at `/workspace`; the repository is cloned to
+`/workspace/repos/<name>` and is the shell's working directory. For
+luxmux's default image (`ghcr.io/marcioapm/luxmux`, any tag), the Run also
+has a state volume at `/home/agent`, the image's `agent` HOME, so agent
+configuration and sessions survive moves too. Other images get it only with
+`persist_home = true` (their `USER`'s home must then be `/home/agent`);
+`persist_home = false` turns it off for the default image.
 
 Secret values come from the `secrets_from` .env file, else from the
 environment variable of the same name, as with `lux run`. They are sent

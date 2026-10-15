@@ -31,6 +31,9 @@ image = "` + DefaultImage + `"
 # disk = "20Gi"
 # workdir = "/workspace"
 # warm_spare = false        # keep one started Run ready: instant windows, billed while idle
+# Keep /home/agent (agent config and sessions) on a state volume that
+# survives moves. Default: true for luxmux's image, false for others.
+# persist_home = true
 # lux denies the Run's network egress by default: allow hosts or CIDRs,
 # or lift the filter.
 # egress = ["github.com", "*.ubuntu.com", "140.82.112.0/20"]

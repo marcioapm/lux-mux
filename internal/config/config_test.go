@@ -175,7 +175,6 @@ func TestRunSpec(t *testing.T) {
 			Ref: "dev", Credential: "GH_TOKEN"}}},
 		Volumes: []api.Volume{
 			{Name: "workspace", Path: "/workspace", Kind: "state"},
-			{Name: "home", Path: "/home/agent", Kind: "state"},
 		},
 		Resources: api.Resources{Size: "m-2-arm64"},
 		Placement: api.Placement{Pool: "m"},
@@ -197,6 +196,49 @@ func TestRunSpec(t *testing.T) {
 	if sp.Resources.CPUs != 1 || sp.Resources.Memory != 2<<30 || sp.Workload.Workdir != "/workspace" ||
 		!reflect.DeepEqual(sp.Workload.Command, []string{"zsh"}) || sp.Labels[LabelSpare] != "true" || sp.Git != nil {
 		t.Fatalf("%+v", sp)
+	}
+}
+
+// TestHomeVolume: the default image's Runs, windows and spares alike, keep
+// /home/agent on a state volume; other images get it only with
+// persist_home = true, and persist_home = false turns it off.
+func TestHomeVolume(t *testing.T) {
+	home := api.Volume{Name: "home", Path: "/home/agent", Kind: "state"}
+	work := api.Volume{Name: "workspace", Path: "/workspace", Kind: "state"}
+	withHome := []api.Volume{work, home}
+	without := []api.Volume{work}
+	for name, c := range map[string]struct {
+		p    Profile
+		want []api.Volume
+	}{
+		"default image":             {Profile{Image: DefaultImage}, withHome},
+		"default image, version":    {Profile{Image: "ghcr.io/marcioapm/luxmux:0.2.0"}, withHome},
+		"default image, digest":     {Profile{Image: "ghcr.io/marcioapm/luxmux@sha256:abcd"}, withHome},
+		"default image, opted out":  {Profile{Image: DefaultImage, PersistHome: boolPtr(false)}, without},
+		"custom image":              {Profile{Image: "ubuntu:24.04"}, without},
+		"similar name":              {Profile{Image: "ghcr.io/marcioapm/luxmux-dev:1"}, without},
+		"other registry, same path": {Profile{Image: "example.com/marcioapm/luxmux:1"}, without},
+		"custom image, opted in":    {Profile{Image: "ubuntu:24.04", PersistHome: boolPtr(true)}, withHome},
+	} {
+		for _, spare := range []bool{false, true} {
+			sp, err := RunSpec(c.p, Target{Session: "s", Profile: "p", Spare: spare}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(sp.Volumes, c.want) {
+				t.Errorf("%s (spare %v): volumes %+v, want %+v", name, spare, sp.Volumes, c.want)
+			}
+		}
+	}
+}
+
+func TestPersistHomeParses(t *testing.T) {
+	c, err := Parse([]byte("[profiles.a]\nimage = \"ubuntu:24.04\"\npersist_home = true\n[profiles.b]\nimage = \"" + DefaultImage + "\"\npersist_home = false\n[profiles.c]\nimage = \"" + DefaultImage + "\""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Profiles["a"].HomeVolume() || c.Profiles["b"].HomeVolume() || !c.Profiles["c"].HomeVolume() {
+		t.Fatalf("persist_home: %+v", c.Profiles)
 	}
 }
 
