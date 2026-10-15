@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -285,10 +286,18 @@ func (p *proc) restored() {
 	}
 }
 
-// TestEndToEnd drives luxmux in a pty against a fake luxd whose Runs'
-// terminals are local shells.
+// TestCLIProfilesAndExternalWindows: luxmux new with a profile and
+// overrides, C-b c on the session's default profile, new-window while
+// attached (adopted) and while detached (recorded), in a pty against a
+// fake luxd.
 func TestCLIProfilesAndExternalWindows(t *testing.T) {
 	lux, env := e2eEnv(t)
+	yes := true
+	lux.SetPools([]api.Pool{{Name: "m", IsDefault: &yes, Sizes: []api.PoolSize{
+		{Name: "m-1", CPUs: 1, Memory: 2 << 30, Disk: 10 << 30},
+		{Name: "m-4", CPUs: 4, Memory: 8 << 30, Disk: 40 << 30, Default: true},
+	}}})
+	env = append(env, "LUXMUX_E2E_EXTRA=v")
 	var cfgHome, stateHome string
 	for _, s := range env {
 		if strings.HasPrefix(s, "XDG_CONFIG_HOME=") {
@@ -311,16 +320,21 @@ repositories=[{url="https://example.com/api.git",path="/workspace/api"},{url="ht
 	if err := os.WriteFile(filepath.Join(cfgHome, "luxmux", "config.toml"), []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := startLuxmux(t, env, "new -s profiles -p dev")
+	p := startLuxmux(t, env, "new -s profiles -p dev --image ubuntu --repo https://example.com/x.git#feature --size m-1 --secret LUXMUX_E2E_EXTRA")
 	p.wait("prompt", has("$"))
 	sp := lux.Submits()[0]
-	if sp.Labels[config.LabelProfile] != "dev" || sp.Image.Ref != "debian" || sp.Git == nil || len(sp.Git.Repositories) != 2 || sp.Git.Repositories[0].Path != "/workspace/api" || sp.Git.Repositories[1].Path != "/workspace/web" || sp.Workload.Workdir != "/workspace/api" {
-		t.Fatalf("submit %+v", sp)
+	wantRepos := []api.Repository{{Name: "x", URL: "https://example.com/x.git", Ref: "feature"}}
+	if sp.Labels[config.LabelProfile] != "dev" || sp.Image.Ref != "ubuntu" || sp.Git == nil || !reflect.DeepEqual(sp.Git.Repositories, wantRepos) ||
+		sp.Resources.Size != "m-1" || sp.Workload.Workdir != "/workspace/repos/x" ||
+		!reflect.DeepEqual(sp.Secrets, []api.Secret{{Name: "LUXMUX_E2E_EXTRA", As: "env", Value: "v"}}) {
+		t.Fatalf("first window's submit %+v", sp)
 	}
+	// The session's default is the profile, without the overrides.
 	p.typ("\x02c")
 	p.wait("default profile window", func(string) bool { return p.scr.title() == "luxmux:profiles [1] dev" })
 	p.wait("second prompt", has("$"))
-	if got := lux.Submits()[1]; got.Labels[config.LabelProfile] != "dev" || got.Image.Ref != "debian" {
+	if got := lux.Submits()[1]; got.Labels[config.LabelProfile] != "dev" || got.Image.Ref != "debian" || len(got.Git.Repositories) != 2 ||
+		got.Git.Repositories[0].Path != "/workspace/api" || got.Git.Repositories[1].Path != "/workspace/web" || got.Workload.Workdir != "/workspace/api" {
 		t.Fatal(got)
 	}
 	before := p.scr.title()
@@ -368,6 +382,8 @@ func TestNewMissingSecretRefused(t *testing.T) {
 	}
 }
 
+// TestEndToEnd drives luxmux in a pty against a fake luxd whose Runs'
+// terminals are local shells.
 func TestEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
