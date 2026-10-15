@@ -6,14 +6,16 @@ import (
 	"sync"
 
 	"github.com/marcioapm/lux-mux/internal/config"
+	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
 // input reads the keyboard in one goroutine and hands chunks to whoever
 // owns the keyboard: the input loop, or a dialog while it is open.
 type input struct {
-	r    io.Reader
-	once sync.Once
-	ch   chan []byte
+	r     io.Reader
+	spawn func(func())
+	once  sync.Once
+	ch    chan []byte
 	// back holds a chunk a closed dialog read but did not use.
 	mu   sync.Mutex
 	back [][]byte
@@ -22,7 +24,7 @@ type input struct {
 func (in *input) start() {
 	in.once.Do(func() {
 		in.ch = make(chan []byte, 64)
-		go func() {
+		in.spawn(func() {
 			defer close(in.ch)
 			for {
 				buf := make([]byte, 4096)
@@ -34,7 +36,7 @@ func (in *input) start() {
 					return
 				}
 			}
-		}()
+		})
 	})
 }
 
@@ -249,15 +251,14 @@ func (m *Mux) commandLocked(c config.Command) {
 		m.askLocked("kill window "+strconv.Itoa(m.active)+" ("+w.Name+")? (y/N) ", "", true, func(_ string, yes bool) {
 			if yes {
 				// Terminating waits on the network: off the lock.
-				go m.closeWindow(w, true, "")
+				m.goSafe(func() { m.closeWindow(w, true, "") })
 			}
 		})
 	case config.OpHelp:
+		// While help is shown no output reaches the terminal (the
+		// emulators still take it); closing it repaints the window.
 		m.help = true
-		b := m.buf[:0]
-		b = append(b, 0x18)
-		b = screenText(b, m.helpLines(), m.rows, m.cols)
-		m.write(b)
-		m.buf = b
+		b := append([]byte{0x18}, screen.Text(nil, m.helpLines(), m.rows, m.cols)...)
+		m.tw.enqueue(b)
 	}
 }

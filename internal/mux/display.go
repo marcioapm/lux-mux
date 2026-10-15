@@ -71,37 +71,51 @@ func (m *Mux) statusScreen(b []byte, w *Window) []byte {
 // screen needs: while it reconnects, or once it ended.
 func (m *Mux) bottomLineLocked(w *Window) string {
 	idx := m.indexLocked(w)
-	switch w.phase {
-	case phaseReconnecting:
+	switch {
+	case w.phase == phaseReconnecting:
 		return fmt.Sprintf(" window %d reconnecting… (%s)", idx, w.reason)
-	case phaseDead:
+	case w.phase == phaseDead && w.resumable:
+		return fmt.Sprintf(" window %d %s — r resume, & close", idx, w.reason)
+	case w.phase == phaseDead:
 		return fmt.Sprintf(" window %d ended: %s — r relaunch, & close", idx, w.reason)
 	}
 	return ""
 }
 
-// overlayBytes appends the active window's bottom row overwritten by line.
-func (m *Mux) overlayBytes(b []byte, line string) []byte {
-	w := m.activeLocked()
-	w.withEmu(func(t *vtermT) {
-		rows, _ := t.Size()
-		b = screen.Overlay(b, t, rows-1, line)
-	})
-	return b
+// overlayLineLocked is what the active window's bottom row shows over its
+// screen: the open prompt, else the notice, else the window's own line.
+func (m *Mux) overlayLineLocked(w *Window) string {
+	switch {
+	case m.promptState != nil:
+		return " " + m.promptState.label + string(m.promptState.text)
+	case m.notice != "":
+		return " " + m.notice
+	}
+	return m.bottomLineLocked(w)
 }
 
-// setNoticeLocked shows a transient notice on the bottom row; it goes
-// after NoticeFor, the row repainted from the emulator.
+// plainOverlay draws line on the bottom row of a screen luxmux drew itself.
+func (m *Mux) plainOverlay(b []byte, line string) []byte {
+	b = screen.CUP(b, m.rows-1, 0)
+	b = append(b, "\x1b[0;7m"...)
+	b = append(b, screen.Fit(line, m.cols-1)...)
+	return append(b, "\x1b[m"...)
+}
+
+// setNoticeLocked shows a transient notice on the bottom row; after
+// NoticeFor the window is repainted without it.
 func (m *Mux) setNoticeLocked(text string) {
 	m.notice = text
 	m.noticeGen++
 	gen := m.noticeGen
-	m.drawNoticeLocked()
+	m.drawOverlayLocked()
 	time.AfterFunc(m.opt.NoticeFor, func() {
+		defer m.recoverPanic()
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.noticeGen == gen {
-			m.clearNoticeLocked()
+			m.notice = ""
+			m.repaintLocked()
 		}
 	})
 }
@@ -113,49 +127,30 @@ func (m *Mux) Notice(text string) {
 	m.setNoticeLocked(text)
 }
 
-func (m *Mux) drawNoticeLocked() {
+// drawOverlayLocked draws the active window's bottom-row line (the
+// prompt, the notice, or its own) over its screen. Taking an overlay down
+// repaints the whole window: live output may have scrolled the overlay up
+// on the terminal since it was drawn.
+func (m *Mux) drawOverlayLocked() {
 	w := m.activeLocked()
-	if w == nil || m.suspended || m.notice == "" {
+	if w == nil || m.suspended || m.help {
 		return
 	}
-	b := m.buf[:0]
-	if w.hasScreen {
-		b = m.overlayBytes(b, " "+m.notice)
-		b = append(b, w.tail.Pending()...)
-	} else {
-		b = screen.CUP(b, m.rows-1, 0)
-		b = append(b, "\x1b[0;7m"...)
-		b = append(b, screen.Fit(" "+m.notice, m.cols-1)...)
-		b = append(b, "\x1b[m"...)
-	}
-	m.write(b)
-	m.buf = b
-}
-
-// clearNoticeLocked takes the notice down: the bottom row is repainted
-// from the emulator (or the status screen redrawn).
-func (m *Mux) clearNoticeLocked() {
-	m.notice = ""
-	w := m.activeLocked()
-	if w == nil || m.suspended {
-		return
-	}
-	if !w.hasScreen {
+	line := m.overlayLineLocked(w)
+	if line == "" {
 		m.repaintLocked()
 		return
 	}
-	b := m.buf[:0]
-	w.withEmu(func(t *vtermT) {
+	if !w.hasScreen {
+		m.tw.enqueue(m.plainOverlay(nil, line))
+		return
+	}
+	pend := w.tail.Pending()
+	m.paintLocked(w, func(b []byte, t *vtermT) []byte {
 		rows, _ := t.Size()
-		if line := m.bottomLineLocked(w); line != "" {
-			b = screen.Overlay(b, t, rows-1, line)
-		} else {
-			b = screen.Restore(b, t, rows-1)
-		}
+		b = screen.Overlay(b, t, rows-1, line)
+		return append(b, pend...)
 	})
-	b = append(b, w.tail.Pending()...)
-	m.write(b)
-	m.buf = b
 }
 
 // helpLines is the key help overlay.
@@ -194,34 +189,11 @@ type prompt struct {
 	done   func(answer string, ok bool)
 }
 
-func (m *Mux) drawPromptLocked() {
-	p := m.promptState
-	w := m.activeLocked()
-	if p == nil || w == nil || m.suspended {
-		return
-	}
-	line := " " + p.label + string(p.text)
-	b := m.buf[:0]
-	if w.hasScreen {
-		w.withEmu(func(t *vtermT) {
-			rows, _ := t.Size()
-			b = screen.Overlay(b, t, rows-1, line)
-		})
-	} else {
-		b = screen.CUP(b, m.rows-1, 0)
-		b = append(b, "\x1b[0;7m"...)
-		b = append(b, screen.Fit(line, m.cols-1)...)
-		b = append(b, "\x1b[m"...)
-	}
-	m.write(b)
-	m.buf = b
-}
-
 // ask opens a prompt; done runs (with m.mu held) when it is answered or
 // cancelled.
 func (m *Mux) askLocked(label string, initial string, single bool, done func(string, bool)) {
 	m.promptState = &prompt{label: label, text: []rune(initial), single: single, done: done}
-	m.drawPromptLocked()
+	m.drawOverlayLocked()
 }
 
 // promptKeys feeds typed bytes to the open prompt; it returns what is
@@ -263,17 +235,11 @@ func (m *Mux) promptKeysLocked(b []byte) []byte {
 			i += n - 1
 		}
 	}
-	m.drawPromptLocked()
+	m.drawOverlayLocked()
 	return nil
 }
 
-func (m *Mux) clearPromptLocked() {
-	if m.notice != "" {
-		m.drawNoticeLocked()
-		return
-	}
-	m.clearNoticeLocked()
-}
+func (m *Mux) clearPromptLocked() { m.repaintLocked() }
 
 func decodeRune(b []byte) (rune, int) {
 	s := string(b)

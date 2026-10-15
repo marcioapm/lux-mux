@@ -242,14 +242,15 @@ func TestResizeReachesEveryStream(t *testing.T) {
 		})
 	}
 	h.m.mu.Lock()
-	for _, w := range h.m.windows {
+	ws := append([]*Window{}, h.m.windows...)
+	h.m.mu.Unlock()
+	for _, w := range ws {
 		w.withEmu(func(t2 *vtermT) {
 			if r, c := t2.Size(); r != 30 || c != 100 {
 				t.Errorf("emulator %dx%d", r, c)
 			}
 		})
 	}
-	h.m.mu.Unlock()
 	h.detach()
 }
 

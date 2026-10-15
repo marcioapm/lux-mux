@@ -12,10 +12,6 @@ import (
 	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
-// HistoryLines is how much scrollback each window's emulator keeps, as
-// lux-shim's restore does.
-const HistoryLines = 2000
-
 // phase is where a window is in following its Run.
 type phase int
 
@@ -32,13 +28,135 @@ const (
 	phaseDead
 )
 
+// feedLimit bounds the output a window's emulator may lag behind its
+// stream. The backpressure policy: the stream reader never waits for the
+// emulator. When a window's queued output passes feedLimit (the emulator
+// parses slower than the Run writes, as with long runs of CJK, combining
+// marks or truecolour), the queued output is dropped, the emulator reset
+// and the window marked stale; a stale emulator takes no more output.
+// The next time the window must be painted (shown, an overlay taken down,
+// previewed), it is attached again with restore instead, and lux's
+// snapshot rebuilds the emulator. The shown window's output goes to the
+// terminal unchanged throughout.
+const feedLimit = 8 << 20
+
 // feedItem is one thing for a window's emulator, in stream order: output,
-// a resize, a reset to a blank emulator, or a barrier the painter waits on.
+// a resize, a reset to a blank emulator, or a paint run with the
+// emulator caught up to everything queued before it.
 type feedItem struct {
 	data       []byte
 	rows, cols int
 	reset      bool
-	done       chan struct{}
+	paint      func(*vterm.Terminal)
+	// skip runs instead of paint when the paint is dropped: the queue
+	// overflowed (stale true) or closed.
+	skip func(stale bool)
+}
+
+// feedQueue is a window's emulator input. push never blocks.
+type feedQueue struct {
+	mu     sync.Mutex
+	items  []feedItem
+	bytes  int
+	stale  bool
+	closed bool
+	wake   chan struct{}
+}
+
+// push queues it. Output over feedLimit drops the queued output and
+// marks the queue stale (see feedLimit); it reports that.
+func (q *feedQueue) push(it feedItem) (overflowed bool) {
+	var skips []func(bool)
+	q.mu.Lock()
+	switch {
+	case q.closed:
+		if it.skip != nil {
+			it.skip(false)
+		}
+	case it.data != nil && q.stale:
+	case it.data != nil && q.bytes+len(it.data) > feedLimit:
+		kept := q.items[:0]
+		for _, x := range q.items {
+			switch {
+			case x.paint != nil:
+				if x.skip != nil {
+					skips = append(skips, x.skip)
+				}
+			case x.rows > 0:
+				kept = append(kept, x)
+			}
+		}
+		clear(q.items[len(kept):])
+		q.items = append(kept, feedItem{reset: true})
+		q.bytes = 0
+		q.stale = true
+		overflowed = true
+	default:
+		q.items = append(q.items, it)
+		q.bytes += len(it.data)
+	}
+	q.mu.Unlock()
+	q.signal()
+	for _, f := range skips {
+		f(true)
+	}
+	return overflowed
+}
+
+// restart clears the stale mark and queues a reset: a new stream starts.
+func (q *feedQueue) restart() {
+	q.mu.Lock()
+	q.stale = false
+	q.mu.Unlock()
+	q.push(feedItem{reset: true})
+}
+
+func (q *feedQueue) isStale() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.stale
+}
+
+func (q *feedQueue) signal() {
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// close drops what is queued (its paints skipped) and ends the feeder.
+func (q *feedQueue) close() {
+	q.mu.Lock()
+	items := q.items
+	q.items, q.bytes, q.closed = nil, 0, true
+	q.mu.Unlock()
+	q.signal()
+	for _, x := range items {
+		if x.skip != nil {
+			x.skip(false)
+		}
+	}
+}
+
+// pop waits for the next item; ok is false once the queue is closed.
+func (q *feedQueue) pop() (feedItem, bool) {
+	for {
+		q.mu.Lock()
+		if q.closed {
+			q.mu.Unlock()
+			return feedItem{}, false
+		}
+		if len(q.items) > 0 {
+			it := q.items[0]
+			q.items[0] = feedItem{}
+			q.items = q.items[1:]
+			q.bytes -= len(it.data)
+			q.mu.Unlock()
+			return it, true
+		}
+		q.mu.Unlock()
+		<-q.wake
+	}
 }
 
 // Window is one window: a Run, its emulator and its supervisor.
@@ -50,7 +168,10 @@ type Window struct {
 	Name    string
 	Profile string
 	Spec    config.Profile
-	phase   phase
+	// SpareKey is the warm-spare slot this window's Run may come from
+	// (empty: none).
+	SpareKey string
+	phase    phase
 	// status: the Run's latest state and stage in words; reason: why it
 	// is dead or what the reconnect waits on.
 	status    string
@@ -62,67 +183,77 @@ type Window struct {
 	// attachedOnce: attached in this process (its restore went to the
 	// terminal, or it was not shown then).
 	attachedOnce bool
-	tail         screen.Tail
-	epoch        int
-	cancel       context.CancelFunc
-	closed       bool
+	// refreshing: the stream was closed so a new attach with restore
+	// rebuilds a stale emulator.
+	refreshing bool
+	// resumable: the Run is stopped and r resumes it.
+	resumable bool
+	tail      screen.Tail
+	epoch     int
+	cancel    context.CancelFunc
+	closed    bool
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
 
-	// The emulator is written only by its feeder goroutine, and read by
-	// painters after a barrier, both under emuMu.
+	// The emulator is written by its feeder goroutine and read by
+	// previews, both under emuMu.
 	emuMu sync.Mutex
 	emu   *vterm.Terminal
-	feed  chan feedItem
+	q     *feedQueue
+
+	// preview caches the chooser's rendering between its ticks.
+	prevMu   sync.Mutex
+	prevAt   time.Time
+	prevSize [2]int
+	prev     []string
 
 	notify chan struct{}
 }
 
 func (m *Mux) newWindow(name, profile string, spec config.Profile) *Window {
 	w := &Window{m: m, Name: name, Profile: profile, Spec: spec, created: time.Now(),
-		emu:    vterm.New(m.rows, m.cols, HistoryLines),
-		feed:   make(chan feedItem, 256),
+		emu:    newEmulator(m.rows, m.cols),
+		q:      &feedQueue{wake: make(chan struct{}, 1)},
 		notify: make(chan struct{}, 1)}
-	go w.feeder()
+	m.goSafe(w.feeder)
 	return w
 }
+
+// newEmulator keeps no history: luxmux reads only the screen.
+func newEmulator(rows, cols int) *vterm.Terminal { return vterm.New(rows, cols, 0) }
 
 // feeder writes the window's output into its emulator, apart from the
 // path that writes it to the terminal.
 func (w *Window) feeder() {
-	for it := range w.feed {
+	for {
+		it, ok := w.q.pop()
+		if !ok {
+			return
+		}
 		w.emuMu.Lock()
 		switch {
 		case it.reset:
 			r, c := w.emu.Size()
-			w.emu = vterm.New(r, c, HistoryLines)
+			w.emu = newEmulator(r, c)
 		case it.rows > 0:
 			w.emu.Resize(it.rows, it.cols)
+		case it.paint != nil:
+			it.paint(w.emu)
 		case len(it.data) > 0:
 			w.emu.Write(it.data)
 		}
 		w.emuMu.Unlock()
-		if it.done != nil {
-			close(it.done)
-		}
 	}
 }
 
-// sync waits until the emulator has taken everything queued before it.
-// Callers hold m.mu, so nothing is queued meanwhile.
-func (w *Window) sync() {
-	done := make(chan struct{})
-	w.feed <- feedItem{done: done}
-	<-done
-}
-
-// withEmu runs fn with the emulator after a barrier. Called with m.mu held.
-func (w *Window) withEmu(fn func(*vterm.Terminal)) {
-	w.sync()
-	w.emuMu.Lock()
-	defer w.emuMu.Unlock()
-	fn(w.emu)
+// withEmu runs fn with the emulator once it has taken everything queued
+// before; false if the paint was dropped. It waits: never call it with
+// m.mu held.
+func (w *Window) withEmu(fn func(*vterm.Terminal)) bool {
+	done := make(chan bool, 1)
+	w.q.push(feedItem{paint: func(t *vterm.Terminal) { fn(t); done <- true }, skip: func(bool) { done <- false }})
+	return <-done
 }
 
 // poke wakes the supervisor.

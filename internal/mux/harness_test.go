@@ -25,13 +25,36 @@ type clientTerm struct {
 	mu  sync.Mutex
 	raw bytes.Buffer
 	vt  *vterm.Terminal
+	// stall, while set, blocks every Write until it is closed: a terminal
+	// (or link) that takes nothing.
+	stallMu sync.Mutex
+	stall   chan struct{}
+}
+
+// setStall stalls the terminal (on) or lets it go again.
+func (c *clientTerm) setStall(on bool) {
+	c.stallMu.Lock()
+	defer c.stallMu.Unlock()
+	switch {
+	case on && c.stall == nil:
+		c.stall = make(chan struct{})
+	case !on && c.stall != nil:
+		close(c.stall)
+		c.stall = nil
+	}
 }
 
 func newClientTerm(rows, cols int) *clientTerm {
-	return &clientTerm{vt: vterm.New(rows, cols, 1000)}
+	return &clientTerm{vt: vterm.New(rows, cols, 0)}
 }
 
 func (c *clientTerm) Write(p []byte) (int, error) {
+	c.stallMu.Lock()
+	st := c.stall
+	c.stallMu.Unlock()
+	if st != nil {
+		<-st
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.raw.Write(p)

@@ -42,10 +42,10 @@ func (m *Mux) newWindowFrom(name string, p config.Profile, title string, _ bool)
 	m.selectLocked(len(m.windows) - 1)
 	m.mu.Unlock()
 	m.wg.Add(1)
-	go func() {
+	m.goSafe(func() {
 		defer m.wg.Done()
 		m.launch(w)
-	}()
+	})
 }
 
 // launch gets w a Run: its profile's waiting spare, else a new one.
@@ -135,17 +135,17 @@ func (m *Mux) relaunch(w *Window) {
 	w.epoch = 0
 	w.steps = progress{}
 	w.steps.note("relaunching")
-	w.feed <- feedItem{reset: true}
+	w.q.restart()
 	m.repaintLocked()
 	m.mu.Unlock()
 	if old != "" {
-		go m.terminate(old)
+		m.goSafe(func() { m.terminate(old) })
 	}
 	m.wg.Add(1)
-	go func() {
+	m.goSafe(func() {
 		defer m.wg.Done()
 		m.launch(w)
-	}()
+	})
 }
 
 // claimSpare takes the waiting spare of w's profile, if the profile keeps
@@ -173,7 +173,7 @@ func (m *Mux) claimSpare(w *Window) string {
 		run.State == "starting" || run.State == "provisioning") {
 		return ""
 	}
-	go m.ensureSpare(w.Profile, w.Spec)
+	m.goSafe(func() { m.ensureSpare(w.Profile, w.Spec) })
 	return id
 }
 

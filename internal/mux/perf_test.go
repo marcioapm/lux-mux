@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -132,9 +133,21 @@ func plainAttach(ctx context.Context, cl *luxapi.Client, out io.Writer, keys io.
 	}
 }
 
-func perfPayload(size int) []byte {
-	line := []byte("\x1b[32mcompiling\x1b[m src/module/file.go: ok (12 ms) lorem ipsum dolor sit amet\r\n")
-	p := make([]byte, 0, size)
+// perfPayloads are the kinds of output measured: a build log (ASCII and
+// 16-colour SGR, the emulator's fastest case), and the slowest for it:
+// CJK, combining marks and ZWJ sequences, truecolour and 256-colour SGR.
+var perfPayloads = []struct {
+	name string
+	line string
+}{
+	{"log", "\x1b[32mcompiling\x1b[m src/module/file.go: ok (12 ms) lorem ipsum dolor sit amet\r\n"},
+	{"cjk", "日本語のテキストと中文字符和한국어 텍스트가 섞인 줄입니다 日本語のテキスト\r\n"},
+	{"combining", "e\u0301a\u0300o\u0302u\u0308 n\u0303 👩\u200d💻 👨\u200d👩\u200d👧 a\u0323\u0307 x\u0336y\u0336z\u0336\r\n"},
+	{"truecolor", "\x1b[38;2;255;100;0mR\x1b[38;2;0;200;100mG\x1b[48;5;236;38;5;214mB\x1b[38;2;10;20;30;48;2;200;210;220m text \x1b[m\r\n"},
+}
+
+func perfPayload(line string, size int) []byte {
+	p := make([]byte, 0, size+len(line))
 	for len(p) < size {
 		p = append(p, line...)
 	}
@@ -167,43 +180,51 @@ func TestPerf(t *testing.T) {
 		t.Skip("LUXMUX_PERF=1 runs the measurements")
 	}
 	const size = 50 << 20
-	payload := perfPayload(size)
-
-	// Throughput.
-	var plainDur, muxDur, muxEmuDur time.Duration
-	for range 3 {
-		srv := newPerfServer(payload)
-		cw := &countWriter{want: size, done: make(chan struct{})}
-		cl, _ := luxapi.New(api.Config{URL: srv.URL, APIKey: "k"})
-		ctx, cancel := context.WithCancel(context.Background())
-		pr, _ := io.Pipe()
-		start := time.Now()
-		go func() { _ = plainAttach(ctx, cl, cw, pr) }()
-		<-cw.done
-		plainDur = minNonZero(plainDur, time.Since(start))
-		cancel()
-		srv.Close()
-
-		srv = newPerfServer(payload)
-		cw = &countWriter{want: size, done: make(chan struct{})}
-		kr, kw := io.Pipe()
-		start = time.Now()
-		m, done := startPerfMux(t, srv, cw, kr)
-		<-cw.done
-		d := time.Since(start)
-		m.mu.Lock()
-		m.windows[0].sync()
-		m.mu.Unlock()
-		de := time.Since(start)
-		muxDur = minNonZero(muxDur, d)
-		muxEmuDur = minNonZero(muxEmuDur, de)
-		_, _ = kw.Write([]byte("\x02d"))
-		<-done
-		srv.Close()
-	}
 	mbps := func(d time.Duration) float64 { return float64(size) / d.Seconds() / 1e6 }
-	t.Logf("throughput, 50 MB: plain %.0f MB/s, luxmux to terminal %.0f MB/s (%.0f%%), luxmux incl. emulator caught up %.0f MB/s (%.0f%%)",
-		mbps(plainDur), mbps(muxDur), 100*plainDur.Seconds()/muxDur.Seconds(), mbps(muxEmuDur), 100*plainDur.Seconds()/muxEmuDur.Seconds())
+	for _, kind := range perfPayloads {
+		payload := perfPayload(kind.line, size)
+		var plainDur, muxDur, muxEmuDur time.Duration
+		stale := false
+		for range 3 {
+			srv := newPerfServer(payload)
+			cw := &countWriter{want: size, done: make(chan struct{})}
+			cl, _ := luxapi.New(api.Config{URL: srv.URL, APIKey: "k"})
+			ctx, cancel := context.WithCancel(context.Background())
+			pr, _ := io.Pipe()
+			start := time.Now()
+			go func() { _ = plainAttach(ctx, cl, cw, pr) }()
+			<-cw.done
+			plainDur = minNonZero(plainDur, time.Since(start))
+			cancel()
+			srv.Close()
+
+			srv = newPerfServer(payload)
+			cw = &countWriter{want: size, done: make(chan struct{})}
+			kr, kw := io.Pipe()
+			start = time.Now()
+			m, done := startPerfMux(t, srv, cw, kr)
+			<-cw.done
+			d := time.Since(start)
+			m.mu.Lock()
+			w := m.windows[0]
+			m.mu.Unlock()
+			if w.withEmu(func(*vtermT) {}) && !w.q.isStale() {
+				muxEmuDur = minNonZero(muxEmuDur, time.Since(start))
+			} else {
+				stale = true
+			}
+			muxDur = minNonZero(muxDur, d)
+			_, _ = kw.Write([]byte("\x02d"))
+			<-done
+			srv.Close()
+		}
+		emu := "emulator overflowed (stale, rebuilt from lux's snapshot when next painted)"
+		if !stale {
+			emu = fmt.Sprintf("incl. emulator caught up %.0f MB/s (%.0f%%)", mbps(muxEmuDur), 100*plainDur.Seconds()/muxEmuDur.Seconds())
+		}
+		t.Logf("throughput, 50 MB %s: plain %.0f MB/s, luxmux to terminal %.0f MB/s (%.0f%%); %s",
+			kind.name, mbps(plainDur), mbps(muxDur), 100*plainDur.Seconds()/muxDur.Seconds(), emu)
+	}
 
 	// Keystroke latency: one key at a time, the next after the previous
 	// arrived.

@@ -53,6 +53,9 @@ type Options struct {
 	// Poll is how often a supervisor re-reads its Run while it waits
 	// for events (default 5s).
 	Poll time.Duration
+	// Crash reports a panic after the terminal was restored and does not
+	// return (default: print it and exit with status 2).
+	Crash func(msg string)
 }
 
 // Mux is one attached session.
@@ -61,14 +64,16 @@ type Mux struct {
 	lux  *luxapi.Client
 	keys *keys.Machine
 	in   *input
-	out  io.Writer
+	// tw is the only writer of the terminal (opt.Out).
+	tw *termWriter
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mu guards the windows, the terminal (every write to out) and the
-	// session state.
+	// mu guards the windows, the order of what is queued for the terminal
+	// and the session state. Nothing waits on the terminal, a stream or an
+	// emulator while holding it.
 	mu        sync.Mutex
 	windows   []*Window
 	active    int
@@ -84,7 +89,7 @@ type Mux struct {
 	promptState *prompt
 	help        bool
 	done        chan string // the reason Run returns
-	buf         []byte
+	crashOnce   sync.Once
 }
 
 // ErrNoSession is returned by Open for attach to a session lux has no
@@ -110,6 +115,9 @@ func (o *Options) defaults() {
 	if o.Lookup == nil {
 		o.Lookup = os.LookupEnv
 	}
+	if o.Crash == nil {
+		o.Crash = defaultCrash
+	}
 }
 
 // New makes a Mux for the session in sess (loaded or rebuilt by the
@@ -124,8 +132,9 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Mux{opt: opt, lux: opt.Lux, keys: km, in: &input{r: opt.In}, out: opt.Out,
+	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: newTermWriter(opt.Out),
 		sess: sess, byRun: map[string]*Window{}, done: make(chan string, 1)}
+	m.in = &input{r: opt.In, spawn: m.goSafe}
 	m.rows, m.cols = opt.Size()
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	for _, sw := range sess.Windows {
@@ -159,11 +168,12 @@ func (m *Mux) Config() *config.Config { return m.opt.Config }
 // Lux is the lux client.
 func (m *Mux) Lux() *luxapi.Client { return m.lux }
 
-// Terminal is where dialogs draw, and its size.
+// Terminal is where dialogs draw, in order with everything else written
+// to the terminal, and its size.
 func (m *Mux) Terminal() (io.Writer, int, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.out, m.rows, m.cols
+	return m.tw, m.rows, m.cols
 }
 
 // Context ends when the session does.
@@ -172,13 +182,13 @@ func (m *Mux) Context() context.Context { return m.ctx }
 // Run shows the session until it is detached, its last window closes, or
 // ctx ends. It returns why: "detached", "exited" or ctx's error.
 func (m *Mux) Run(ctx context.Context) (string, error) {
-	go func() {
+	m.goSafe(func() {
 		select {
 		case <-ctx.Done():
 			m.finish("")
 		case <-m.ctx.Done():
 		}
-	}()
+	})
 	m.mu.Lock()
 	if len(m.windows) == 0 {
 		m.mu.Unlock()
@@ -194,9 +204,9 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	m.saveLocked()
 	m.mu.Unlock()
 	m.wg.Add(2)
-	go m.followEvents()
-	go m.keepSpares()
-	go m.inputLoop()
+	m.goSafe(m.followEvents)
+	m.goSafe(m.keepSpares)
+	m.goSafe(m.inputLoop)
 	<-m.ctx.Done()
 	reason := <-m.done
 	m.shutdown()
@@ -216,14 +226,13 @@ func (m *Mux) finish(reason string) {
 }
 
 // shutdown closes every stream and waits for the goroutines; the Runs
-// keep running.
+// keep running. The terminal is left as it was found.
 func (m *Mux) shutdown() {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
 	m.saveLocked()
 	m.suspended = true
-	b := screen.Reset(nil)
-	_, _ = m.out.Write(b)
+	m.tw.enqueue(screen.Reset(nil))
 	m.mu.Unlock()
 	for _, w := range ws {
 		if c := w.getConn(); c != nil {
@@ -236,37 +245,42 @@ func (m *Mux) shutdown() {
 		m.closeFeedLocked(w)
 	}
 	m.mu.Unlock()
+	m.tw.close(2 * time.Second)
 }
 
 func (m *Mux) closeFeedLocked(w *Window) {
 	if !w.closed {
 		w.closed = true
-		close(w.feed)
+		w.q.close()
 	}
 }
 
-// write writes to the terminal; called with m.mu held.
-func (m *Mux) write(b []byte) {
-	if len(b) > 0 {
-		_, _ = m.out.Write(b)
-	}
-}
-
-// output takes a chunk of w's stream: written to the terminal at once if
-// w is shown, and queued for its emulator. The emulator is fed apart, so
-// the terminal never waits on it.
+// output takes a chunk of w's stream: queued for the terminal at once if
+// w is shown, and for its emulator. Neither waits: the emulator's queue is
+// bounded by dropping (feedLimit), and a slow terminal is waited for by
+// the stream's reader after the lock is released.
 func (m *Mux) output(w *Window, data []byte) {
 	m.mu.Lock()
 	if w.closed {
 		m.mu.Unlock()
 		return
 	}
-	if !m.suspended && m.activeLocked() == w {
-		_, _ = m.out.Write(data)
+	shown := m.showingLocked(w)
+	if shown {
+		m.tw.enqueue(data)
 	}
 	w.tail.Add(data)
-	w.feed <- feedItem{data: data}
+	w.q.push(feedItem{data: data})
 	m.mu.Unlock()
+	if shown {
+		m.tw.waitBelow(m.ctx, writeLimit)
+	}
+}
+
+// showingLocked reports whether w's output goes to the terminal now: it is
+// the active window and no dialog or help owns the terminal.
+func (m *Mux) showingLocked(w *Window) bool {
+	return !m.suspended && !m.help && m.activeLocked() == w
 }
 
 func (m *Mux) activeLocked() *Window {
@@ -295,25 +309,86 @@ func (m *Mux) titleLocked(w *Window) string {
 // bottom line it needs.
 func (m *Mux) repaintLocked() {
 	w := m.activeLocked()
-	if w == nil || m.suspended {
+	if w == nil || m.suspended || m.help {
 		return
 	}
-	b := m.buf[:0]
-	// CAN ends whatever sequence the previous output stopped inside.
-	b = append(b, 0x18)
-	if w.hasScreen {
-		w.withEmu(func(t *vtermT) { b = screen.Paint(b, t, m.titleLocked(w)) })
-		if line := m.bottomLineLocked(w); line != "" {
-			b = m.overlayBytes(b, line)
+	line := m.overlayLineLocked(w)
+	if !w.hasScreen {
+		b := append([]byte{0x18}, m.statusScreen(nil, w)...)
+		if line != "" {
+			b = m.plainOverlay(b, line)
 		}
-		b = append(b, w.tail.Pending()...)
-	} else {
-		b = m.statusScreen(b, w)
+		m.tw.enqueue(b)
+		return
 	}
-	m.write(b)
-	m.buf = b
-	if m.notice != "" {
-		m.drawNoticeLocked()
+	title := m.titleLocked(w)
+	pend := w.tail.Pending()
+	m.paintLocked(w, func(b []byte, t *vtermT) []byte {
+		// CAN ends whatever sequence the previous output stopped inside.
+		b = append(b, 0x18)
+		b = screen.Paint(b, t, title)
+		if line != "" {
+			rows, _ := t.Size()
+			b = screen.Overlay(b, t, rows-1, line)
+		}
+		return append(b, pend...)
+	})
+}
+
+// paintLocked queues for the terminal what draw makes from w's emulator,
+// once the emulator has taken every output queued before: in the
+// terminal's order, without waiting. A stale emulator is not painted:
+// the window is attached again so lux's snapshot rebuilds it, and a
+// placeholder is shown meanwhile.
+func (m *Mux) paintLocked(w *Window, draw func([]byte, *vtermT) []byte) {
+	fallback := m.staleScreenLocked(w)
+	if w.q.isStale() {
+		m.refreshLocked(w)
+		m.tw.enqueue(fallback)
+		return
+	}
+	s := m.tw.slot()
+	w.q.push(feedItem{
+		paint: func(t *vtermT) { s.fill(draw(nil, t)) },
+		skip: func(stale bool) {
+			if !stale {
+				// The window closed: the next repaint replaces it.
+				s.fill(nil)
+				return
+			}
+			s.fill(fallback)
+			m.goSafe(func() { m.refreshStale(w) })
+		},
+	})
+}
+
+// staleScreenLocked is what shows while a stale window's screen is rebuilt.
+func (m *Mux) staleScreenLocked(w *Window) []byte {
+	b := append([]byte{0x18}, screen.Text(nil, []string{
+		fmt.Sprintf(" luxmux: window %d (%s): refreshing its screen from lux…", m.indexLocked(w), w.Name)}, m.rows, m.cols)...)
+	b = append(b, "\x1b]2;"...)
+	b = append(b, m.titleLocked(w)...)
+	return append(b, 0x07)
+}
+
+// refreshStale attaches w again if its emulator overflowed.
+func (m *Mux) refreshStale(w *Window) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !w.closed && w.q.isStale() {
+		m.refreshLocked(w)
+	}
+}
+
+// refreshLocked closes w's stream so its supervisor attaches again with
+// restore, rebuilding the emulator from the snapshot.
+func (m *Mux) refreshLocked(w *Window) {
+	if w.refreshing || w.closed {
+		return
+	}
+	if c := w.getConn(); c != nil {
+		w.refreshing = true
+		c.CloseNow()
 	}
 }
 
@@ -418,20 +493,40 @@ func (m *Mux) stateWordLocked(w *Window) string {
 	return "starting"
 }
 
+// previewFor is how long a rendered preview is reused: the chooser
+// renders on every key and every tick.
+const previewFor = 250 * time.Millisecond
+
 // Preview renders rows×cols of window i's screen for the chooser: the
-// part of it that ends at its cursor's row, so a shell's prompt shows.
+// part of it that ends at its cursor's row, so a shell's prompt shows. It
+// reads the emulator as it stands, without waiting for its queue.
 func (m *Mux) Preview(i, rows, cols int) []string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if i < 0 || i >= len(m.windows) || rows <= 0 || cols <= 0 {
+		m.mu.Unlock()
 		return nil
 	}
 	w := m.windows[i]
 	if !w.hasScreen {
-		return []string{"  " + m.stateWordLocked(w) + ": " + w.status}
+		s := []string{"  " + m.stateWordLocked(w) + ": " + w.status}
+		m.mu.Unlock()
+		return s
 	}
-	var out []string
-	w.withEmu(func(t *vtermT) { out = screen.Preview(t, rows, cols) })
+	if w.q.isStale() {
+		m.refreshLocked(w)
+		m.mu.Unlock()
+		return []string{"  refreshing its screen from lux…"}
+	}
+	m.mu.Unlock()
+	w.prevMu.Lock()
+	defer w.prevMu.Unlock()
+	if w.prev != nil && w.prevSize == [2]int{rows, cols} && time.Since(w.prevAt) < previewFor {
+		return w.prev
+	}
+	w.emuMu.Lock()
+	out := screen.Preview(w.emu, rows, cols)
+	w.emuMu.Unlock()
+	w.prev, w.prevSize, w.prevAt = out, [2]int{rows, cols}, time.Now()
 	return out
 }
 

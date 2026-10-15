@@ -150,6 +150,18 @@ scrollback, to avoid flooding it; when a new luxmux process attaches, lux's
 restore snapshot of the window shown at that moment, including up to 2000
 lines of history, does go to your terminal. There is no copy mode.
 
+Backpressure: luxmux never slows a window's stream down for its emulator,
+and never makes the keyboard wait for your terminal. The shown window's
+output is queued for your terminal unchanged; keys go to the shell while
+your terminal (or the link to it) is busy, and `C-b d` detaches even when
+it takes nothing. Each window's emulator may lag its stream by up to
+8 MiB. Past that (a flood of CJK, combining marks or truecolour can be
+parsed slower than it arrives), luxmux drops that window's queued output,
+resets its emulator and marks it stale; the next time the window is shown,
+previewed or has an overlay taken down, luxmux attaches it again with
+restore and lux's snapshot rebuilds its screen. Your terminal itself has
+received all of the shown window's output either way.
+
 A host whose lux-shim predates restore sends no snapshot: the window starts
 blank, and luxmux asks the shell to redraw its prompt.
 

@@ -14,7 +14,6 @@ import (
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
-	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
@@ -49,10 +48,10 @@ func (m *Mux) startSupervisor(w *Window) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	w.cancel = cancel
 	m.wg.Add(1)
-	go func() {
+	m.goSafe(func() {
 		defer m.wg.Done()
 		m.supervise(ctx, w)
-	}()
+	})
 }
 
 // supervise follows w's Run until the window closes: it attaches while
@@ -101,6 +100,9 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			case endDropped:
 				// Attached and then lost: try again at once, then back off.
 				bo = m.opt.Backoff
+				if m.refreshing(w) {
+					continue
+				}
 				m.setWaiting(w, why)
 				wait(bo)
 			default:
@@ -152,6 +154,13 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			grow()
 		}
 	}
+}
+
+// refreshing reports whether w's stream was closed to rebuild its screen.
+func (m *Mux) refreshing(w *Window) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return w.refreshing
 }
 
 // waitClosed parks a dead window's supervisor until the window closes or
@@ -221,7 +230,7 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	}()
 	frames := make(chan api.StreamData, 64)
 	readErr := make(chan error, 1)
-	go func() {
+	m.goSafe(func() {
 		defer close(frames)
 		for {
 			var d api.StreamData
@@ -235,7 +244,7 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 				return
 			}
 		}
-	}()
+	})
 
 	// The first frame says whether the host restores: a snapshot starts
 	// with snapshotPrefix. None within RestoreWait, or live output first:
@@ -341,11 +350,12 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 	w.epoch = run.Epoch
 	w.phase = phaseLive
 	w.reason = ""
-	w.feed <- feedItem{reset: true}
-	w.feed <- feedItem{rows: m.rows, cols: m.cols}
+	w.refreshing = false
+	w.q.restart()
+	w.q.push(feedItem{rows: m.rows, cols: m.cols})
 	w.tail.Reset()
 	w.hasScreen = true
-	active := m.activeLocked() == w && !m.suspended
+	active := m.showingLocked(w)
 	raw := restoring && firstHere && active
 	if !restoring && active {
 		m.repaintLocked()
@@ -366,7 +376,7 @@ func (m *Mux) outputQuiet(w *Window, data []byte) {
 		return
 	}
 	w.tail.Add(data)
-	w.feed <- feedItem{data: data}
+	w.q.push(feedItem{data: data})
 }
 
 // restored repaints w from its emulator once its snapshot is in, if shown.
@@ -416,6 +426,10 @@ func (m *Mux) setWaiting(w *Window, why string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if w.closed {
+		return
+	}
+	if w.refreshing {
+		// The stream was closed to rebuild a stale screen: no news.
 		return
 	}
 	if w.phase == phaseLive {
@@ -525,7 +539,7 @@ func (m *Mux) Resize(rows, cols int) {
 	var conns []*websocket.Conn
 	for _, w := range m.windows {
 		if !w.closed {
-			w.feed <- feedItem{rows: rows, cols: cols}
+			w.q.push(feedItem{rows: rows, cols: cols})
 		}
 		if c := w.getConn(); c != nil {
 			conns = append(conns, c)
@@ -549,5 +563,3 @@ func (m *Mux) suspend(on bool) {
 		m.repaintLocked()
 	}
 }
-
-var screenText = screen.Text
