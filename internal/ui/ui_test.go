@@ -214,7 +214,7 @@ func TestDialogValuesProfile(t *testing.T) {
 		t.Fatalf("unchanged dialog:\n%+v\nwant\n%+v", p, want)
 	}
 	// Another repository, an unshaped pool with cpus and memory, a spare.
-	v.Repository, v.Branch, v.Pool, v.CPUs, v.Memory, v.WarmSpare = "https://e.com/b.git", "", "plain", "4", "8Gi", true
+	v.Repos, v.Pool, v.CPUs, v.Memory, v.WarmSpare = []RepoRow{{URL: "https://e.com/b.git"}}, "plain", "4", "8Gi", true
 	p, err = v.Profile(base, false)
 	if err != nil {
 		t.Fatal(err)

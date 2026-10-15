@@ -15,6 +15,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 	"github.com/marcioapm/lux-mux/internal/screen"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
@@ -865,6 +866,11 @@ func (m *Mux) followEvents() {
 			if e.RunID == nil {
 				return
 			}
+			// The feed is the tenant's: only a Run just submitted may be
+			// new-window's (discoverWindows finds those the feed missed).
+			if s, _ := e.Data["state"].(string); e.Type == "state" && s == "submitted" {
+				m.considerRun(*e.RunID)
+			}
 			m.event(*e.RunID, e.Event)
 		})
 		if m.ctx.Err() != nil {
@@ -879,6 +885,81 @@ func (m *Mux) followEvents() {
 		}
 		bo = min(2*bo, m.opt.MaxBackoff)
 	}
+}
+
+// discoverWindows lists the session's Runs at the start and every
+// discoverEvery: the feed starts from when it connects, and is down
+// between reconnects, so a Run new-window made then is found here.
+func (m *Mux) discoverWindows() {
+	defer m.wg.Done()
+	tick := time.NewTicker(m.opt.discoverEvery)
+	defer tick.Stop()
+	for {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		runs, err := m.lux.ListSession(ctx, m.opt.Session)
+		cancel()
+		if err == nil {
+			for _, r := range runs {
+				m.considerRun(r.ID)
+			}
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// considerRun looks once at a Run no window has: new-window's Runs of
+// this session are adopted (adoptRun). Labels never change, so a Run
+// found to be anything else is not read again.
+func (m *Mux) considerRun(id string) {
+	m.mu.Lock()
+	if m.byRun[id] != nil || m.considered[id] || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return
+	}
+	m.considered[id] = true
+	m.wg.Add(1)
+	m.mu.Unlock()
+	m.goSafe(func() {
+		defer m.wg.Done()
+		m.adoptRun(id)
+	})
+}
+
+// adoptRun appends a window for Run id when new-window made it for this
+// session, with a notice; the window shown does not change. A Run whose
+// read fails is looked at again on its next event or listing.
+func (m *Mux) adoptRun(id string) {
+	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
+	r, err := m.lux.Get(ctx, id)
+	cancel()
+	if err != nil {
+		m.mu.Lock()
+		delete(m.considered, id)
+		m.mu.Unlock()
+		return
+	}
+	if r.Labels[config.LabelSession] != m.opt.Session || r.Labels[config.LabelExternal] != "true" ||
+		r.Labels[config.LabelSpare] == "true" || !state.Live(r.State) {
+		return
+	}
+	cfg := m.config()
+	sw := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byRun[id] != nil || m.ending || m.ctx.Err() != nil {
+		return
+	}
+	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec)
+	w.RunID = id
+	m.windows = append(m.windows, w)
+	m.byRun[id] = w
+	m.startSupervisor(w)
+	m.saveLocked()
+	m.setNoticeLocked(fmt.Sprintf("window %d added: %s", len(m.windows)-1, w.Name))
 }
 
 func (m *Mux) event(runID string, e api.Event) {

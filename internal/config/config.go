@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,20 +19,36 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+// Repository is one entry of a profile's repositories list.
+type Repository struct {
+	URL string `toml:"url" json:"url"`
+	// Branch (or its alias Ref) is checked out; empty is the remote HEAD.
+	Branch string `toml:"branch,omitempty" json:"branch,omitempty"`
+	Ref    string `toml:"ref,omitempty" json:"ref,omitempty"`
+	// Name defaults to RepoName(URL); Path to lux's /workspace/repos/<name>.
+	Name string `toml:"name,omitempty" json:"name,omitempty"`
+	Path string `toml:"path,omitempty" json:"path,omitempty"`
+	// GitCredential overrides the profile's for this repository.
+	GitCredential string `toml:"git_credential,omitempty" json:"gitCredential,omitempty"`
+}
+
 // Profile is how a window's Run is made.
 type Profile struct {
 	Image string `toml:"image,omitempty" json:"image,omitempty"`
 	Pool  string `toml:"pool,omitempty" json:"pool,omitempty"`
 	// Size names a size of a shaped pool; CPUs, Memory and Disk are for
 	// unshaped pools. lux refuses both together.
-	Size       string  `toml:"size,omitempty" json:"size,omitempty"`
-	CPUs       float64 `toml:"cpus,omitempty" json:"cpus,omitempty"`
-	Memory     string  `toml:"memory,omitempty" json:"memory,omitempty"`
-	Disk       string  `toml:"disk,omitempty" json:"disk,omitempty"`
-	Repository string  `toml:"repository,omitempty" json:"repository,omitempty"`
+	Size   string  `toml:"size,omitempty" json:"size,omitempty"`
+	CPUs   float64 `toml:"cpus,omitempty" json:"cpus,omitempty"`
+	Memory string  `toml:"memory,omitempty" json:"memory,omitempty"`
+	Disk   string  `toml:"disk,omitempty" json:"disk,omitempty"`
+	// Repository, Branch and Ref are the one-repository shorthand of
+	// Repositories; a profile sets one form or the other.
+	Repository string `toml:"repository,omitempty" json:"repository,omitempty"`
 	// Branch (or its alias Ref) is checked out; empty is the remote HEAD.
 	Branch        string            `toml:"branch,omitempty" json:"branch,omitempty"`
 	Ref           string            `toml:"ref,omitempty" json:"ref,omitempty"`
+	Repositories  []Repository      `toml:"repositories,omitempty" json:"repositories,omitempty"`
 	GitCredential string            `toml:"git_credential,omitempty" json:"gitCredential,omitempty"`
 	Shell         []string          `toml:"shell,omitempty" json:"shell,omitempty"`
 	Env           map[string]string `toml:"env,omitempty" json:"env,omitempty"`
@@ -231,6 +249,9 @@ var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._/-]{0,62}[A-Za-z0-
 
 var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// repoNameRe is lux's rule for a repository's name (a volume name).
+var repoNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
 // Validate checks what lux would refuse later, and the profile's own rules.
 func (p Profile) Validate() error {
 	var errs []error
@@ -255,11 +276,37 @@ func (p Profile) Validate() error {
 	if p.Branch != "" && p.Ref != "" && p.Branch != p.Ref {
 		fail("branch and ref are the same setting: give one")
 	}
-	if p.Repository == "" && (p.Branch != "" || p.Ref != "" || p.GitCredential != "") {
+	if len(p.Repositories) > 0 && (p.Repository != "" || p.Branch != "" || p.Ref != "") {
+		fail("repositories: set either repositories or the repository/branch/ref shorthand, not both")
+	}
+	if len(p.RepositoryList()) == 0 && (p.Branch != "" || p.Ref != "" || p.GitCredential != "") {
 		fail("branch, ref and git_credential need a repository")
 	}
 	if p.Repository != "" && RepoName(p.Repository) == "" {
 		fail("repository: cannot derive a name from %q", p.Repository)
+	}
+	names := map[string]bool{}
+	for i, r := range p.Repositories {
+		at := fmt.Sprintf("repositories[%d]", i)
+		if r.URL == "" {
+			fail("%s: url is required", at)
+		}
+		if r.Branch != "" && r.Ref != "" && r.Branch != r.Ref {
+			fail("%s: branch and ref are the same setting: give one", at)
+		}
+		name := r.Name
+		if name == "" {
+			name = RepoName(r.URL)
+		}
+		if !repoNameRe.MatchString(name) {
+			fail("%s: name %q: lowercase letters, digits, '_' and '-', at most 32 (set name)", at, name)
+		} else if names[name] {
+			fail("%s: name %q is taken by another repository (set name)", at, name)
+		}
+		names[name] = true
+		if r.Path != "" && !strings.HasPrefix(path.Clean(r.Path), Workspace+"/") {
+			fail("%s: path must be under %s, the state volume", at, Workspace)
+		}
 	}
 	if p.Workdir != "" && !strings.HasPrefix(p.Workdir, "/") {
 		fail("workdir must be absolute")
@@ -277,12 +324,64 @@ func (p Profile) Validate() error {
 			fail("labels: %q is luxmux's own", k)
 		}
 	}
-	for _, s := range append(append([]string{}, p.Secrets...), p.GitCredential) {
+	named := append(slices.Clone(p.Secrets), p.GitCredential)
+	for _, r := range p.Repositories {
+		named = append(named, r.GitCredential)
+	}
+	for _, s := range named {
 		if s != "" && !envNameRe.MatchString(s) {
 			fail("secrets: invalid name %q", s)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RepositoryList is the profile's repositories in either form, in order:
+// the list, or the shorthand as a list of one.
+func (p Profile) RepositoryList() []Repository {
+	if len(p.Repositories) > 0 {
+		return slices.Clone(p.Repositories)
+	}
+	if p.Repository == "" {
+		return nil
+	}
+	return []Repository{{URL: p.Repository, Branch: p.Branch, Ref: p.Ref}}
+}
+
+// RepoRef is r's branch or ref ("" for the remote's HEAD).
+func (r Repository) RepoRef() string {
+	if r.Branch != "" {
+		return r.Branch
+	}
+	return r.Ref
+}
+
+// RepoName is r's name in the Run: Name, else derived from its URL.
+func (r Repository) RepoName() string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return RepoName(r.URL)
+}
+
+// Credential is the secret r is fetched with: its own, else the profile's.
+func (p Profile) Credential(r Repository) string {
+	if r.GitCredential != "" {
+		return r.GitCredential
+	}
+	return p.GitCredential
+}
+
+// CredentialNames are the git credentials the profile's repositories use,
+// each once, in order.
+func (p Profile) CredentialNames() []string {
+	var out []string
+	for _, r := range p.RepositoryList() {
+		if c := p.Credential(r); c != "" && !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // GitRef is the branch or ref to check out ("" for the remote's HEAD).
@@ -294,11 +393,11 @@ func (p Profile) GitRef() string {
 }
 
 // SecretNames are every secret the profile's Runs carry: its secrets and
-// its git credential.
+// its repositories' git credentials.
 func (p Profile) SecretNames() []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, s := range append(append([]string{}, p.Secrets...), p.GitCredential) {
+	for _, s := range append(append([]string{}, p.Secrets...), p.CredentialNames()...) {
 		if s != "" && !seen[s] {
 			seen[s] = true
 			out = append(out, s)

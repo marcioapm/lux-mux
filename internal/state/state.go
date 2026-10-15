@@ -33,6 +33,9 @@ type Window struct {
 type Session struct {
 	Name    string   `json:"name"`
 	Windows []Window `json:"windows"`
+	// DefaultProfile is the profile C-b c makes windows of (luxmux new
+	// -p, or the dialog's checkbox); empty: the configuration's.
+	DefaultProfile string `json:"defaultProfile,omitempty"`
 	// Active and Last are window indexes (positions in Windows).
 	Active int `json:"active"`
 	Last   int `json:"last"`
@@ -175,8 +178,9 @@ func Live(state string) bool { return state != "terminated" }
 // Rebuild makes a session from the Runs lux lists for it (those labelled
 // with the session), for when its file is gone: its non-terminated Runs
 // that are not a waiting warm spare, oldest first. Names are lost: each
-// window is named after its profile.
-func Rebuild(session string, runs []*api.Run) *Session {
+// window is named after its profile. A Run whose spec lux returns gets
+// that spec as its window's (profiles: the configuration's, by name).
+func Rebuild(session string, runs []*api.Run, profiles map[string]config.Profile) *Session {
 	s := &Session{Name: session}
 	live := make([]*api.Run, 0, len(runs))
 	for _, r := range runs {
@@ -209,7 +213,88 @@ func Rebuild(session string, runs []*api.Run) *Session {
 		s.Windows = append(s.Windows, Window{RunID: r.ID, Name: prof, Profile: prof})
 	}
 	sortWindowsByCreation(s, live)
+	byID := map[string]*api.Run{}
+	for _, r := range live {
+		byID[r.ID] = r
+	}
+	for i, w := range s.Windows {
+		if r := byID[w.RunID]; r != nil && r.Spec.Image.Ref != "" {
+			s.Windows[i] = WindowFromRun(r, profiles[w.Profile])
+		}
+	}
 	return s
+}
+
+// WindowFromRun is the window of a Run luxmux did not record: its spec
+// read back from lux over base, the configured profile it names, which
+// keeps what lux does not store (secrets_from, labels, warm_spare).
+func WindowFromRun(r *api.Run, base config.Profile) Window {
+	sp := r.Spec
+	p := base
+	p.Image, p.Pool, p.Workdir = sp.Image.Ref, sp.Placement.Pool, sp.Workload.Workdir
+	p.Shell, p.Env, p.UnrestrictedNetwork = sp.Workload.Command, sp.Env, sp.Network.Unrestricted
+	p.Size, p.CPUs, p.Memory, p.Disk = "", 0, "", ""
+	// luxd resolves a size into cpus, memory and disk and keeps what was
+	// asked in sizing.requested; a spec read back as submitted has it.
+	size := sp.Resources.Size
+	if r.Sizing != nil && r.Sizing.Requested != nil && r.Sizing.Requested.Size != "" {
+		size = r.Sizing.Requested.Size
+	}
+	if size != "" {
+		p.Size = size
+	} else {
+		p.CPUs = sp.Resources.CPUs
+		if sp.Resources.Memory != 0 {
+			p.Memory = fmt.Sprint(int64(sp.Resources.Memory))
+		}
+		if sp.Resources.Disk != 0 {
+			p.Disk = fmt.Sprint(int64(sp.Resources.Disk))
+		}
+	}
+	p.Repository, p.Branch, p.Ref, p.Repositories = "", "", "", nil
+	if sp.Git != nil {
+		for _, repo := range sp.Git.Repositories {
+			ref := repo.Ref
+			if ref == "HEAD" {
+				// luxd stores the remote's HEAD as "HEAD": the profile's "".
+				ref = ""
+			}
+			cred := repo.Credential
+			if cred == base.GitCredential {
+				cred = ""
+			}
+			// lux fills in defaults; dropping them keeps the window's
+			// SpecKey equal to its profile's.
+			name, path := repo.Name, repo.Path
+			if path == config.Workspace+"/repos/"+name {
+				path = ""
+			}
+			if name == config.RepoName(repo.URL) {
+				name = ""
+			}
+			p.Repositories = append(p.Repositories, config.Repository{URL: repo.URL, Ref: ref, Name: name, Path: path, GitCredential: cred})
+		}
+	}
+	p.Secrets = nil
+	for _, sec := range sp.Secrets {
+		if sec.As == "env" {
+			p.Secrets = append(p.Secrets, sec.Name)
+		}
+	}
+	p.Egress = nil
+	for _, e := range sp.Network.Egress {
+		if e.Host != "" {
+			p.Egress = append(p.Egress, e.Host)
+		} else {
+			p.Egress = append(p.Egress, e.CIDR)
+		}
+	}
+	profile := r.Labels[config.LabelProfile]
+	name := r.Labels[config.LabelWindow]
+	if name == "" {
+		name = profile
+	}
+	return Window{RunID: r.ID, Name: name, Profile: profile, Spec: &p}
 }
 
 // sortWindowsByCreation orders windows by their Runs' creation, after

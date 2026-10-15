@@ -20,7 +20,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("missing file: ok=%v err=%v", ok, err)
 	}
 	s := &Session{
-		Name: "work",
+		Name: "work", DefaultProfile: "app",
 		Windows: []Window{{RunID: "run_a", Name: "editor", Profile: "default"},
 			{RunID: "run_b", Name: "logs", Profile: "app", Spec: &config.Profile{Image: "alpine", Secrets: []string{"X"}}}},
 		Active: 1, Last: 0,
@@ -59,6 +59,67 @@ func run(id, session, profile, state string, at int, spare bool) *api.Run {
 	return r
 }
 
+// TestSessionDefaultProfile: a session's default profile is kept in its
+// file, and a file from before it has none.
+func TestSessionDefaultProfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, &Session{Name: "a", DefaultProfile: "dev"}); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok, err := Load(dir, "a"); err != nil || !ok || s.DefaultProfile != "dev" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if err := os.WriteFile(Path(dir, "old"), []byte(`{"name":"old","windows":[],"active":0,"last":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok, err := Load(dir, "old"); err != nil || !ok || s.DefaultProfile != "" {
+		t.Fatalf("%+v %v", s, err)
+	}
+}
+
+// TestRebuildSpecFromRun: a rebuilt window's spec is its Run's, over the
+// configured profile it names: every repository, in order, with lux's
+// defaults (name, path, ref HEAD) taken back out so its SpecKey is the
+// profile's; a window name new-window gave is kept.
+func TestRebuildSpecFromRun(t *testing.T) {
+	prof := config.Profile{Image: "alpine", GitCredential: "TOKEN", SecretsFrom: "/somewhere.env", Labels: map[string]string{"team": "x"},
+		Repositories: []config.Repository{{URL: "https://example.com/api.git", Branch: "main"}, {URL: "https://example.com/web.git", Name: "client", Path: "/workspace/web"}}}
+	sp, err := config.RunSpec(prof, config.Target{Session: "work", Profile: "dev"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As luxd stores it.
+	for i := range sp.Git.Repositories {
+		r := &sp.Git.Repositories[i]
+		if r.Ref == "" {
+			r.Ref = "HEAD"
+		}
+		if r.Path == "" {
+			r.Path = "/workspace/repos/" + r.Name
+		}
+	}
+	r := run("run_1", "work", "dev", "running", 1, false)
+	r.Spec = sp
+	r.Labels[config.LabelWindow] = "named"
+	s := Rebuild("work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
+	if len(s.Windows) != 1 || s.Windows[0].Name != "named" || s.Windows[0].Profile != "dev" || s.Windows[0].Spec == nil {
+		t.Fatalf("%+v", s.Windows)
+	}
+	got := *s.Windows[0].Spec
+	if !reflect.DeepEqual(got.Repositories, []config.Repository{{URL: "https://example.com/api.git", Ref: "main"},
+		{URL: "https://example.com/web.git", Name: "client", Path: "/workspace/web"}}) {
+		t.Fatalf("repositories %+v", got.Repositories)
+	}
+	if config.SpecKey(got) != config.SpecKey(prof) || got.SecretsFrom != prof.SecretsFrom {
+		t.Fatalf("rebuilt spec %+v\nprofile %+v", got, prof)
+	}
+	// A Run listed without its spec keeps the profile name only.
+	bare := run("run_2", "work", "dev", "running", 2, false)
+	if s := Rebuild("work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
+		t.Fatalf("%+v", s.Windows[0])
+	}
+}
+
 func TestRebuild(t *testing.T) {
 	runs := []*api.Run{
 		run("run_3", "work", "app", "running", 30, false),
@@ -68,7 +129,7 @@ func TestRebuild(t *testing.T) {
 		run("run_2", "work", "app", "stopped", 20, true), // an older spare: claimed
 		run("run_4", "work", "app", "running", 40, true), // the newest spare: waiting
 	}
-	s := Rebuild("work", runs)
+	s := Rebuild("work", runs, nil)
 	var ids []string
 	for _, w := range s.Windows {
 		ids = append(ids, w.RunID)
@@ -96,7 +157,7 @@ func TestRebuildBySpec(t *testing.T) {
 		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
 		run("run_e", "work", "legacy", "running", 50, true),
 	}
-	s := Rebuild("work", runs)
+	s := Rebuild("work", runs, nil)
 	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)

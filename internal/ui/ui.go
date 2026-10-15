@@ -104,7 +104,14 @@ func (dialogs) Help(m *mux.Mux) error {
 // muxHost is the multiplexer as the dialogs see it.
 type muxHost struct{ m *mux.Mux }
 
-func (h muxHost) Config() *config.Config                        { return h.m.Config() }
+// Config is the configuration, with the session's default profile as
+// default_profile: the dialog starts from it.
+func (h muxHost) Config() *config.Config {
+	c := *h.m.Config()
+	c.DefaultProfile = h.m.DefaultProfile()
+	return &c
+}
+
 func (h muxHost) Recent() (images, repos []string)              { return h.m.Recent() }
 func (h muxHost) Pools(ctx context.Context) ([]api.Pool, error) { return h.m.Lux().Pools(ctx) }
 func (h muxHost) Validate(ctx context.Context, name string, p config.Profile) (*api.SubmitAnswer, error) {
@@ -139,6 +146,17 @@ func profileField(c *config.Config, f func(config.Profile) string) []string {
 	for _, n := range c.ProfileNames() {
 		if s := f(c.Profiles[n]); s != "" {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// profileRepos are the configured profiles' repository URLs.
+func profileRepos(c *config.Config) []string {
+	var out []string
+	for _, n := range c.ProfileNames() {
+		for _, r := range c.Profiles[n].RepositoryList() {
+			out = append(out, r.URL)
 		}
 	}
 	return out

@@ -73,6 +73,9 @@ type Server struct {
 	InputHook func(runID string, data []byte)
 	// SubmitHook, if set, runs before each submit is answered.
 	SubmitHook func()
+	// Refuse, when set, is what every submit and dry run is refused
+	// with (422 invalid_spec).
+	Refuse string
 	// AttachHook, if set, runs before each attach to a running Run is
 	// accepted: a slow attach.
 	AttachHook func(runID string)
@@ -237,6 +240,13 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	}
 	if sp.Image.Ref == "" {
 		writeErr(w, 422, "invalid_spec", "image.ref is required")
+		return
+	}
+	s.mu.Lock()
+	refuse := s.Refuse
+	s.mu.Unlock()
+	if refuse != "" {
+		writeErr(w, 422, "invalid_spec", refuse)
 		return
 	}
 	if s.SubmitHook != nil && req.URL.Query().Get("validateOnly") != "true" {

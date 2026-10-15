@@ -342,7 +342,8 @@ func (m *Mux) command(c config.Command) {
 		m.finish("detached")
 	case config.OpNew:
 		cfg := m.config()
-		m.newWindowFrom(cfg.DefaultProfile, cfg.Profiles[cfg.DefaultProfile], "", false)
+		name := m.DefaultProfile()
+		m.newWindowFrom(name, cfg.Profiles[name], "", false)
 	case config.OpNewDialog:
 		m.openNewDialog()
 	case config.OpChoose:

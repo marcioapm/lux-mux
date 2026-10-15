@@ -42,13 +42,29 @@ const (
 	stCPUs
 	stMemory
 	stDisk
-	stRepo
-	stBranch
+	stAddRepo
 	stSpare
+	stDefault
 	stSaveAs
 	stCreate
 	stCancel
+	// stRepos is where the repository rows' stops start: row i's URL is
+	// repoURL(i), its branch repoURL(i)+1.
+	stRepos stop = 1000
+	// stRepo and stBranch are the first row's.
+	stRepo   = stRepos
+	stBranch = stRepos + 1
 )
+
+func repoURL(i int) stop { return stRepos + stop(2*i) }
+
+// repoRowOf is the repository row s is in, if it is in one.
+func repoRowOf(s stop) (int, bool) {
+	if s < stRepos {
+		return 0, false
+	}
+	return int(s-stRepos) / 2, true
+}
 
 // fieldStop is where each of DialogValues' field errors is shown.
 var fieldStop = map[string]stop{
@@ -94,14 +110,19 @@ type Dialog struct {
 
 	profile, pool, size *dropdown
 	in                  map[stop]*textinput.Model
-	spare               bool
-	pools               []api.Pool
-	poolsState          poolsState
+	// repos is how many repository rows there are (at least one).
+	repos        int
+	repoSugg     []string
+	spare        bool
+	useAsDefault bool
+	pools        []api.Pool
+	poolsState   poolsState
 
 	focus  stop
 	scroll int
 	// edited are the fields changed in this dialog: a profile change
-	// leaves them as they are.
+	// leaves them as they are. The repository rows are one field,
+	// stRepos.
 	edited map[stop]bool
 	errs   map[stop]string
 
@@ -135,31 +156,36 @@ func NewDialogModel(ctx context.Context, h DialogHost, rows, cols int) *Dialog {
 	d.pool = &dropdown{}
 	d.size = &dropdown{}
 	images, repos := h.Recent()
+	d.repoSugg = uniq(append(profileRepos(cfg), repos...))
 	sugg := map[stop][]string{
 		stImage: uniq(append(profileField(cfg, func(p config.Profile) string { return p.Image }), images...)),
-		stRepo:  uniq(append(profileField(cfg, func(p config.Profile) string { return p.Repository }), repos...)),
 	}
-	place := map[stop]string{stBranch: "remote HEAD", stSaveAs: "don't save", stRepo: "none", stPool: "tenant default",
+	place := map[stop]string{stSaveAs: "don't save", stPool: "tenant default",
 		stCPUs: "auto", stMemory: "auto", stDisk: "auto"}
-	for _, s := range []stop{stImage, stPool, stCPUs, stMemory, stDisk, stRepo, stBranch, stSaveAs} {
-		t := textinput.New()
-		t.Prompt = ""
-		t.Placeholder = place[s]
-		t.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
-		t.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("ctrl+n"))
-		t.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
-		t.Cursor.SetMode(cursor.CursorStatic)
-		if sg, ok := sugg[s]; ok {
-			t.ShowSuggestions = true
-			t.SetSuggestions(sg)
-		}
-		d.in[s] = &t
+	for _, s := range []stop{stImage, stPool, stCPUs, stMemory, stDisk, stSaveAs} {
+		d.in[s] = newInput(place[s], sugg[s])
 	}
 	d.fill(ValuesFrom(d.profile.value, cfg.Profiles[d.profile.value]), true)
 	d.refreshPoolOptions()
 	d.setFocus(stProfile)
 	d.resize(rows, cols)
 	return d
+}
+
+// newInput is a text field; suggestions, if any, complete it with Tab or →.
+func newInput(placeholder string, suggestions []string) *textinput.Model {
+	t := textinput.New()
+	t.Prompt = ""
+	t.Placeholder = placeholder
+	t.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
+	t.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("ctrl+n"))
+	t.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
+	t.Cursor.SetMode(cursor.CursorStatic)
+	if len(suggestions) > 0 {
+		t.ShowSuggestions = true
+		t.SetSuggestions(suggestions)
+	}
+	return &t
 }
 
 // fill sets the fields from v; with all false, only those not edited.
@@ -173,8 +199,9 @@ func (d *Dialog) fill(v DialogValues, all bool) {
 	set(stCPUs, v.CPUs)
 	set(stMemory, v.Memory)
 	set(stDisk, v.Disk)
-	set(stRepo, v.Repository)
-	set(stBranch, v.Branch)
+	if all || !d.edited[stRepos] {
+		d.setRepoRows(v.Repos)
+	}
 	if all || !d.edited[stPool] {
 		d.pool.value = v.Pool
 		setText(d.in[stPool], v.Pool)
@@ -271,7 +298,66 @@ func (d *Dialog) stops() []stop {
 	} else {
 		s = append(s, stCPUs, stMemory, stDisk)
 	}
-	return append(s, stRepo, stBranch, stSpare, stSaveAs, stCreate, stCancel)
+	s = append(s, d.repoStops()...)
+	return append(s, stAddRepo, stSpare, stDefault, stSaveAs, stCreate, stCancel)
+}
+
+// repoStops are the repository rows' stops: URL then branch, per row.
+func (d *Dialog) repoStops() []stop {
+	var s []stop
+	for i := range d.repos {
+		s = append(s, repoURL(i), repoURL(i)+1)
+	}
+	return s
+}
+
+// setRepoRows replaces the repository rows with rows (one empty row for
+// none).
+func (d *Dialog) setRepoRows(rows []RepoRow) {
+	if len(rows) == 0 {
+		rows = []RepoRow{{}}
+	}
+	for _, s := range d.repoStops() {
+		delete(d.in, s)
+	}
+	d.repos = len(rows)
+	vw := d.valueWidth()
+	for i, r := range rows {
+		u, b := newInput("none", d.repoSugg), newInput("remote HEAD", nil)
+		setText(u, r.URL)
+		setText(b, r.Branch)
+		u.Width, b.Width = max(1, vw-1), max(1, vw-1)
+		d.in[repoURL(i)], d.in[repoURL(i)+1] = u, b
+	}
+}
+
+// repoRows are the repository rows as typed.
+func (d *Dialog) repoRows() []RepoRow {
+	rows := make([]RepoRow, d.repos)
+	for i := range rows {
+		rows[i] = RepoRow{URL: d.in[repoURL(i)].Value(), Branch: d.in[repoURL(i)+1].Value()}
+	}
+	return rows
+}
+
+// addRepoRow appends an empty repository row and moves to its URL.
+func (d *Dialog) addRepoRow() {
+	d.setRepoRows(append(d.repoRows(), RepoRow{}))
+	d.changed(stRepos)
+	d.setFocus(repoURL(d.repos - 1))
+}
+
+// removeRepoRow removes the focused repository row (Ctrl-X); the last row
+// left is emptied instead, which means no repository.
+func (d *Dialog) removeRepoRow() {
+	i, ok := repoRowOf(d.focus)
+	if !ok {
+		return
+	}
+	rows := slices.Delete(d.repoRows(), i, i+1)
+	d.setRepoRows(rows)
+	d.changed(stRepos)
+	d.setFocus(repoURL(min(i, d.repos-1)))
 }
 
 func (d *Dialog) setFocus(s stop) {
@@ -312,6 +398,9 @@ func (d *Dialog) move(delta int) {
 
 // changed is called after the user changed the field at s.
 func (d *Dialog) changed(s stop) {
+	if _, ok := repoRowOf(s); ok {
+		s = stRepos
+	}
 	d.edited[s] = true
 	delete(d.errs, s)
 	if s == stCPUs || s == stMemory || s == stDisk {
@@ -367,6 +456,9 @@ func (d *Dialog) key(m tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	switch k {
+	case "ctrl+x":
+		d.removeRepoRow()
+		return nil
 	case "ctrl+c", "esc":
 		return d.cancel()
 	case "ctrl+s":
@@ -389,11 +481,14 @@ func (d *Dialog) key(m tea.KeyMsg) tea.Cmd {
 		}
 	case "enter":
 		switch d.focus {
+		case stAddRepo:
+			d.addRepoRow()
+			return nil
 		case stCreate:
 			return d.submit()
 		case stCancel:
 			return d.cancel()
-		case stSpare:
+		case stSpare, stDefault:
 			d.move(1)
 			return nil
 		}
@@ -405,6 +500,17 @@ func (d *Dialog) key(m tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	switch d.focus {
+	case stAddRepo:
+		if m.Type == tea.KeySpace {
+			d.addRepoRow()
+		}
+		return nil
+	case stDefault:
+		if m.Type == tea.KeySpace {
+			d.useAsDefault = !d.useAsDefault
+			d.changed(stDefault)
+		}
+		return nil
 	case stSpare:
 		if m.Type == tea.KeySpace {
 			d.spare = !d.spare
@@ -531,7 +637,7 @@ func (d *Dialog) submit() tea.Cmd {
 	d.validating = true
 	d.setStatus("checking with lux…", false)
 	gen := d.gen
-	req := &mux.NewWindowRequest{ProfileName: v.Base, Profile: prof, SaveAs: v.SaveAs}
+	req := &mux.NewWindowRequest{ProfileName: v.Base, Profile: prof, SaveAs: v.SaveAs, UseAsDefault: d.useAsDefault}
 	return tea.Batch(d.spin.Tick, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(d.ctx, validateFor)
 		defer cancel()
@@ -584,7 +690,7 @@ func (d *Dialog) values() DialogValues {
 	return DialogValues{
 		Base: d.profile.value, Image: d.in[stImage].Value(), Pool: d.poolValue(), Size: d.size.value,
 		CPUs: d.in[stCPUs].Value(), Memory: d.in[stMemory].Value(), Disk: d.in[stDisk].Value(),
-		Repository: d.in[stRepo].Value(), Branch: d.in[stBranch].Value(), WarmSpare: d.spare, SaveAs: d.in[stSaveAs].Value(),
+		Repos: d.repoRows(), WarmSpare: d.spare, SaveAs: d.in[stSaveAs].Value(),
 	}
 }
 
@@ -594,8 +700,24 @@ func (d *Dialog) secretNames() []string {
 }
 
 var stopLabel = map[stop]string{
-	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size", stRepo: "Repository",
-	stBranch: "Branch", stSpare: "Warm spare", stSaveAs: "Save as profile",
+	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size", stAddRepo: "",
+	stSpare: "Warm spare", stDefault: "Session default", stSaveAs: "Save as profile",
+}
+
+// label is s's label: a repository row's are numbered from the second.
+func label(s stop) string {
+	i, ok := repoRowOf(s)
+	if !ok {
+		return stopLabel[s]
+	}
+	l := "Repository"
+	if s != repoURL(i) {
+		l = "Branch"
+	}
+	if i > 0 && s == repoURL(i) {
+		l += fmt.Sprintf(" %d", i+1)
+	}
+	return l
 }
 
 // View draws the dialog.
@@ -669,7 +791,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	pad := strings.Repeat(" ", labelWidth)
 	row := func(s stop, focused bool, value string, extra ...string) {
 		start := len(out)
-		lab := stopLabel[s]
+		lab := label(s)
 		mark := "  "
 		switch {
 		case focused:
@@ -742,21 +864,35 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 			at[s] = at[stSize]
 		}
 	}
-	textRow(stRepo)
-	textRow(stBranch)
+	// Errors about the rows (FieldRepository, lux's refusal) show under
+	// the first, stRepo.
+	for _, s := range d.repoStops() {
+		textRow(s)
+	}
+	add := "+ add repository"
+	if d.focus == stAddRepo {
+		add = palette.focus.Render(add)
+	} else {
+		add = palette.accent.Render(add)
+	}
+	row(stAddRepo, d.focus == stAddRepo, add+palette.dim.Render("  ctrl-x on a row removes it"))
 	secrets := "none"
 	if n := d.secretNames(); len(n) > 0 {
 		secrets = strings.Join(n, ", ")
 	}
 	out = append(out, "  "+fitLine("Secrets", labelWidth-2)+palette.dim.Render(ansi.Truncate(secrets, vw, "…")))
-	box := "[ ]"
-	if d.spare {
-		box = "[x]"
+	checkbox := func(s stop, on bool, note string) {
+		box := "[ ]"
+		if on {
+			box = "[x]"
+		}
+		if d.focus == s {
+			box = palette.focus.Render(box)
+		}
+		row(s, d.focus == s, box+palette.dim.Render("  "+note))
 	}
-	if d.focus == stSpare {
-		box = palette.focus.Render(box)
-	}
-	row(stSpare, d.focus == stSpare, box+palette.dim.Render("  billed while it waits"))
+	checkbox(stSpare, d.spare, "billed while it waits")
+	checkbox(stDefault, d.useAsDefault, "use as this session's default profile (C-b c)")
 	textRow(stSaveAs)
 	out = append(out, "")
 	btn := func(s stop, name string) string {

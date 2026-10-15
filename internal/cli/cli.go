@@ -45,12 +45,22 @@ type Env struct {
 const usage = `luxmux: a terminal multiplexer whose windows are shells on lux Runs.
 
   luxmux                          attach the default session (main), creating it
-  luxmux new [-s NAME]            create a session and attach it
+  luxmux new [-s NAME] [-p PROFILE] [OVERRIDES]
+                                  create a session and attach it; -p is its default profile
+  luxmux new-window [-t NAME] [-n WINDOW] [-p PROFILE] [OVERRIDES]
+                                  add a window to a session, attached or not
   luxmux attach [-t NAME]         attach a session (rebuilt from lux if its file is gone)
   luxmux ls                       list sessions
   luxmux kill-session -t NAME [-y]  terminate a session's Runs and forget it
   luxmux spares [--rm]            list warm spares; --rm terminates them
   luxmux config init [--force]    write a commented example configuration
+
+OVERRIDES change the profile for this window:
+  --repo URL[#BRANCH]             a repository (repeatable; replaces the profile's)
+  --branch B | --ref R            the branch or ref of the only repository
+  --image I  --pool P  --size S | --cpus N --memory M --disk D
+  --secret NAME                   one more secret (repeatable)
+  --workdir W                     the shell's working directory
 
 Inside a session the prefix is C-b by default; C-b ? lists the keys.
 `
@@ -73,19 +83,24 @@ func run(env Env, args []string) error {
 		fmt.Fprint(env.Stdout, usage)
 		return nil
 	case "new", "new-session":
-		fs := flag.NewFlagSet("new", flag.ContinueOnError)
-		name := fs.String("s", "", "session name")
-		if err := fs.Parse(args[1:]); err != nil {
+		o, err := parseWindowFlags("new", args[1:], env.Stderr)
+		if err != nil {
 			return err
 		}
-		n := *name
+		n := o.Session
 		if n == "" {
 			var err error
 			if n, err = freeName(env); err != nil {
 				return err
 			}
 		}
-		return newSession(env, n)
+		return newSessionWith(env, n, o)
+	case "new-window":
+		o, err := parseWindowFlags("new-window", args[1:], env.Stderr)
+		if err != nil {
+			return err
+		}
+		return newWindow(env, o)
 	case "attach", "attach-session", "a":
 		fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 		name := fs.String("t", DefaultSession, "session name")
@@ -171,6 +186,10 @@ func freeName(env Env) (string, error) {
 }
 
 func newSession(env Env, name string) error {
+	return newSessionWith(env, name, windowFlags{})
+}
+
+func newSessionWith(env Env, name string, o windowFlags) error {
 	if err := checkName(name); err != nil {
 		return err
 	}
@@ -199,7 +218,20 @@ func newSession(env Env, name string) error {
 			return fmt.Errorf("session %s has Runs on lux: luxmux attach -t %s", name, name)
 		}
 	}
-	return runMux(env, c, &state.Session{Name: name})
+	cfg, err := loadConfig(env)
+	if err != nil {
+		return err
+	}
+	profile, p, err := windowProfile(cfg, "", o)
+	if err != nil {
+		return err
+	}
+	if err := dryRun(ctx, env, c, name, profile, p); err != nil {
+		return err
+	}
+	// Only -p pins the session's default; without it C-b c follows
+	// default_profile.
+	return runMuxFirst(env, c, &state.Session{Name: name, DefaultProfile: o.Profile}, &p)
 }
 
 // attach attaches name: its file, else rebuilt from its Runs' labels.
@@ -227,14 +259,19 @@ func attach(env Env, name string, create bool) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := loadConfig(env)
+	if err != nil {
+		return err
+	}
 	if ok {
 		known := map[string]string{}
 		for _, r := range runs {
 			known[r.ID] = r.State
 		}
+		recordExternal(sess, runs, cfg)
 		sess.Reconcile(known)
 	} else {
-		sess = state.Rebuild(name, runs)
+		sess = state.Rebuild(name, runs, cfg.Profiles)
 	}
 	if len(sess.Windows) == 0 && !create && !ok {
 		return fmt.Errorf("no session %s: luxmux new -s %s", name, name)
@@ -253,6 +290,12 @@ func lockSession(env Env, name string) (func(), error) {
 
 // runMux puts the terminal in raw mode and runs the session.
 func runMux(env Env, c *luxapi.Client, sess *state.Session) error {
+	return runMuxFirst(env, c, sess, nil)
+}
+
+// runMuxFirst is runMux whose first window, in a session that has none,
+// is made from first (nil: the session's default profile).
+func runMuxFirst(env Env, c *luxapi.Client, sess *state.Session, first *config.Profile) error {
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
@@ -285,7 +328,7 @@ func runMux(env Env, c *luxapi.Client, sess *state.Session) error {
 		os.Exit(2)
 	}
 	m, err := mux.New(mux.Options{Session: sess.Name, Config: cfg, Lux: c, StateDir: env.StateDir,
-		In: in, Out: env.Stdout, Size: size, UI: env.UI, Lookup: env.Lookup, Crash: crash}, sess)
+		In: in, Out: env.Stdout, Size: size, UI: env.UI, Lookup: env.Lookup, Crash: crash, First: first}, sess)
 	if err != nil {
 		return err
 	}

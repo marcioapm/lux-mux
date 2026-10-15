@@ -21,6 +21,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // The test binary is luxmux itself when LUXMUX_E2E_MAIN is set: the
@@ -286,6 +287,67 @@ func (p *proc) restored() {
 
 // TestEndToEnd drives luxmux in a pty against a fake luxd whose Runs'
 // terminals are local shells.
+func TestCLIProfilesAndExternalWindows(t *testing.T) {
+	lux, env := e2eEnv(t)
+	var cfgHome, stateHome string
+	for _, s := range env {
+		if strings.HasPrefix(s, "XDG_CONFIG_HOME=") {
+			cfgHome = strings.TrimPrefix(s, "XDG_CONFIG_HOME=")
+		}
+		if strings.HasPrefix(s, "XDG_STATE_HOME=") {
+			stateHome = strings.TrimPrefix(s, "XDG_STATE_HOME=")
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(cfgHome, "luxmux"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `default_profile="base"
+[profiles.base]
+image="alpine"
+[profiles.dev]
+image="debian"
+repositories=[{url="https://example.com/api.git",path="/workspace/api"},{url="https://example.com/web.git",path="/workspace/web"}]
+`
+	if err := os.WriteFile(filepath.Join(cfgHome, "luxmux", "config.toml"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, env, "new -s profiles -p dev")
+	p.wait("prompt", has("$"))
+	sp := lux.Submits()[0]
+	if sp.Labels[config.LabelProfile] != "dev" || sp.Image.Ref != "debian" || sp.Git == nil || len(sp.Git.Repositories) != 2 || sp.Git.Repositories[0].Path != "/workspace/api" || sp.Git.Repositories[1].Path != "/workspace/web" || sp.Workload.Workdir != "/workspace/api" {
+		t.Fatalf("submit %+v", sp)
+	}
+	p.typ("\x02c")
+	p.wait("default profile window", func(string) bool { return p.scr.title() == "luxmux:profiles [1] dev" })
+	p.wait("second prompt", has("$"))
+	if got := lux.Submits()[1]; got.Labels[config.LabelProfile] != "dev" || got.Image.Ref != "debian" {
+		t.Fatal(got)
+	}
+	before := p.scr.title()
+	q := startLuxmux(t, env, "new-window -t profiles -n external -p base")
+	q.exited()
+	p.wait("adoption notice", has("window 2 added: external"))
+	if p.scr.title() != before {
+		t.Fatalf("adoption switched: %q", p.scr.title())
+	}
+	p.typ("\x022")
+	p.wait("external window selectable", func(string) bool { return p.scr.title() == "luxmux:profiles [2] external" })
+	p.typ("\x02d")
+	p.exited()
+	q = startLuxmux(t, env, "new-window -t profiles -n offline")
+	q.exited()
+	sess, ok, err := state.Load(filepath.Join(stateHome, "luxmux"), "profiles")
+	if err != nil || !ok || len(sess.Windows) != 4 || sess.Windows[3].Name != "offline" || sess.DefaultProfile != "dev" {
+		t.Fatalf("state %+v %v", sess, err)
+	}
+	p = startLuxmux(t, env, "attach -t profiles")
+	p.wait("reattached", has("$"))
+	p.typ("\x023")
+	p.wait("offline window on attach", func(string) bool { return p.scr.title() == "luxmux:profiles [3] offline" })
+	p.typ("\x02d")
+	p.exited()
+}
+
 func TestEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")

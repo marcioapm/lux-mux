@@ -46,6 +46,9 @@ type Options struct {
 	// Size is the terminal's rows and columns.
 	Size func() (rows, cols int)
 	UI   UI
+	// First is the profile of the first window of a session that has
+	// none (nil: its default profile), already checked by lux's dry run.
+	First *config.Profile
 	// Lookup finds secret values in the environment (os.LookupEnv).
 	Lookup func(string) (string, bool)
 	// Backoff is the first retry delay (default 250ms); retries double up
@@ -66,6 +69,10 @@ type Options struct {
 	// lux or the network ends one to start again from Backoff (default
 	// 10s). Unexported: only tests change it.
 	streamStable time.Duration
+	// discoverEvery: how often the session's Runs are listed for windows
+	// new-window made while the feed was down (default 30s). Unexported:
+	// only tests change it.
+	discoverEvery time.Duration
 	// writeKeys writes one message of keystrokes to a stream (default
 	// wsjson.Write). Unexported: only tests change it.
 	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
@@ -98,7 +105,11 @@ type Mux struct {
 	sess      *state.Session
 	notice    string
 	noticeGen int
-	byRun     map[string]*Window
+	// considered are Run ids no window has that were looked at for
+	// adoption (considerRun), and those of windows closed or relaunched,
+	// which are never adopted back.
+	considered map[string]bool
+	byRun      map[string]*Window
 	// promptState is the open prompt.
 	promptState *prompt
 	// shown is the window whose screen the terminal shows, painted and
@@ -142,6 +153,9 @@ func (o *Options) defaults() {
 	if o.streamStable == 0 {
 		o.streamStable = 10 * time.Second
 	}
+	if o.discoverEvery == 0 {
+		o.discoverEvery = 30 * time.Second
+	}
 	if o.writeKeys == nil {
 		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
 			return wsjson.Write(ctx, c, d)
@@ -162,7 +176,7 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 		return nil, err
 	}
 	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: newTermWriter(opt.Out),
-		sess: sess, byRun: map[string]*Window{}, done: make(chan string, 1)}
+		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, done: make(chan string, 1)}
 	m.in = &input{r: opt.In, spawn: m.goSafe}
 	m.tw.caughtUp = m.terminalCaughtUp
 	m.goSafe(m.tw.run)
@@ -203,6 +217,18 @@ func (m *Mux) Session() string { return m.opt.Session }
 // Config is the configuration.
 func (m *Mux) Config() *config.Config { return m.config() }
 
+// DefaultProfile is the profile C-b c uses: the session's (luxmux new -p,
+// or the dialog's checkbox) while the configuration still has it, else the
+// configuration's default_profile.
+func (m *Mux) DefaultProfile() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.opt.Config.Profiles[m.sess.DefaultProfile]; ok {
+		return m.sess.DefaultProfile
+	}
+	return m.opt.Config.DefaultProfile
+}
+
 // Lux is the lux client.
 func (m *Mux) Lux() *luxapi.Client { return m.lux }
 
@@ -238,7 +264,12 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	if len(m.windows) == 0 {
 		cfg := m.opt.Config
 		m.mu.Unlock()
-		m.newWindowFrom(cfg.DefaultProfile, cfg.Profiles[cfg.DefaultProfile], "", false)
+		name := m.DefaultProfile()
+		p := cfg.Profiles[name]
+		if m.opt.First != nil {
+			p = *m.opt.First
+		}
+		m.newWindowFrom(name, p, "", false)
 		m.mu.Lock()
 	}
 	for _, w := range m.windows {
@@ -249,7 +280,8 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	m.repaintLocked()
 	m.saveLocked()
 	m.mu.Unlock()
-	m.wg.Add(2)
+	m.wg.Add(3)
+	m.goSafe(m.discoverWindows)
 	m.goSafe(m.followEvents)
 	m.goSafe(m.keepSpares)
 	m.goSafe(m.inputLoop)
@@ -647,12 +679,16 @@ func sizeWord(p config.Profile) string {
 }
 
 func repoWord(p config.Profile) string {
-	if p.Repository == "" {
+	repos := p.RepositoryList()
+	if len(repos) == 0 {
 		return "-"
 	}
-	r := config.RepoName(p.Repository)
-	if ref := p.GitRef(); ref != "" {
+	r := repos[0].RepoName()
+	if ref := repos[0].RepoRef(); ref != "" {
 		r += "@" + ref
+	}
+	if len(repos) > 1 {
+		r += fmt.Sprintf(" +%d", len(repos)-1)
 	}
 	return r
 }
@@ -764,6 +800,7 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)
+	m.considered[w.RunID] = true
 	m.dropClaimedLocked(w.RunID)
 	m.closeFeedLocked(w)
 	if len(m.windows) == 0 {

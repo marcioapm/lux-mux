@@ -6,6 +6,28 @@ import (
 
 // TestSpecKeyFields: SpecKey differs whenever the Run a profile makes
 // differs, and only then.
+func TestSpecKeyRepositories(t *testing.T) {
+	p := Profile{Image: "alpine", Repositories: []Repository{{URL: "https://example.com/api.git"}, {URL: "https://example.com/web.git"}}}
+	key := SpecKey(p)
+	for name, change := range map[string]func(*Profile){
+		"url":        func(p *Profile) { p.Repositories[1].URL = "https://example.com/other.git" },
+		"branch":     func(p *Profile) { p.Repositories[1].Branch = "dev" },
+		"path":       func(p *Profile) { p.Repositories[1].Path = "/workspace/web" },
+		"name":       func(p *Profile) { p.Repositories[1].Name = "client" },
+		"credential": func(p *Profile) { p.Repositories[1].GitCredential = "TOKEN" },
+		"order":      func(p *Profile) { p.Repositories[0], p.Repositories[1] = p.Repositories[1], p.Repositories[0] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := p
+			q.Repositories = append([]Repository{}, p.Repositories...)
+			change(&q)
+			if got := SpecKey(q); got == "" || got == key {
+				t.Fatalf("key %q", got)
+			}
+		})
+	}
+}
+
 func TestSpecKeyFields(t *testing.T) {
 	base := Profile{
 		Image: "alpine", Pool: "p1", CPUs: 2, Memory: "1GiB", Disk: "10GiB",

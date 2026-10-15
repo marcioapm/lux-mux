@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 
 	"github.com/marcioapm/lux/api"
@@ -18,6 +19,11 @@ const (
 	AppName      = "luxmux"
 	LabelSession = "luxmux-session"
 	LabelProfile = "luxmux-profile"
+	// LabelExternal marks a window's Run made by luxmux new-window: an
+	// attached luxmux adopts it as a window (the value is "true").
+	LabelExternal = "luxmux-external"
+	// LabelWindow is the name new-window -n gave the window.
+	LabelWindow = "luxmux-window"
 	// LabelSpare marks a warm spare (the value is "true"). Labels cannot
 	// change after submit, so a claimed spare keeps it: the session's state
 	// file records claims.
@@ -60,7 +66,7 @@ type Target struct {
 
 // RunSpec maps a profile to the spec of a window's Run: a generic tty
 // workload running the shell, with a state volume at /workspace, the
-// profile's repository cloned under it, and luxmux's labels. secrets holds
+// profile's repositories cloned under it, and luxmux's labels. secrets holds
 // the values (nil for a validateOnly check, which needs only the names).
 func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error) {
 	if err := p.Validate(); err != nil {
@@ -100,23 +106,27 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 			sp.Env[k] = v
 		}
 	}
+	creds := p.CredentialNames()
 	for _, n := range p.SecretNames() {
 		s := api.Secret{Name: n, Value: secrets[n]}
-		if n != p.GitCredential {
+		if !slices.Contains(creds, n) {
 			s.As = "env"
 		}
 		sp.Secrets = append(sp.Secrets, s)
 	}
-	if p.Repository != "" {
-		name := RepoName(p.Repository)
-		sp.Git = &api.Git{Repositories: []api.Repository{{
-			Name:       name,
-			URL:        p.Repository,
-			Ref:        p.GitRef(),
-			Credential: p.GitCredential,
-		}}}
+	// Each repository is cloned to its path, else lux's default
+	// (/workspace/repos/<name>); the shell starts in the first one.
+	for _, r := range p.RepositoryList() {
+		if sp.Git == nil {
+			sp.Git = &api.Git{}
+		}
+		sp.Git.Repositories = append(sp.Git.Repositories, api.Repository{
+			Name: r.RepoName(), URL: r.URL, Ref: r.RepoRef(), Path: r.Path, Credential: p.Credential(r)})
 		if sp.Workload.Workdir == "" {
-			sp.Workload.Workdir = Workspace + "/repos/" + name
+			sp.Workload.Workdir = r.Path
+			if r.Path == "" {
+				sp.Workload.Workdir = Workspace + "/repos/" + r.RepoName()
+			}
 		}
 	}
 	if sp.Workload.Workdir == "" {
