@@ -537,7 +537,7 @@ func (m *Mux) refreshLocked(w *Window) {
 		return
 	}
 	w.refreshing = true
-	m.refreshStream(c)
+	m.refreshStream(c, w.closingStream(c))
 }
 
 // closeGrace bounds refreshStream's handshake.
@@ -548,9 +548,15 @@ const closeGrace = time.Second
 // loses keystrokes it received but had not read yet. With the handshake
 // lux reads every message written before the close frame, and a key write
 // after it fails, so the keys stay queued for the next stream. A peer
-// that does not answer within closeGrace is cut off. It does not wait.
-func (m *Mux) refreshStream(c *websocket.Conn) {
-	t := time.AfterFunc(closeGrace, func() { c.CloseNow() })
+// that does not answer within closeGrace is cut off (cut closes the
+// network connection; the library's own wait for the answer is 5 s, and
+// its CloseNow only waits for Close). It does not wait.
+func (m *Mux) refreshStream(c *websocket.Conn, cut func()) {
+	t := time.AfterFunc(closeGrace, func() {
+		if cut != nil {
+			cut()
+		}
+	})
 	m.goSafe(func() {
 		_ = c.Close(websocket.StatusNormalClosure, "")
 		t.Stop()

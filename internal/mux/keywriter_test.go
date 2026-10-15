@@ -6,11 +6,209 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/marcioapm/lux/api"
+
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 )
+
+// TestLivePasteHasBackpressure: a 1 MiB paste into a live window whose
+// shell reads slowly arrives byte-exact, its queue stays bounded, and
+// C-b n typed after it switches before the paste has been delivered.
+func TestLivePasteHasBackpressure(t *testing.T) {
+	var keys inputLog
+	h := newHarnessOpts(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook }, func(o *Options) {
+		// A 2 MB/s uplink (localhost's socket buffers would otherwise
+		// take the whole paste at once).
+		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
+			time.Sleep(time.Duration(len(d.Data)) * time.Microsecond / 2)
+			return wsjson.Write(ctx, c, d)
+		}
+	})
+	a := h.live(0)
+	h.type_("\x02c")
+	h.live(1)
+	h.type_("\x020")
+	h.waitFor("window 0 shown", func() bool { return h.title() == "luxmux:s [0] default" })
+	want := bytes.Repeat([]byte("0123456789abcdef"), (1<<20)/16)
+	done := make(chan error, 1)
+	go func() {
+		for p := want; len(p) > 0; {
+			n := min(len(p), 4096)
+			if _, err := h.keys.Write(p[:n]); err != nil {
+				done <- err
+				return
+			}
+			p = p[n:]
+		}
+		_, err := h.keys.Write([]byte("\x02n"))
+		done <- err
+	}()
+	var maxQueued atomic.Int64
+	stop := make(chan struct{})
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			if q := int64(len(h.pending(0))); q > maxQueued.Load() {
+				maxQueued.Store(q)
+			}
+		}
+	}()
+	h.waitFor("prefix switched", func() bool { return h.title() == "luxmux:s [1] default" })
+	if got := len(keys.of(a)); got >= len(want) {
+		t.Fatalf("the prefix waited for the whole paste to be delivered (%d bytes)", got)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("paste delivered", func() bool { return len(keys.of(a)) >= len(want) })
+	close(stop)
+	<-sampled
+	if q := maxQueued.Load(); q > liveInLimit+4096 {
+		t.Fatalf("queue reached %d bytes", q)
+	}
+	if got := keys.of(a); !bytes.Equal(got, want) {
+		t.Fatalf("paste differed: got %d bytes", len(got))
+	}
+	h.detach()
+}
+
+// TestPasteRemainderKeptWhenStreamDrops: when lux ends the stream in the
+// middle of a paste, the last pendingInLimit bytes of what was queued
+// are kept, with the notice, and sent on the next stream.
+func TestPasteRemainderKeptWhenStreamDrops(t *testing.T) {
+	var keys inputLog
+	var gate attachGate
+	h := newHarnessOpts(t, cfgDefault, func(l *fakelux.Server) {
+		l.AttachHook = gate.hook
+		l.InputHook = keys.hook
+	}, func(o *Options) {
+		// A 1 MB/s uplink: most of the paste is still queued when the
+		// stream drops.
+		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
+			time.Sleep(time.Duration(len(d.Data)) * time.Microsecond)
+			return wsjson.Write(ctx, c, d)
+		}
+	})
+	a := h.live(0)
+	paste := bytes.Repeat([]byte("0123456789abcdef"), (1<<20)/16)
+	go func() {
+		for p := paste; len(p) > 0; p = p[min(len(p), 4096):] {
+			if _, err := h.keys.Write(p[:min(len(p), 4096)]); err != nil {
+				return
+			}
+		}
+	}()
+	h.waitFor("paste flowing", func() bool { return len(keys.of(a)) >= 128<<10 })
+	gate.hold(a)
+	t.Cleanup(func() { gate.release(a) })
+	h.lux.Blip(a)
+	h.waitFor("attach held", func() bool { return gate.held_() == 1 })
+	h.waitFor("drop notice", func() bool {
+		return bytes.Contains(h.term.rawBytes(), []byte("typed bytes dropped while it had no stream"))
+	})
+	h.waitFor("bounded remainder", func() bool { return len(h.pending(0)) == pendingInLimit })
+	tail := h.pending(0)
+	if !bytes.HasSuffix(paste, tail) {
+		t.Fatal("kept bytes are not the paste's tail")
+	}
+	gate.release(a)
+	h.waitFor("remainder sent", func() bool { return bytes.HasSuffix(keys.of(a), tail) })
+	h.detach()
+}
+
+// TestPasteSurvivesRefresh: a paste still queued when luxmux closes the
+// stream for a refresh reaches the shell whole, exactly once.
+func TestPasteSurvivesRefresh(t *testing.T) {
+	var keys inputLog
+	h := newHarnessOpts(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook }, func(o *Options) {
+		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
+			time.Sleep(time.Duration(len(d.Data)) * time.Microsecond)
+			return wsjson.Write(ctx, c, d)
+		}
+	})
+	a := h.live(0)
+	want := bytes.Repeat([]byte("0123456789abcdef"), (512<<10)/16)
+	go func() {
+		for p := want; len(p) > 0; p = p[min(len(p), 4096):] {
+			if _, err := h.keys.Write(p[:min(len(p), 4096)]); err != nil {
+				return
+			}
+		}
+	}()
+	h.waitFor("a large queue", func() bool { return len(h.pending(0)) > 2*pendingInLimit })
+	if !h.refreshNow() {
+		t.Fatal("no refresh")
+	}
+	h.waitFor("paste delivered", func() bool { return len(keys.of(a)) >= len(want) })
+	time.Sleep(20 * time.Millisecond)
+	if got := keys.of(a); !bytes.Equal(got, want) {
+		t.Fatalf("got %d bytes, want %d", len(got), len(want))
+	}
+	if bytes.Contains(h.term.rawBytes(), []byte("dropped")) {
+		t.Fatal("drop notice for a refresh")
+	}
+	h.detach()
+}
+
+// TestRefreshCutsOffUnansweredClose: a refresh of a stream whose peer
+// never answers the close frame ends it within closeGrace.
+func TestRefreshCutsOffUnansweredClose(t *testing.T) {
+	release := make(chan struct{})
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.NoCloseReply = release })
+	t.Cleanup(func() { close(release) })
+	// This peer does not register a terminal subscriber.
+	h.waitFor("stream ready", func() bool { return h.nwindows() == 1 && h.win(0).getConn() != nil && h.phase(0) == phaseLive })
+	c := h.win(0).getConn()
+	start := time.Now()
+	if !h.refreshNow() {
+		t.Fatal("refresh did not start")
+	}
+	if !fakelux.WaitFor(context.Background(), 1200*time.Millisecond, func() bool { return h.win(0).getConn() != c }) {
+		t.Fatal("unanswered close outlasted closeGrace")
+	}
+	t.Logf("stream ended in %v", time.Since(start))
+	h.m.finish("detached")
+	<-h.done
+}
+
+// TestKeysSurviveRejectedAttaches: keys typed while the host is down are
+// not written to attaches lux ends with an error before their first
+// frame; they all reach the first good stream, in order.
+func TestKeysSurviveRejectedAttaches(t *testing.T) {
+	var keys inputLog
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) {
+		l.InputHook = keys.hook
+		l.FailAttachDelay = 50 * time.Millisecond
+	})
+	a := h.live(0)
+	h.lux.FailAttaches(a, fakelux.ErrHostDisconnected)
+	h.lux.Blip(a)
+	n := len(attachesOf(h.lux, a))
+	h.waitFor("a rejected attach", func() bool { return len(attachesOf(h.lux, a)) > n })
+	h.type_("echo typed-while-down")
+	n = len(attachesOf(h.lux, a))
+	h.waitFor("three rejected attaches", func() bool { return len(attachesOf(h.lux, a)) >= n+3 })
+	h.lux.FailAttaches(a, "")
+	h.live(0)
+	h.type_("|after")
+	h.waitFor("all keys", func() bool { return len(keys.of(a)) >= len("echo typed-while-down|after") })
+	if got := string(keys.of(a)); got != "echo typed-while-down|after" {
+		t.Fatalf("received %q", got)
+	}
+	h.detach()
+}
 
 // refreshNow closes window 0's stream as a refresh does (luxmux closes it
 // so its supervisor attaches again with restore), ignoring the refresh

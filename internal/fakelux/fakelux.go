@@ -49,6 +49,12 @@ type Server struct {
 	// NoSnapshot makes a restore attach send no snapshot, only the
 	// Restored marker, as a host whose screen is over the snapshot limit.
 	NoSnapshot bool
+	// NoCloseReply holds upgraded streams without reading client frames,
+	// until the channel closes: a peer that cannot answer a close.
+	NoCloseReply <-chan struct{}
+	// FailAttachDelay is how long a failing attach (FailAttaches) waits
+	// after the upgrade before its error frame.
+	FailAttachDelay time.Duration
 	// Hold keeps new Runs queued (submitted) until Start is called.
 	Hold bool
 
@@ -502,7 +508,15 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	}
 	ws.SetReadLimit(4 << 20)
 	defer ws.CloseNow()
+	if s.NoCloseReply != nil {
+		_ = wsjson.Write(req.Context(), ws, api.StreamData{Restored: true})
+		<-s.NoCloseReply
+		return
+	}
 	if failing {
+		// FailAttachDelay: luxd's time between the upgrade and the error
+		// it ends the stream with; input sent meanwhile is never read.
+		time.Sleep(s.FailAttachDelay)
 		_ = wsjson.Write(req.Context(), ws, api.StreamData{Error: fail})
 		_ = ws.Close(websocket.StatusNormalClosure, "")
 		return

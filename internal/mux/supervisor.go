@@ -80,6 +80,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			return
 		}
 		if err != nil {
+			m.inputDropped(w, w.releaseHold())
 			if luxapi.IsStatus(err, http.StatusNotFound) {
 				m.markDead(w, "lux has no such Run")
 				m.waitClosed(ctx, w)
@@ -94,6 +95,9 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			exitedEpoch = 0
 		}
 		m.noteRun(w, run)
+		if run.State != "running" || exitedEpoch != 0 {
+			m.inputDropped(w, w.releaseHold())
+		}
 		switch run.State {
 		case "running":
 			if exitedEpoch != 0 {
@@ -105,6 +109,11 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			}
 			start := time.Now()
 			end, why := m.attachOnce(ctx, w, run)
+			refreshed := end == endDropped && m.takeRefreshing(w)
+			if !refreshed {
+				// Keys a refresh held wait for no stream now.
+				m.inputDropped(w, w.releaseHold())
+			}
 			switch end {
 			case endStopped:
 				return
@@ -115,7 +124,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				wait(bo)
 			case endDropped:
 				bo = m.opt.Backoff
-				if m.takeRefreshing(w) {
+				if refreshed {
 					// Closed by refreshLocked, which keeps to refreshEvery.
 					continue
 				}
@@ -312,7 +321,7 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	rows, cols := m.rows, m.cols
 	m.mu.Unlock()
 	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, err := m.lux.Attach(actx, run.ID, true, rows, cols)
+	conn, cut, err := m.lux.Attach(actx, run.ID, true, rows, cols)
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -323,10 +332,11 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	m.noteAttach(w)
 	conn.SetReadLimit(8 << 20)
 	defer func() {
-		w.endStream(conn)
+		dropped := w.endStream(conn)
 		conn.CloseNow()
+		m.inputDropped(w, dropped)
 	}()
-	discarded := w.setStream(conn, run.Epoch)
+	discarded := w.setStream(conn, cut, run.Epoch)
 	frames := make(chan api.StreamData, 64)
 	readErr := make(chan error, 1)
 	m.goSafe(func() {
@@ -369,6 +379,9 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	raw := m.beginAttach(w, run, restoring)
 	// After beginAttach's notice of the move, which this one replaces.
 	m.inputDiscarded(w, discarded)
+	// Keys go out only now: lux ends an attach it cannot stream with an
+	// error as its first frame, before it reads any input.
+	w.streamUp(conn)
 	if !restoring {
 		// Nothing to redraw from: ask the shell to redraw itself by
 		// changing the size and back.
@@ -509,20 +522,50 @@ func (m *Mux) restored(w *Window) {
 	}
 }
 
-// pendingInLimit bounds the keystrokes waiting in a window's input queue
-// (those of a write in flight aside); past it the oldest are dropped,
-// with a notice.
+// pendingInLimit bounds the keys a window keeps while it has no stream:
+// past it the oldest are dropped (those of a write in flight aside), with
+// a notice.
 const pendingInLimit = 64 << 10
+
+// liveInLimit bounds a window's input queue while its stream is up, or
+// held across a refresh: past it send waits for the key writer to drain
+// it, so nothing typed is dropped and the queue holds at most liveInLimit
+// plus one read. Keys typed after a paste (the prefix, a switch) act once
+// the paste's tail is queued, while it is still being delivered.
+const liveInLimit = 256 << 10
 
 // send queues keystrokes for w's key writer. It never writes to a stream:
 // the writer alone does, so keys reach the shell in the order typed.
 func (m *Mux) send(w *Window, b []byte) {
 	w.connMu.Lock()
+	for (w.connUp || w.inHold) && len(w.in) >= liveInLimit {
+		w.connMu.Unlock()
+		select {
+		case <-w.inRoom:
+		case <-w.inStop:
+			return
+		case <-m.ctx.Done():
+			return
+		}
+		w.connMu.Lock()
+	}
 	w.in = append(w.in, b...)
-	dropped := w.trimInputLocked()
+	dropped := 0
+	if !w.connUp && !w.inHold {
+		dropped = w.trimInputLocked()
+	}
 	w.connMu.Unlock()
 	w.wakeWriter()
 	m.inputDropped(w, dropped)
+}
+
+// roomLocked wakes a send waiting for w's queue to drain or its stream
+// to go.
+func (w *Window) roomLocked() {
+	select {
+	case w.inRoom <- struct{}{}:
+	default:
+	}
 }
 
 // trimInputLocked drops the oldest queued bytes past pendingInLimit,
@@ -536,6 +579,36 @@ func (w *Window) trimInputLocked() int {
 	return n
 }
 
+// lostStreamLocked handles w's stream c no longer taking keys. If luxmux
+// closed it for a refresh, the queue is held as if live until the next
+// stream is up (or fails: releaseHold); otherwise it is bounded to
+// pendingInLimit. It returns how many bytes that dropped.
+func (w *Window) lostStreamLocked(c *websocket.Conn) int {
+	if w.conn == c {
+		w.connUp = false
+	}
+	w.roomLocked()
+	if w.closing == c {
+		w.inHold = true
+		return 0
+	}
+	w.inHold = false
+	return w.trimInputLocked()
+}
+
+// releaseHold ends the hold a refresh put on w's queue: no stream came
+// back. It returns how many bytes bounding the queue dropped.
+func (w *Window) releaseHold() int {
+	w.connMu.Lock()
+	defer w.connMu.Unlock()
+	if !w.inHold {
+		return 0
+	}
+	w.inHold = false
+	w.roomLocked()
+	return w.trimInputLocked()
+}
+
 func (w *Window) wakeWriter() {
 	select {
 	case w.inWake <- struct{}{}:
@@ -545,9 +618,10 @@ func (w *Window) wakeWriter() {
 
 // keyWriter is w's only writer of keystrokes. It writes the head of the
 // queue (up to pendingInLimit bytes) as one message to the current stream
-// and removes those bytes only once the write succeeded. A failed write
-// leaves them at the head; it waits for the next stream (setStream) and
-// writes them again, whole, before anything typed after them.
+// once that delivered its first frame (streamUp), and removes those bytes
+// only once the write succeeded. A failed write leaves them at the head;
+// it waits for the next stream and writes them again, whole, before
+// anything typed after them.
 //
 // Delivery: the websocket library reports a write as failed when the
 // frame was not completely handed to the socket, so lux cannot have
@@ -561,12 +635,10 @@ func (w *Window) wakeWriter() {
 // resent (the protocol has no acknowledgement), and what follows them
 // still arrives in order.
 func (m *Mux) keyWriter(w *Window) {
-	// failed: the stream a write failed on; never written to again.
-	var failed *websocket.Conn
 	for {
 		w.connMu.Lock()
 		c := w.conn
-		if c == nil || c == failed || len(w.in) == 0 {
+		if c == nil || !w.connUp || len(w.in) == 0 {
 			w.connMu.Unlock()
 			select {
 			case <-w.inWake:
@@ -592,42 +664,72 @@ func (m *Mux) keyWriter(w *Window) {
 		dropped := 0
 		switch {
 		case err != nil:
-			failed = c
-			dropped = w.trimInputLocked()
+			// That stream is never written to again.
+			dropped = w.lostStreamLocked(c)
 		case gen == w.inGen:
 			w.in = w.in[len(b):]
 			if len(w.in) == 0 {
 				w.in = nil
 			}
 		}
+		w.roomLocked()
 		w.connMu.Unlock()
 		m.inputDropped(w, dropped)
 	}
 }
 
-// setStream makes c, a stream of the Run's epoch, the one w's key writer
-// writes to. Keys queued for another epoch's shell (the Run moved: a new
-// placement, a fresh shell) are discarded; it returns how many.
-func (w *Window) setStream(c *websocket.Conn, epoch int) (discarded int) {
+// setStream makes c, a stream of the Run's epoch just opened, w's stream;
+// cut ends it at once. Keys wait until streamUp. Keys queued for another
+// epoch's shell (the Run moved: a new placement, a fresh shell) are
+// discarded; it returns how many.
+func (w *Window) setStream(c *websocket.Conn, cut func(), epoch int) (discarded int) {
 	w.connMu.Lock()
+	defer w.connMu.Unlock()
 	if w.inEpoch != 0 && w.inEpoch != epoch {
 		discarded = w.discardInputLocked()
 	}
 	w.inEpoch = epoch
 	w.conn = c
-	w.connMu.Unlock()
-	w.wakeWriter()
+	w.connUp = false
+	w.connCut = cut
 	return discarded
 }
 
-// endStream forgets c as w's stream; keys typed from now on wait for the
-// next one.
-func (w *Window) endStream(c *websocket.Conn) {
+// streamUp lets w's key writer write to c: its first frame came.
+func (w *Window) streamUp(c *websocket.Conn) {
 	w.connMu.Lock()
 	if w.conn == c {
-		w.conn = nil
+		w.connUp = true
+		w.inHold = false
 	}
 	w.connMu.Unlock()
+	w.wakeWriter()
+}
+
+// endStream forgets c as w's stream; keys queued and typed from now on
+// wait for the next one (see lostStreamLocked). It returns how many
+// queued bytes that dropped.
+func (w *Window) endStream(c *websocket.Conn) (dropped int) {
+	w.connMu.Lock()
+	defer w.connMu.Unlock()
+	if w.conn != c {
+		return 0
+	}
+	dropped = w.lostStreamLocked(c)
+	w.conn, w.connCut = nil, nil
+	return dropped
+}
+
+// closingStream marks w's stream c as closed by luxmux for a refresh, and
+// returns what cuts it off.
+func (w *Window) closingStream(c *websocket.Conn) func() {
+	w.connMu.Lock()
+	defer w.connMu.Unlock()
+	if w.conn != c {
+		return nil
+	}
+	w.closing = c
+	return w.connCut
 }
 
 // discardInputLocked empties w's input queue; a write in flight then
@@ -638,6 +740,7 @@ func (w *Window) discardInputLocked() int {
 	w.in = nil
 	w.inFlight = 0
 	w.inGen++
+	w.roomLocked()
 	return n
 }
 

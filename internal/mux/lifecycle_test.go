@@ -151,9 +151,11 @@ func TestKeysKeptWhenFirstWriteFails(t *testing.T) {
 	h.m.mu.Lock()
 	ep := w.epoch
 	h.m.mu.Unlock()
-	if n := w.setStream(closedConn(t), ep); n != 0 {
+	c := closedConn(t)
+	if n := w.setStream(c, nil, ep); n != 0 {
 		t.Fatalf("%d bytes discarded on the same epoch", n)
 	}
+	w.streamUp(c)
 	h.type_(",k3")
 	h.waitFor("all kept", func() bool { return string(h.pending(0)) == "k1,k2,k3" })
 	gate.release(a)

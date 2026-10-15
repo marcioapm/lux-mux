@@ -110,7 +110,7 @@ func (c *countWriter) Write(p []byte) (int, error) {
 
 // plainAttach is the baseline: lux attach's loop, frames to the terminal.
 func plainAttach(ctx context.Context, cl *luxapi.Client, out io.Writer, keys io.Reader) error {
-	ws, err := cl.Attach(ctx, "run_1", true, 24, 80)
+	ws, _, err := cl.Attach(ctx, "run_1", true, 24, 80)
 	if err != nil {
 		return err
 	}

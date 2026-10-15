@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -108,8 +109,11 @@ func (c *Client) Pools(ctx context.Context) ([]api.Pool, error) {
 
 // Attach opens the Run's terminal; with restore, its output starts with a
 // snapshot of the terminal at rows×cols. luxd sends the host its
-// StreamOpen: the client sends none.
-func (c *Client) Attach(ctx context.Context, id string, restore bool, rows, cols int) (*websocket.Conn, error) {
+// StreamOpen: the client sends none. cut closes the network connection
+// under the stream at once: websocket.Conn's Close waits up to 5 s for a
+// peer that does not answer its close frame, and its CloseNow then only
+// waits for Close.
+func (c *Client) Attach(ctx context.Context, id string, restore bool, rows, cols int) (_ *websocket.Conn, cut func(), _ error) {
 	q := url.Values{}
 	if restore {
 		q.Set("restore", "true")
@@ -122,8 +126,31 @@ func (c *Client) Attach(ctx context.Context, id string, restore bool, rows, cols
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
-	return c.C.Dial(ctx, path)
+	var body io.Closer
+	hc := *c.C.HTTP
+	transport := hc.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	hc.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := transport.RoundTrip(req)
+		if err == nil && resp.StatusCode == http.StatusSwitchingProtocols {
+			body = resp.Body
+		}
+		return resp, err
+	})
+	cc := *c.C
+	cc.HTTP = &hc
+	ws, err := cc.Dial(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ws, func() { _ = body.Close() }, nil
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // Feed follows the tenant's event feed from after (0: from now), calling
 // fn for each event until ctx ends, the stream does, or fn fails.

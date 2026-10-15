@@ -224,15 +224,27 @@ type Window struct {
 	// them); inGen changes whenever the queue is discarded, so a write in
 	// flight then removes nothing. inEpoch is the Run epoch of the last
 	// stream made live, the shell every queued key was typed for (0:
-	// before any stream in this process).
+	// before any stream in this process). connUp: conn delivered its
+	// first frame and no write to it failed; keys are written only then.
+	// closing: the stream luxmux is closing for a refresh. inHold: that
+	// stream ended and the queue is held whole (bounded as if live) for
+	// the next one. connCut ends conn at once: its reader and its network
+	// connection.
 	connMu   sync.Mutex
 	conn     *websocket.Conn
+	connUp   bool
+	closing  *websocket.Conn
+	inHold   bool
+	connCut  func()
 	in       []byte
 	inFlight int
 	inGen    int
 	inEpoch  int
 	inWake   chan struct{}
 	inStop   chan struct{}
+	// inRoom wakes an input loop waiting in send for the queue to drain
+	// or the stream to change.
+	inRoom chan struct{}
 
 	// The emulator is written by its feeder goroutine and read by
 	// previews, both under emuMu.
@@ -255,6 +267,7 @@ func (m *Mux) newWindow(name, profile string, spec config.Profile) *Window {
 		q:      &feedQueue{wake: make(chan struct{}, 1)},
 		notify: make(chan struct{}, 1),
 		inWake: make(chan struct{}, 1),
+		inRoom: make(chan struct{}, 1),
 		inStop: make(chan struct{})}
 	m.goSafe(w.feeder)
 	m.goSafe(func() { m.keyWriter(w) })
