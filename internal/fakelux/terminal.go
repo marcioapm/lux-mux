@@ -14,14 +14,14 @@ import (
 // fed to a vterm emulator and copied to every attached stream, under one
 // lock so a restore snapshot and the live output after it never overlap.
 type Terminal struct {
-	mu     sync.Mutex
-	in     io.Writer
-	resize func(rows, cols int)
-	screen *vterm.Terminal
-	subs   map[chan []byte]bool
-	gone   chan struct{}
-	once   sync.Once
-	closer func()
+	mu      sync.Mutex
+	in      io.Writer
+	resize  func(rows, cols int)
+	screen  *vterm.Terminal
+	subs    map[chan []byte]bool
+	gone    chan struct{}
+	once    sync.Once
+	closer  func()
 	resizes [][2]int
 }
 

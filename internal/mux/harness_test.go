@@ -87,18 +87,18 @@ func (c *clientTerm) cursor() (int, int) {
 }
 
 type harness struct {
-	t    *testing.T
-	lux  *fakelux.Server
-	term *clientTerm
-	keys *io.PipeWriter
-	m    *Mux
-	done chan string
-	dir  string
+	t     *testing.T
+	lux   *fakelux.Server
+	term  *clientTerm
+	keys  *io.PipeWriter
+	m     *Mux
+	done  chan string
+	dir   string
 	env   map[string]string
 	envMu sync.Mutex
-	cfg  *config.Config
-	rows int
-	cols int
+	cfg   *config.Config
+	rows  int
+	cols  int
 }
 
 func newHarness(t *testing.T, cfgSrc string, setup func(*fakelux.Server)) *harness {
