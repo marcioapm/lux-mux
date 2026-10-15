@@ -133,3 +133,66 @@ func TestOverflowShownWindowKeepsRawOutput(t *testing.T) {
 	}
 	h.detach()
 }
+
+// TestPreviewHoldsNoGlobalLock: rendering a window's preview waits only on
+// that window's emulator: while it waits, keys and other output flow; a
+// second render within previewFor reuses the first.
+func TestPreviewHoldsNoGlobalLock(t *testing.T) {
+	var keys inputLog
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook })
+	a := h.live(0)
+	h.lux.Term(a).Output([]byte("preview-me"))
+	h.type_("\x02c")
+	b := h.live(1)
+	h.waitFor("emulator 0", func() bool { return strings.Contains(h.emuScreen(0), "preview-me") })
+	h.m.mu.Lock()
+	w := h.m.windows[0]
+	h.m.mu.Unlock()
+	w.emuMu.Lock()
+	got := make(chan []string, 1)
+	go func() { got <- h.m.Preview(0, 5, 40) }()
+	time.Sleep(20 * time.Millisecond)
+	h.type_("typed-during-preview")
+	h.waitFor("keys flow", func() bool { return bytes.Contains(keys.of(b), []byte("typed-during-preview")) })
+	h.lux.Term(b).Output([]byte("OUT-DURING-PREVIEW"))
+	h.waitScreen("output flows", h.contains("OUT-DURING-PREVIEW"))
+	w.emuMu.Unlock()
+	first := <-got
+	if !strings.Contains(strings.Join(first, "\n"), "preview-me") {
+		t.Fatalf("preview %q", first)
+	}
+	// Cached: rendered again with the emulator busy, at once.
+	w.emuMu.Lock()
+	again := make(chan []string, 1)
+	go func() { again <- h.m.Preview(0, 5, 40) }()
+	select {
+	case p := <-again:
+		w.emuMu.Unlock()
+		if strings.Join(p, "\n") != strings.Join(first, "\n") {
+			t.Fatalf("cached preview %q", p)
+		}
+	case <-time.After(time.Second):
+		w.emuMu.Unlock()
+		t.Fatal("the second render waited on the emulator")
+	}
+	h.detach()
+}
+
+// TestEmulatorKeepsNoHistory: a window's emulator holds its screen only
+// (luxmux reads nothing else), so lines scrolled off are not retained.
+func TestEmulatorKeepsNoHistory(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.lux.Term(a).Output(bytes.Repeat([]byte("scrolled line\r\n"), 200))
+	h.lux.Term(a).Output([]byte("LAST"))
+	h.waitFor("emulator", func() bool { return strings.Contains(h.emuScreen(0), "LAST") })
+	h.m.mu.Lock()
+	w := h.m.windows[0]
+	h.m.mu.Unlock()
+	w.withEmu(func(t2 *vtermT) {
+		if n := t2.HistoryLen(); n != 0 {
+			t.Errorf("history of %d lines", n)
+		}
+	})
+	h.detach()
+}
