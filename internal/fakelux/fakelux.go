@@ -89,10 +89,16 @@ type Server struct {
 	// TerminateHook, if set, runs before each terminate request is
 	// handled.
 	TerminateHook func(runID string)
+	// HoldTerminate leaves a running Run that is terminated stopping
+	// (reason terminate) until FinishTerminate, as luxd does until the
+	// Run's runner has stopped it.
+	HoldTerminate bool
 
 	// failing: every attach to the Run is ended with this error as its
 	// first frame (FailAttaches).
 	failing map[string]string
+	// failGets: GETs of these Runs are answered 503 (FailGets).
+	failGets map[string]bool
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
 }
@@ -126,6 +132,23 @@ func (s *Server) SetGetHook(f func(runID string)) {
 	s.mu.Lock()
 	s.GetHook = f
 	s.mu.Unlock()
+}
+
+// SetHold sets Hold while the server is serving.
+func (s *Server) SetHold(on bool) {
+	s.mu.Lock()
+	s.Hold = on
+	s.mu.Unlock()
+}
+
+// FailGets makes each GET of Run id fail with 503 (on) or not.
+func (s *Server) FailGets(id string, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failGets == nil {
+		s.failGets = map[string]bool{}
+	}
+	s.failGets[id] = on
 }
 
 type fakeRun struct {
@@ -410,6 +433,11 @@ func (s *Server) get(w http.ResponseWriter, req *http.Request) {
 	}
 	s.mu.Lock()
 	r := s.runs[req.PathValue("id")]
+	if s.failGets[req.PathValue("id")] {
+		s.mu.Unlock()
+		writeErr(w, 503, "unavailable", "luxd is unavailable")
+		return
+	}
 	var c api.Run
 	if r != nil {
 		c = *r.run
@@ -445,6 +473,18 @@ func (s *Server) terminate(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	s.terms = append(s.terms, id)
+	if s.HoldTerminate && r.run.State == "running" {
+		// luxd: a live placement is asked to stop; the Run stays
+		// stopping, reason terminate, until its runner stopped it.
+		r.run.State, r.run.StateReason, r.run.StageReason = "stopping", "terminate", "terminate"
+		r.run.Resumable = false
+		s.event(r.run, "state", map[string]any{"state": "stopping", "reason": "terminate"})
+		s.setStage(r, "stopping")
+		c := *r.run
+		s.mu.Unlock()
+		writeJSON(w, 202, c)
+		return
+	}
 	if r.run.State != "terminated" {
 		s.setState(r, "terminated", "terminate")
 		s.setStage(r, "terminated")

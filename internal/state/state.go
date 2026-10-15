@@ -175,6 +175,21 @@ func List(dir string) ([]string, error) {
 // but terminated.
 func Live(state string) bool { return state != "terminated" }
 
+// Terminating reports whether a Run is being terminated: luxd accepted
+// the terminate and keeps it stopping, reason terminate, until its runner
+// stopped it (lux internal/server/reaper.go, requestStop).
+func Terminating(r *api.Run) bool {
+	return r.StageReason == "terminate" || r.StateReason == "terminate"
+}
+
+// Adoptable reports whether r is a Run luxmux new-window made for
+// session that a window may still follow: labelled external, not a spare,
+// neither terminated nor being terminated.
+func Adoptable(r *api.Run, session string) bool {
+	return r.Labels[config.LabelSession] == session && r.Labels[config.LabelExternal] == "true" &&
+		r.Labels[config.LabelSpare] != "true" && Live(r.State) && !Terminating(r)
+}
+
 // Rebuild makes a session from the Runs lux lists for it (those labelled
 // with the session), for when its file is gone: its non-terminated Runs
 // that are not a waiting warm spare, oldest first. Names are lost: each

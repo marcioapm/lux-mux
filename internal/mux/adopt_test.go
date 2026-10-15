@@ -2,6 +2,7 @@ package mux
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -220,18 +221,201 @@ func TestAdoptOnlyNewWindowRuns(t *testing.T) {
 }
 
 // TestAdoptAtStart: a Run new-window made while the feed was not followed
-// (before this process attached) is found by the listing at start.
+// (before this process attached) is found by the listing at start, from
+// what the listing says: its adoption does not wait for a read of it.
 func TestAdoptAtStart(t *testing.T) {
 	h := newHarness(t, cfgTwo, nil)
 	h.live(0)
 	h.detach()
 	id := submitExternal(t, h, "base", "while-detached")
+	held := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(held) }) }
+	t.Cleanup(release)
+	h.lux.SetGetHook(func(got string) {
+		if got == id {
+			<-held
+		}
+	})
 	sess, _, _ := state.Load(h.dir, "s")
 	h.start(sess)
 	h.waitFor("adopted at start", func() bool { return h.nwindows() == 2 && h.window(1) == id })
+	release()
 	if names := h.windowNames(); names[1] != "while-detached" {
 		t.Fatalf("names %v", names)
 	}
+	h.detach()
+}
+
+// gets counts the GETs of Run id received.
+func (h *harness) gets(id string) int {
+	n := 0
+	for _, r := range h.lux.Requests() {
+		if r == "GET /v1/runs/"+id {
+			n++
+		}
+	}
+	return n
+}
+
+// TestListingAdoptsOnlyLiveExternal: of the Runs the session's listing
+// returns, only live ones new-window made are adopted; terminated ones,
+// ones being terminated, ordinary windows and spares are not, and none of
+// them is read on its own, at start or at any later listing.
+func TestListingAdoptsOnlyLiveExternal(t *testing.T) {
+	h := newHarnessFull(t, cfgTwo, nil, func(l *fakelux.Server) { l.HoldTerminate = true },
+		func(o *Options) { o.discoverEvery = 20 * time.Millisecond })
+	h.live(0)
+	h.detach()
+	c, _ := luxapi.New(h.lux.Config())
+	var skip []string
+	for range 3 {
+		id := submitExternal(t, h, "base", "ended")
+		h.lux.End(id, "terminated", "terminated")
+		skip = append(skip, id)
+	}
+	stopping := submitExternal(t, h, "base", "stopping")
+	h.waitFor("running", func() bool { return h.lux.Run(stopping).State == "running" })
+	if err := c.Terminate(context.Background(), stopping); err != nil {
+		t.Fatal(err)
+	}
+	skip = append(skip, stopping)
+	plain, _ := config.RunSpec(h.cfg.Profiles["base"], config.Target{Session: "s", Profile: "base"}, nil)
+	r, _ := c.Submit(context.Background(), plain)
+	skip = append(skip, r.ID)
+	spare, _ := config.RunSpec(h.cfg.Profiles["base"], config.Target{Session: "s", Profile: "base", Spare: true}, nil)
+	spare.Labels[config.LabelExternal] = "true"
+	r, _ = c.Submit(context.Background(), spare)
+	skip = append(skip, r.ID)
+	live := submitExternal(t, h, "base", "live")
+	sess, _, _ := state.Load(h.dir, "s")
+	h.start(sess)
+	h.waitFor("live adopted", func() bool { return h.nwindows() == 2 && h.window(1) == live })
+	lists := func() int {
+		n := 0
+		for _, r := range h.lux.Requests() {
+			if strings.HasPrefix(r, "GET /v1/runs") && !strings.HasPrefix(r, "GET /v1/runs/") {
+				n++
+			}
+		}
+		return n
+	}
+	at := lists()
+	h.waitFor("more listings", func() bool { return lists() >= at+5 })
+	if names := h.windowNames(); len(names) != 2 {
+		t.Fatalf("windows %v", names)
+	}
+	for _, id := range skip {
+		if n := h.gets(id); n != 0 {
+			t.Errorf("Run %s (%s) read %d times", id, h.lux.Run(id).State, n)
+		}
+	}
+	h.detach()
+}
+
+// TestFeedTerminatedExternalNotAdopted: a Run new-window made whose read
+// after its submitted event finds it terminated is not adopted.
+func TestFeedTerminatedExternalNotAdopted(t *testing.T) {
+	h := newHarness(t, cfgTwo, nil)
+	h.live(0)
+	var victim atomic.Value
+	victim.Store("")
+	ended := make(chan struct{}, 1)
+	h.lux.SetGetHook(func(id string) {
+		if id != "" && id == victim.Load().(string) {
+			h.lux.End(id, "terminated", "terminated")
+			ended <- struct{}{}
+		}
+	})
+	h.lux.SetHold(true)
+	c, _ := luxapi.New(h.lux.Config())
+	sp, _ := config.RunSpec(h.cfg.Profiles["base"], config.Target{Session: "s", Profile: "base"}, nil)
+	sp.Labels[config.LabelExternal] = "true"
+	// The id is known before the submit is answered: fakelux numbers Runs.
+	victim.Store(fmt.Sprintf("run_%04d", len(h.lux.RunIDs())+1))
+	r, err := c.Submit(context.Background(), sp)
+	if err != nil || r.ID != victim.Load().(string) {
+		t.Fatalf("%v %v", r, err)
+	}
+	select {
+	case <-ended:
+	case <-timeout():
+		t.Fatal("the feed did not lead to a read")
+	}
+	h.lux.SetHold(false)
+	h.lux.SetGetHook(nil)
+	marker := submitExternal(t, h, "base", "marker")
+	h.waitFor("marker adopted", func() bool { return h.nwindows() == 2 && h.window(1) == marker })
+	if names := h.windowNames(); len(names) != 2 {
+		t.Fatalf("windows %v", names)
+	}
+	h.detach()
+}
+
+// TestFailedReadLeftToListing: a Run whose read after its submitted event
+// fails is adopted by a later listing.
+func TestFailedReadLeftToListing(t *testing.T) {
+	h := newHarnessOpts(t, cfgTwo, nil, func(o *Options) { o.discoverEvery = 300 * time.Millisecond })
+	h.live(0)
+	lists := func() int {
+		n := 0
+		for _, r := range h.lux.Requests() {
+			if strings.HasPrefix(r, "GET /v1/runs") && !strings.HasPrefix(r, "GET /v1/runs/") {
+				n++
+			}
+		}
+		return n
+	}
+	// Submitted just after a listing: the feed's read comes long before
+	// the next one.
+	n := lists()
+	h.waitFor("a listing", func() bool { return lists() > n })
+	id := fmt.Sprintf("run_%04d", len(h.lux.RunIDs())+1)
+	h.lux.FailGets(id, true)
+	if got := submitExternal(t, h, "base", "late"); got != id {
+		t.Fatalf("submitted %s, want %s", got, id)
+	}
+	h.waitFor("the failed read", func() bool { return h.gets(id) > 0 })
+	h.lux.FailGets(id, false)
+	h.waitFor("adopted by a listing", func() bool { return h.nwindows() == 2 && h.window(1) == id })
+	h.detach()
+}
+
+// TestConsideredPruned: Run ids read after their submitted event that
+// were not adoptable (another session's) are forgotten at the next
+// listing, which does not list them.
+func TestConsideredPruned(t *testing.T) {
+	h := newHarnessOpts(t, cfgTwo, nil, func(o *Options) { o.discoverEvery = 20 * time.Millisecond })
+	h.live(0)
+	c, _ := luxapi.New(h.lux.Config())
+	var others []string
+	for range 5 {
+		sp, _ := config.RunSpec(h.cfg.Profiles["base"], config.Target{Session: "other", Profile: "base"}, nil)
+		sp.Labels[config.LabelExternal] = "true"
+		r, err := c.Submit(context.Background(), sp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		others = append(others, r.ID)
+	}
+	h.waitFor("each read once", func() bool {
+		for _, id := range others {
+			if h.gets(id) != 1 {
+				return false
+			}
+		}
+		return true
+	})
+	h.waitFor("forgotten", func() bool {
+		h.m.mu.Lock()
+		defer h.m.mu.Unlock()
+		for _, id := range others {
+			if h.m.considered[id] {
+				return false
+			}
+		}
+		return true
+	})
 	h.detach()
 }
 
