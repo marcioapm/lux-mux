@@ -174,6 +174,11 @@ func newSession(env Env, name string) error {
 	if err := checkName(name); err != nil {
 		return err
 	}
+	unlock, err := lockSession(env, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, ok, err := state.Load(env.StateDir, name); err != nil {
 		return err
 	} else if ok {
@@ -203,6 +208,11 @@ func attach(env Env, name string, create bool) error {
 	if err := checkName(name); err != nil {
 		return err
 	}
+	unlock, err := lockSession(env, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := client(env)
 	if err != nil {
 		return err
@@ -232,6 +242,15 @@ func attach(env Env, name string, create bool) error {
 	return runMux(env, c, sess)
 }
 
+// lockSession makes this process the session's only one until unlock.
+func lockSession(env Env, name string) (func(), error) {
+	unlock, err := state.Lock(env.StateDir, name)
+	if errors.Is(err, state.ErrLocked) {
+		return nil, fmt.Errorf("session %s: %w; detach it there first", name, err)
+	}
+	return unlock, err
+}
+
 // runMux puts the terminal in raw mode and runs the session.
 func runMux(env Env, c *luxapi.Client, sess *state.Session) error {
 	cfg, err := loadConfig(env)
@@ -258,19 +277,30 @@ func runMux(env Env, c *luxapi.Client, sess *state.Session) error {
 		return err
 	}
 	defer term.Restore(int(in.Fd()), old)
+	// After a panic the terminal is given back (raw mode off here, the
+	// screen and modes by mux) before the panic is printed.
+	crash := func(msg string) {
+		_ = term.Restore(int(in.Fd()), old)
+		fmt.Fprint(env.Stderr, msg)
+		os.Exit(2)
+	}
 	m, err := mux.New(mux.Options{Session: sess.Name, Config: cfg, Lux: c, StateDir: env.StateDir,
-		In: in, Out: env.Stdout, Size: size, UI: env.UI, Lookup: env.Lookup}, sess)
+		In: in, Out: env.Stdout, Size: size, UI: env.UI, Lookup: env.Lookup, Crash: crash}, sess)
 	if err != nil {
 		return err
 	}
+	defer m.RecoverPanic()
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
 	go func() {
+		defer m.RecoverPanic()
 		for range winch {
 			m.Resize(size())
 		}
 	}()
+	// SIGTERM and SIGHUP (the terminal closed) end the session as a
+	// detach does: the terminal is given back, the Runs keep running.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	reason, err := m.Run(ctx)

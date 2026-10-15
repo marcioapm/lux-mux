@@ -422,3 +422,33 @@ func TestResumeResolvesOnlyTheRunsSecrets(t *testing.T) {
 	h.waitFor("running", func() bool { return h.lux.Run(id).State == "running" })
 	h.detach()
 }
+
+// TestPanicRestoresTerminal: a panic in a supervisor goroutine gives the
+// terminal back (main screen, the program's modes off, the cursor shown
+// in its default shape) before the panic is reported.
+func TestPanicRestoresTerminal(t *testing.T) {
+	h := newHarnessEnv(t, "[profiles.default]\nimage = \"alpine\"\nsecrets = [\"API_TOKEN\"]\n", map[string]string{"API_TOKEN": "v1"}, nil)
+	id := h.live(0)
+	h.lux.Term(id).Output([]byte("\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?25l\x1b=\x1b[5 q"))
+	h.waitFor("program's modes on", func() bool { return h.term.altScreen() && h.term.mode(1000) && h.term.mode(2004) })
+	h.envMu.Lock()
+	h.panicOn = "API_TOKEN"
+	h.envMu.Unlock()
+	h.lux.LoseSecrets(id)
+	var msg string
+	select {
+	case msg = <-h.crashed:
+	case <-timeout():
+		t.Fatal("no crash reported")
+	}
+	if !strings.Contains(msg, "panic: injected: lookup API_TOKEN") || !strings.Contains(msg, "resumeRun") {
+		t.Fatalf("crash message %q", msg)
+	}
+	if h.term.altScreen() || h.term.mode(1000) || h.term.mode(2004) || !h.term.mode(25) {
+		t.Fatalf("terminal not restored: alt %v mouse %v paste %v cursor %v",
+			h.term.altScreen(), h.term.mode(1000), h.term.mode(2004), h.term.mode(25))
+	}
+	if kp, sh := h.term.keypadShape(); kp || sh != 0 {
+		t.Fatalf("keypad %v shape %d", kp, sh)
+	}
+}

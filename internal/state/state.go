@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcioapm/lux/api"
@@ -100,6 +102,42 @@ func Save(dir string, s *Session) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), Path(dir, s.Name))
+}
+
+// ErrLocked is Lock's error when another process has the session.
+var ErrLocked = errors.New("session is attached elsewhere")
+
+// Lock takes the session's advisory lock, <dir>/<session>.lock, held
+// until unlock is called or the process exits: one luxmux process per
+// session. The file names the process that holds it.
+func Lock(dir, session string) (unlock func(), err error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, session+".lock")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		b := make([]byte, 32)
+		n, _ := f.ReadAt(b, 0)
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			if pid := strings.TrimSpace(string(b[:n])); pid != "" {
+				return nil, fmt.Errorf("%w (pid %s)", ErrLocked, pid)
+			}
+			return nil, ErrLocked
+		}
+		return nil, err
+	}
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	return func() {
+		_ = f.Truncate(0)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // Remove deletes a session's file; a missing one is fine.

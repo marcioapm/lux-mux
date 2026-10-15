@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -126,9 +127,13 @@ type harness struct {
 	dir   string
 	env   map[string]string
 	envMu sync.Mutex
-	cfg   *config.Config
-	rows  int
-	cols  int
+	// panicOn makes Lookup panic for that name; crashed gets what
+	// Options.Crash was given.
+	panicOn string
+	crashed chan string
+	cfg     *config.Config
+	rows    int
+	cols    int
 }
 
 func newHarness(t *testing.T, cfgSrc string, setup func(*fakelux.Server)) *harness {
@@ -138,7 +143,7 @@ func newHarness(t *testing.T, cfgSrc string, setup func(*fakelux.Server)) *harne
 // newHarnessEnv is newHarness with variables Lookup finds from the start.
 func newHarnessEnv(t *testing.T, cfgSrc string, env map[string]string, setup func(*fakelux.Server)) *harness {
 	t.Helper()
-	h := &harness{t: t, lux: fakelux.New(), rows: 24, cols: 80, dir: t.TempDir(), env: map[string]string{}}
+	h := &harness{t: t, lux: fakelux.New(), rows: 24, cols: 80, dir: t.TempDir(), env: map[string]string{}, crashed: make(chan string, 1)}
 	for k, v := range env {
 		h.env[k] = v
 	}
@@ -178,8 +183,16 @@ func (h *harness) start(sess *state.Session) {
 		Lookup: func(k string) (string, bool) {
 			h.envMu.Lock()
 			defer h.envMu.Unlock()
+			if k == h.panicOn {
+				panic("injected: lookup " + k)
+			}
 			v, ok := h.env[k]
 			return v, ok
+		},
+		Crash: func(msg string) {
+			h.crashed <- msg
+			// As os.Exit: the goroutine that crashed never returns.
+			runtime.Goexit()
 		},
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond,
 		NoticeFor: 50 * time.Millisecond, RestoreWait: 300 * time.Millisecond, Poll: 50 * time.Millisecond,

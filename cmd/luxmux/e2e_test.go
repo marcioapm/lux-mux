@@ -5,16 +5,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/creack/pty"
 	"github.com/marcioapm/lux/api"
 	"github.com/marcioapm/lux/vterm"
+	"golang.org/x/sys/unix"
 
+	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
 // The test binary is luxmux itself when LUXMUX_E2E_MAIN is set: the
@@ -22,6 +27,15 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv("LUXMUX_E2E_MAIN") == "1" {
 		os.Args = append([]string{"luxmux"}, strings.Fields(os.Getenv("LUXMUX_E2E_ARGS"))...)
+		if name := os.Getenv("LUXMUX_E2E_PANIC_ON"); name != "" {
+			// A fault inside luxmux: looking this secret up panics.
+			lookup = func(k string) (string, bool) {
+				if k == name {
+					panic("injected: lookup " + k)
+				}
+				return os.LookupEnv(k)
+			}
+		}
 		main()
 		return
 	}
@@ -62,6 +76,45 @@ type proc struct {
 	f    *os.File
 	scr  *screenTerm
 	done chan struct{}
+	// raw is everything luxmux wrote.
+	rawMu sync.Mutex
+	raw   []byte
+}
+
+// queries are what luxmux's UI library asks the terminal at start, and a
+// terminal's answers.
+var queries = []struct{ q, answer string }{
+	{"\x1b]11;?", "\x1b]11;rgb:0000/0000/0000\x07"},
+	{"\x1b[6n", "\x1b[1;1R"},
+}
+
+// answerer answers the queries, wherever the reads split them.
+type answerer struct{ tail []byte }
+
+// feed takes one read's bytes and returns the answers to the queries
+// that end in it.
+func (a *answerer) feed(b []byte) []string {
+	buf := append(a.tail, b...)
+	var out []string
+	for _, q := range queries {
+		// Only queries that end in this read; earlier ones were answered.
+		for i := strings.Index(string(buf), q.q); i >= 0; {
+			if i+len(q.q) > len(a.tail) {
+				out = append(out, q.answer)
+			}
+			j := strings.Index(string(buf[i+1:]), q.q)
+			if j < 0 {
+				break
+			}
+			i += 1 + j
+		}
+	}
+	keep := 16
+	if len(buf) < keep {
+		keep = len(buf)
+	}
+	a.tail = append([]byte{}, buf[len(buf)-keep:]...)
+	return out
 }
 
 func startLuxmux(t *testing.T, env []string, args string) *proc {
@@ -72,21 +125,20 @@ func startLuxmux(t *testing.T, env []string, args string) *proc {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &proc{t: t, cmd: cmd, f: f, scr: &screenTerm{vt: vterm.New(24, 80, 1000)}, done: make(chan struct{})}
+	p := &proc{t: t, cmd: cmd, f: f, scr: &screenTerm{vt: vterm.New(24, 80, 0)}, done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
+		var ans answerer
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := f.Read(buf)
 			if n > 0 {
-				// Answer the colour and cursor-position queries luxmux's
-				// UI library sends at start, as a terminal does.
-				if strings.Contains(string(buf[:n]), "\x1b]11;?") {
-					_, _ = f.Write([]byte("\x1b]11;rgb:0000/0000/0000\x07"))
+				for _, a := range ans.feed(buf[:n]) {
+					_, _ = f.Write([]byte(a))
 				}
-				if strings.Contains(string(buf[:n]), "\x1b[6n") {
-					_, _ = f.Write([]byte("\x1b[1;1R"))
-				}
+				p.rawMu.Lock()
+				p.raw = append(p.raw, buf[:n]...)
+				p.rawMu.Unlock()
 				p.scr.mu.Lock()
 				p.scr.vt.Write(buf[:n])
 				p.scr.mu.Unlock()
@@ -101,6 +153,38 @@ func startLuxmux(t *testing.T, env []string, args string) *proc {
 		_ = f.Close()
 	})
 	return p
+}
+
+func (p *proc) rawLen() int {
+	p.rawMu.Lock()
+	defer p.rawMu.Unlock()
+	return len(p.raw)
+}
+
+func (p *proc) rawSince(n int) string {
+	p.rawMu.Lock()
+	defer p.rawMu.Unlock()
+	return string(p.raw[n:])
+}
+
+// TestAnswererSplitQuery: a query split over two reads is answered once.
+func TestAnswererSplitQuery(t *testing.T) {
+	var a answerer
+	if got := a.feed([]byte("x\x1b]1")); len(got) != 0 {
+		t.Fatalf("answered early: %q", got)
+	}
+	if got := a.feed([]byte("1;?\x1b[")); len(got) != 1 || got[0] != queries[0].answer {
+		t.Fatalf("split OSC 11: %q", got)
+	}
+	if got := a.feed([]byte("6n")); len(got) != 1 || got[0] != queries[1].answer {
+		t.Fatalf("split CSI 6n: %q", got)
+	}
+	if got := a.feed([]byte("more")); len(got) != 0 {
+		t.Fatalf("answered twice: %q", got)
+	}
+	if got := a.feed([]byte("\x1b]11;?\x1b[6n")); len(got) != 2 {
+		t.Fatalf("whole: %q", got)
+	}
 }
 
 func (p *proc) typ(s string) {
@@ -124,15 +208,42 @@ func has(s string) func(string) bool {
 // exited waits for luxmux to exit and checks its status.
 func (p *proc) exited() {
 	p.t.Helper()
+	if code := p.exitCode(); code != 0 {
+		p.t.Fatalf("luxmux exited with %d; screen:\n%s", code, p.scr.text())
+	}
+}
+
+// exitCode waits for luxmux to exit and returns its status.
+func (p *proc) exitCode() int {
+	p.t.Helper()
 	errc := make(chan error, 1)
 	go func() { errc <- p.cmd.Wait() }()
 	select {
-	case err := <-errc:
-		if err != nil {
-			p.t.Fatalf("luxmux exited with %v; screen:\n%s", err, p.scr.text())
-		}
+	case <-errc:
+		<-p.done
+		return p.cmd.ProcessState.ExitCode()
 	case <-time.After(15 * time.Second):
 		p.t.Fatalf("luxmux did not exit; screen:\n%s", p.scr.text())
+	}
+	return -1
+}
+
+// restored checks the terminal is as luxmux found it: main screen, the
+// modes a program set off, the cursor shown, and the pty out of raw mode.
+func (p *proc) restored() {
+	p.t.Helper()
+	p.scr.mu.Lock()
+	alt, mouse, paste, cursor := p.scr.vt.AltScreen(), p.scr.vt.Mode(1000), p.scr.vt.Mode(2004), p.scr.vt.Mode(25)
+	p.scr.mu.Unlock()
+	if alt || mouse || paste || !cursor {
+		p.t.Fatalf("terminal not restored: alt %v mouse %v paste %v cursor %v", alt, mouse, paste, cursor)
+	}
+	tio, err := unix.IoctlGetTermios(int(p.f.Fd()), unix.TCGETS)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	if tio.Lflag&unix.ICANON == 0 || tio.Lflag&unix.ECHO == 0 {
+		p.t.Fatalf("pty left in raw mode: lflag %#x", tio.Lflag)
 	}
 }
 
@@ -199,6 +310,35 @@ func TestEndToEnd(t *testing.T) {
 		}
 	}
 
+	// A new process on another machine (an empty state directory)
+	// rebuilds the session from the Runs' labels and restores its screen.
+	other := filepath.Join(dir, "state-elsewhere")
+	envElsewhere := append(slices.Clone(env), "XDG_STATE_HOME="+other)
+	q := startLuxmux(t, envElsewhere, "attach -t e2e")
+	q.wait("rebuilt from labels", func(s string) bool { return strings.Contains(s, "hi-1") || strings.Contains(s, "hi-2") })
+	q.wait("two windows", func(string) bool { return strings.HasPrefix(q.scr.title(), "luxmux:e2e [0]") })
+	q.typ("\x021")
+	q.wait("window 1 rebuilt", func(s string) bool { return q.scr.title() == "luxmux:e2e [1] default" && strings.Contains(s, "hi-2") })
+	// A second process on the same session is refused while it is
+	// attached.
+	r := startLuxmux(t, envElsewhere, "attach -t e2e")
+	if code := r.exitCode(); code == 0 || !strings.Contains(r.scr.text(), "attached elsewhere") {
+		t.Fatalf("second attach: %d\n%s", code, r.scr.text())
+	}
+	// SIGTERM gives the terminal back and leaves the Runs running.
+	q.typ("printf '\\033[?1000h\\033[?2004h'\r")
+	time.Sleep(300 * time.Millisecond)
+	if err := q.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	q.exited()
+	q.restored()
+	for _, id := range ids {
+		if st := lux.Run(id).State; st != "running" {
+			t.Fatalf("%s is %s after SIGTERM", id, st)
+		}
+	}
+
 	// A new process attaches and restores the screen of the active window.
 	p = startLuxmux(t, env, "attach -t e2e")
 	p.wait("restored after reattach", has("hi-2"))
@@ -218,5 +358,53 @@ func TestEndToEnd(t *testing.T) {
 	p.exited()
 	if st := lux.Run(ids[0]).State; st != "terminated" {
 		t.Fatalf("last Run %s", st)
+	}
+}
+
+// TestPanicGivesTerminalBack: a panic inside luxmux (here in a window's
+// supervisor, resolving a secret to resume its Run) restores the terminal
+// before printing the panic, and luxmux exits non-zero.
+func TestPanicGivesTerminalBack(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	lux := fakelux.New()
+	defer lux.Close()
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, "config", "luxmux")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("[profiles.default]\nimage = \"alpine\"\nsecrets = [\"TOKEN\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"PATH=" + os.Getenv("PATH"), "TERM=xterm-256color", "HOME=" + dir,
+		"XDG_CONFIG_HOME=" + filepath.Join(dir, "config"), "XDG_STATE_HOME=" + filepath.Join(dir, "state"),
+		"LUX_URL=" + lux.URL, "LUX_API_KEY=lux_test", "TOKEN=v", "LUXMUX_E2E_PANIC_ON=TOKEN",
+	}
+	// The submit resolves TOKEN too: the first window's Run is made
+	// before luxmux starts.
+	c, _ := luxapi.New(lux.Config())
+	sp, err := config.RunSpec(config.Profile{Image: "alpine", Secrets: []string{"TOKEN"}}, config.Target{Session: "p", Profile: "default"}, map[string]string{"TOKEN": "v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakelux.WaitFor(context.Background(), 5*time.Second, func() bool { return lux.Term(run.ID) != nil })
+	p := startLuxmux(t, env, "attach -t p")
+	p.wait("attached", func(string) bool { return lux.Streams(run.ID) > 0 })
+	lux.Term(run.ID).Output([]byte("\x1b[?1049h\x1b[?1000h\x1b[?2004hFULL"))
+	p.wait("program on screen", has("FULL"))
+	lux.LoseSecrets(run.ID)
+	if code := p.exitCode(); code == 0 {
+		t.Fatal("luxmux exited 0 after a panic")
+	}
+	p.restored()
+	if out := p.rawSince(0); !strings.Contains(out, "panic: injected: lookup TOKEN") {
+		t.Fatalf("panic not printed:\n%s", p.scr.text())
 	}
 }

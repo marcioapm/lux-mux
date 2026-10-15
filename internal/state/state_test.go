@@ -1,7 +1,11 @@
 package state
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,5 +109,32 @@ func TestAddRecent(t *testing.T) {
 	}
 	if len(l) != 10 {
 		t.Fatal(len(l))
+	}
+}
+
+// TestLock: one holder of a session's lock at a time; another session is
+// independent; unlock frees it.
+func TestLock(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := Lock(dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Lock(dir, "s"); !errors.Is(err, ErrLocked) || !strings.Contains(err.Error(), fmt.Sprint(os.Getpid())) {
+		t.Fatalf("second lock: %v", err)
+	}
+	u2, err := Lock(dir, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2()
+	unlock()
+	u3, err := Lock(dir, "s")
+	if err != nil {
+		t.Fatalf("after unlock: %v", err)
+	}
+	u3()
+	if names, _ := List(dir); len(names) != 0 {
+		t.Fatalf("lock files listed as sessions: %v", names)
 	}
 }

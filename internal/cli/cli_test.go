@@ -144,3 +144,23 @@ func TestNotSignedIn(t *testing.T) {
 	}
 	_ = os.Remove(env.ConfigPath)
 }
+
+// TestAttachRefusedWhileAttached: a session attached by another process
+// (its lock held) is not attached a second time.
+func TestAttachRefusedWhileAttached(t *testing.T) {
+	lux := fakelux.New()
+	defer lux.Close()
+	submit(t, lux, "work", "app", false)
+	env, _, errb := testEnv(t, lux, "")
+	unlock, err := state.Lock(env.StateDir, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	for _, args := range [][]string{{"attach", "-t", "work"}, {"new", "-s", "work"}} {
+		errb.Reset()
+		if code := Main(env, args); code == 0 || !strings.Contains(errb.String(), "session work: session is attached elsewhere (pid ") {
+			t.Fatalf("%v: %d %q", args, code, errb.String())
+		}
+	}
+}

@@ -14,6 +14,9 @@ import (
 	"github.com/marcioapm/lux-mux/internal/ui"
 )
 
+// lookup finds secret values; the end-to-end test replaces it.
+var lookup = os.LookupEnv
+
 func main() {
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -29,7 +32,7 @@ func main() {
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
 		Lux:        api.LoadConfig,
 		ConfigPath: cfgPath, StateDir: stateDir,
-		Lookup: os.LookupEnv,
+		Lookup: lookup,
 		UI:     ui.New(),
 	}, os.Args[1:]))
 }

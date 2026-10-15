@@ -16,6 +16,14 @@ func (m *Mux) goSafe(fn func()) {
 	}()
 }
 
+// RecoverPanic, deferred at the top of a goroutine that is not luxmux's
+// own (a signal handler's), sends its panic to the same crash path.
+func (m *Mux) RecoverPanic() {
+	if v := recover(); v != nil {
+		m.crash(v, debug.Stack())
+	}
+}
+
 // recoverPanic, deferred at the top of a goroutine, sends its panic to
 // crash.
 func (m *Mux) recoverPanic() {
