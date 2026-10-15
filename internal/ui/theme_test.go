@@ -84,10 +84,14 @@ func TestThemeFocus(t *testing.T) {
 }
 
 func TestThemeNoColor(t *testing.T) {
-	trueColor(t, true)
+	// Use the real default profile under NO_COLOR: Ascii strips all SGR,
+	// so forcing TrueColor here would hide a missing focus indicator.
+	profile := lipgloss.ColorProfile()
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	for _, value := range []string{"1", "0", "false"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("NO_COLOR", value)
+			lipgloss.SetColorProfile(termenv.NewOutput(nil).EnvColorProfile())
 			d := open(t, newHost(t), 30, 100)
 			d.setFocus(stBranch)
 			h := NewHelp(d.cfg, nil, 30, 100)

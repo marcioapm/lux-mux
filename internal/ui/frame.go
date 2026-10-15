@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 // The smallest terminal a dialog box is drawn in.
@@ -28,20 +29,28 @@ func (s themeStyle) style() lipgloss.Style {
 
 func (s themeStyle) Render(text string) string { return s.style().Render(text) }
 
+// NO_COLOR removes colours, not focus or emphasis. The default renderer
+// drops all SGR under NO_COLOR; use an ANSI renderer for the colour-free styles.
+var monoRenderer = func() *lipgloss.Renderer {
+	r := lipgloss.NewRenderer(os.Stdout)
+	r.SetColorProfile(termenv.ANSI)
+	return r
+}()
+
 // Every colour has a light-terminal and dark-terminal variant.
 var palette = struct {
 	border, title, accent, focus, dim, err, warning, ok, dead, section themeStyle
 }{
 	border:  themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#526F89", Dark: "#718DA8"})},
-	title:   themeStyle{blue: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#294D70", Dark: "#C5DCF2"}).Background(lipgloss.AdaptiveColor{Light: "#E3EDF5", Dark: "#25384B"}), mono: lipgloss.NewStyle().Bold(true)},
+	title:   themeStyle{blue: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#294D70", Dark: "#C5DCF2"}).Background(lipgloss.AdaptiveColor{Light: "#E3EDF5", Dark: "#25384B"}), mono: monoRenderer.NewStyle().Bold(true)},
 	accent:  themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#345F85", Dark: "#9EBFDD"})},
-	focus:   themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#F4F8FC", Dark: "#E8F0F8"}).Background(lipgloss.AdaptiveColor{Light: "#375A7A", Dark: "#304D68"}), mono: lipgloss.NewStyle().Reverse(true)},
-	dim:     themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#586B7D", Dark: "#91A3B5"}), mono: lipgloss.NewStyle().Faint(true)},
+	focus:   themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#F4F8FC", Dark: "#E8F0F8"}).Background(lipgloss.AdaptiveColor{Light: "#375A7A", Dark: "#304D68"}), mono: monoRenderer.NewStyle().Reverse(true)},
+	dim:     themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#586B7D", Dark: "#91A3B5"}), mono: monoRenderer.NewStyle().Faint(true)},
 	err:     themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#A32D38", Dark: "#EF9A9A"})},
 	warning: themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#855600", Dark: "#DEC080"})},
 	ok:      themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#38684C", Dark: "#9CC5A9"})},
-	dead:    themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#96545C", Dark: "#C58E96"}), mono: lipgloss.NewStyle().Faint(true)},
-	section: themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#345F85", Dark: "#9EBFDD"}).Bold(true), mono: lipgloss.NewStyle().Bold(true)},
+	dead:    themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#96545C", Dark: "#C58E96"}), mono: monoRenderer.NewStyle().Faint(true)},
+	section: themeStyle{blue: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#345F85", Dark: "#9EBFDD"}).Bold(true), mono: monoRenderer.NewStyle().Bold(true)},
 }
 
 // focusBand pads line to w cells and keeps its inner styles, restoring the
