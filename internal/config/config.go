@@ -286,6 +286,7 @@ func (p Profile) Validate() error {
 		fail("repository: cannot derive a name from %q", p.Repository)
 	}
 	names := map[string]bool{}
+	var paths []string
 	for i, r := range p.Repositories {
 		at := fmt.Sprintf("repositories[%d]", i)
 		if r.URL == "" {
@@ -304,9 +305,25 @@ func (p Profile) Validate() error {
 			fail("%s: name %q is taken by another repository (set name)", at, name)
 		}
 		names[name] = true
-		if r.Path != "" && !strings.HasPrefix(path.Clean(r.Path), Workspace+"/") {
-			fail("%s: path must be under %s, the state volume", at, Workspace)
+		dir := Workspace + "/repos/" + name
+		if r.Path != "" {
+			dir = path.Clean(r.Path)
+			if !strings.HasPrefix(dir, Workspace+"/") {
+				fail("%s: path must be under %s, the state volume", at, Workspace)
+			}
 		}
+		// lux's runner skips a checkout whose directory already holds a
+		// .git, so two at one path, or one inside another, lose a clone
+		// without an error.
+		for j, other := range paths {
+			switch {
+			case dir == other:
+				fail("%s: path %s is also repositories[%d]'s: each repository needs a directory of its own (set path)", at, dir, j)
+			case strings.HasPrefix(dir, other+"/"), strings.HasPrefix(other, dir+"/"):
+				fail("%s: path %s and repositories[%d]'s %s are one inside the other (set path)", at, dir, j, other)
+			}
+		}
+		paths = append(paths, dir)
 	}
 	if p.Workdir != "" && !strings.HasPrefix(p.Workdir, "/") {
 		fail("workdir must be absolute")

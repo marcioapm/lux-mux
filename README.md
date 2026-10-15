@@ -180,7 +180,9 @@ repositories = [
 
 Each entry takes `url`, `branch` or `ref`, `name` (default: from the URL)
 and `path` (default: `/workspace/repos/<name>`), and `git_credential` when
-it is not the profile's. `repository`, `branch` and `ref` are the
+it is not the profile's. Names must differ, and each checkout needs a
+directory of its own: two paths that are equal, or one inside the other,
+are a configuration error. `repository`, `branch` and `ref` are the
 one-repository shorthand: a profile has one form or the other.
 
 Each window's Run is a generic tty workload running the profile's shell,

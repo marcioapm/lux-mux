@@ -483,6 +483,97 @@ func TestDialogRefusalKeepsValuesAndMarksField(t *testing.T) {
 	}
 }
 
+// hostWith is a dialog host on the configuration src.
+func hostWith(t *testing.T, src string) *fakeDialogHost {
+	t.Helper()
+	cfg, err := config.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fakeDialogHost{cfg: cfg, pools: testPools()}
+}
+
+// TestDialogRepositoryPathCollision: a row whose checkout would land in
+// another's directory is marked on the rows, with luxmux's message, and
+// nothing goes to the dry run.
+func TestDialogRepositoryPathCollision(t *testing.T) {
+	h := hostWith(t, `default_profile = "p"
+[profiles.p]
+image = "alpine"
+repositories = [{ url = "https://example.com/api.git", path = "/workspace/repos/web" }]
+`)
+	d := open(t, h, 40, 120)
+	to(t, d, stAddRepo)
+	press(d, "enter", "https://example.com/web.git", "ctrl+s")
+	if d.Done || len(h.validated) != 0 {
+		t.Fatal("colliding paths went to the dry run")
+	}
+	want := "repositories[1]: path /workspace/repos/web is also repositories[0]'s"
+	if !strings.Contains(d.errs[stRepo], want) {
+		t.Fatalf("errors %v", d.errs)
+	}
+	if out := boxText(d.View()); !strings.Contains(out, "✗ "+want) {
+		t.Fatalf("not shown on the rows:\n%s", plain(d.View()))
+	}
+}
+
+// boxText is the text inside the dialog's box, its lines joined by one
+// space: a wrapped message reads as one.
+func boxText(view string) string {
+	var parts []string
+	for _, l := range strings.Split(plain(view), "\n") {
+		if i, j := strings.Index(l, "│"), strings.LastIndex(l, "│"); i >= 0 && j > i {
+			if s := strings.TrimSpace(l[i+len("│") : j]); s != "" {
+				parts = append(parts, s)
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// TestDialogRowKeepsBaseEntry: a row whose URL is one of the base
+// profile's keeps that entry's name, path and credential; created
+// unchanged, the spec is the profile's.
+func TestDialogRowKeepsBaseEntry(t *testing.T) {
+	h := hostWith(t, `default_profile = "p"
+[profiles.p]
+image = "alpine"
+pool = "plain"
+git_credential = "GH"
+repositories = [
+  { url = "https://example.com/api.git", name = "server", path = "/workspace/api", git_credential = "API_KEY" },
+  { url = "https://example.com/web.git", path = "/workspace/web" },
+]
+`)
+	d := open(t, h, 40, 120)
+	press(d, "ctrl+s")
+	if d.Request == nil {
+		t.Fatalf("not created: %s %v", d.status, d.errs)
+	}
+	got, err := config.RunSpec(d.Request.Profile, config.Target{Session: "s", Profile: "p"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := config.RunSpec(h.cfg.Profiles["p"], config.Target{Session: "s", Profile: "p"}, nil)
+	if !reflect.DeepEqual(got.Git, want.Git) || got.Workload.Workdir != "/workspace/api" || !reflect.DeepEqual(got.Secrets, want.Secrets) {
+		t.Fatalf("git %+v workdir %q secrets %+v\nwant %+v", got.Git, got.Workload.Workdir, got.Secrets, want.Git)
+	}
+	if got.Git.Repositories[0].Name != "server" || got.Git.Repositories[0].Credential != "API_KEY" || got.Git.Repositories[1].Credential != "GH" {
+		t.Fatalf("entries %+v", got.Git.Repositories)
+	}
+	// A changed branch keeps the rest of the entry.
+	d = open(t, h, 40, 120)
+	to(t, d, stBranch)
+	press(d, "dev", "ctrl+s")
+	if d.Request == nil {
+		t.Fatalf("not created: %s", d.status)
+	}
+	got, _ = config.RunSpec(d.Request.Profile, config.Target{Session: "s", Profile: "p"}, nil)
+	if r := got.Git.Repositories[0]; r.Name != "server" || r.Path != "/workspace/api" || r.Credential != "API_KEY" || r.Ref != "dev" {
+		t.Fatalf("edited row %+v", r)
+	}
+}
+
 func TestDialogWouldNotStartNeedsSecondCreate(t *testing.T) {
 	h := newHost(t)
 	h.ans = &api.SubmitAnswer{Valid: true, Blockers: []api.AdmissionBlocker{{Code: "not_enough_spare", Hosts: 2}}}

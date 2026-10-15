@@ -85,11 +85,28 @@ repositories = [{ url = "https://example.com/b.git" }]`, "not both"},
 		"branch and ref": {`repositories = [{ url = "https://example.com/a.git", branch = "a", ref = "b" }]`, "repositories[0]: branch and ref"},
 		"credential":     {`repositories = [{ url = "https://example.com/a.git", git_credential = "no-dash" }]`, `invalid name "no-dash"`},
 		"unknown key":    {`repositories = [{ url = "https://example.com/a.git", push = false }]`, "push"},
+		"same path": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/x/" }]`,
+			"repositories[1]: path /workspace/x is also repositories[0]'s"},
+		"another's default path": {`repositories = [{ url = "https://example.com/a.git" }, { url = "https://example.com/b.git", path = "/workspace/repos/a" }]`,
+			"repositories[1]: path /workspace/repos/a is also repositories[0]'s"},
+		"nested in an earlier": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/x/y" }]`,
+			"repositories[1]: path /workspace/x/y and repositories[0]'s /workspace/x are one inside the other"},
+		"holding a later default": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/repos" }, { url = "https://example.com/b.git" }]`,
+			"repositories[1]: path /workspace/repos/b and repositories[0]'s /workspace/repos are one inside the other"},
+		"holding an earlier": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x/y" }, { url = "https://example.com/b.git", path = "/workspace/x" }]`,
+			"repositories[1]: path /workspace/x and repositories[0]'s /workspace/x/y are one inside the other"},
+		"the workspace itself": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace" }]`, "path must be under /workspace"},
+		"a sibling prefix":     {`repositories = [{ url = "https://example.com/a.git", path = "/workspace2/a" }]`, "path must be under /workspace"},
 	} {
 		_, err := Parse([]byte("[profiles.p]\nimage = \"alpine\"\n" + c.src))
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
+	}
+	// Distinct directories, one name a prefix of the other's, are fine.
+	if _, err := Parse([]byte("[profiles.p]\nimage = \"alpine\"\n" +
+		`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/xy" }, { url = "https://example.com/c.git" }]`)); err != nil {
+		t.Errorf("distinct paths: %v", err)
 	}
 }
 

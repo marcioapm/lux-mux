@@ -812,11 +812,20 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 		}
 		at[s] = [2]int{start, len(out)}
 	}
+	// A field's error is wrapped to the value column, at most three lines.
 	errLine := func(s stop) []string {
-		if e := d.errs[s]; e != "" {
-			return []string{palette.err.Render("✗ " + e)}
+		e := d.errs[s]
+		if e == "" {
+			return nil
 		}
-		return nil
+		lines := strings.Split(ansi.Wrap("✗ "+e, vw, " "), "\n")
+		if len(lines) > 3 {
+			lines = append(lines[:2], ansi.Truncate(strings.Join(lines[2:], " "), vw, "…"))
+		}
+		for i, l := range lines {
+			lines[i] = palette.err.Render(l)
+		}
+		return lines
 	}
 	ddRow := func(s stop, dd *dropdown) {
 		focused := d.focus == s
