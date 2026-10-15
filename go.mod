@@ -9,7 +9,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.10.1
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
-	github.com/marcioapm/lux v0.1.30-0.20261015042150-8f6548a717b6
+	github.com/marcioapm/lux v0.1.30
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
