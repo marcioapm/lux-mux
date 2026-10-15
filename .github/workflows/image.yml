@@ -50,9 +50,10 @@ jobs:
           tags: luxmux-smoke:local
           build-args: VERSION=${{ steps.version.outputs.version }}
           cache-to: type=local,dest=${{ runner.temp }}/image-cache,mode=max
-      - name: Smoke test (as agent, empty home, no network or credentials)
+      # No --user: lux runs the image's USER, so the smoke test does too.
+      - name: Smoke test (image USER, empty home, no network or credentials)
         run: |
-          docker run --rm --network none --user agent \
+          docker run --rm --network none \
             --tmpfs /home/agent:uid=1000,gid=1000,mode=0700 \
             -v "$PWD/images/default/smoke.sh:/smoke.sh:ro" \
             luxmux-smoke:local sh /smoke.sh

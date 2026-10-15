@@ -103,14 +103,19 @@ Bump the `ARG`s in the Dockerfile:
 
 ```sh
 docker buildx build --platform linux/amd64 --load -t luxmux-image:amd64 images/default
-docker run --rm --network none --user agent \
+docker run --rm --network none \
   --tmpfs /home/agent:uid=1000,gid=1000,mode=0700 \
   -v "$PWD/images/default/smoke.sh:/smoke.sh:ro" \
   luxmux-image:amd64 sh /smoke.sh
 ```
 
-The smoke test runs as `agent` with an empty home, no network and no
-credentials, and checks that every agent and tool starts. For `linux/arm64`
+The smoke test runs as the image's `USER`, as lux does (so no `--user`),
+with an empty home, no network and no credentials. It first checks that the
+user is `agent` (uid 1000) and that `HOME` is a writable `/home/agent`, the
+path luxmux's home volume is mounted at, then that every agent and tool
+starts. Each failing check prints `smoke: FAIL:` and what failed.
+
+For `linux/arm64`
 on an amd64 machine, the same commands work with QEMU binfmt installed.
 
 Size at the versions above, measured as gzip of `docker save` (close to the
