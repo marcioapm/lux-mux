@@ -304,7 +304,9 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		w.setConn(nil)
 		conn.CloseNow()
 	}()
-	if err := m.goLive(ctx, w, conn); err != nil {
+	discarded, err := m.goLive(ctx, w, conn, run.Epoch)
+	if err != nil {
+		m.inputDiscarded(w, discarded)
 		if ctx.Err() != nil {
 			return endStopped, ""
 		}
@@ -345,10 +347,13 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	case <-time.After(m.opt.RestoreWait):
 	}
 	if first != nil && first.Data == nil && !first.Restored {
+		m.inputDiscarded(w, discarded)
 		return m.streamEnd(ctx, first, readErr)
 	}
 	restoring := first != nil && bytes.HasPrefix(first.Data, snapshotPrefix)
 	raw := m.beginAttach(w, run, restoring)
+	// After beginAttach's notice of the move, which this one replaces.
+	m.inputDiscarded(w, discarded)
 	if !restoring {
 		// Nothing to redraw from: ask the shell to redraw itself by
 		// changing the size and back.
@@ -496,7 +501,7 @@ const pendingInLimit = 64 << 10
 // stream just closed is kept the same way.
 func (m *Mux) send(w *Window, b []byte) {
 	w.connMu.Lock()
-	c := w.conn
+	c, ep := w.conn, w.inEpoch
 	if c == nil || len(w.pendingIn) > 0 {
 		dropped := w.keepInputLocked(b)
 		w.connMu.Unlock()
@@ -509,12 +514,13 @@ func (m *Mux) send(w *Window, b []byte) {
 	cancel()
 	if err != nil && m.ctx.Err() == nil {
 		w.connMu.Lock()
-		// Ahead of anything kept meanwhile: typed before it.
+		// Ahead of anything kept meanwhile: typed before it, for c's shell.
 		w.pendingIn = append(append([]byte{}, b...), w.pendingIn...)
+		w.pendingEpoch = ep
 		dropped := w.trimInputLocked()
 		// A stream that came up meanwhile has sent what was kept; it
 		// sends this too before it takes more (goLive).
-		next := w.conn
+		next, nextEp := w.conn, w.inEpoch
 		if next == c {
 			next = nil
 		}
@@ -522,7 +528,8 @@ func (m *Mux) send(w *Window, b []byte) {
 		w.connMu.Unlock()
 		m.inputDropped(w, dropped)
 		if next != nil {
-			_ = m.goLive(m.ctx, w, next)
+			n, _ := m.goLive(m.ctx, w, next, nextEp)
+			m.inputDiscarded(w, n)
 		}
 	}
 }
@@ -530,6 +537,9 @@ func (m *Mux) send(w *Window, b []byte) {
 // keepInputLocked keeps b for the next stream; it returns how many of
 // the oldest bytes kept were dropped for room.
 func (w *Window) keepInputLocked(b []byte) int {
+	if len(w.pendingIn) == 0 {
+		w.pendingEpoch = w.inEpoch
+	}
 	w.pendingIn = append(w.pendingIn, b...)
 	return w.trimInputLocked()
 }
@@ -552,29 +562,51 @@ func (m *Mux) inputDropped(w *Window, n int) {
 	m.setNoticeLocked(fmt.Sprintf("window %d: %d typed bytes dropped while it had no stream", m.indexLocked(w), n))
 }
 
-// goLive makes c w's stream: the keystrokes kept for it are sent first,
-// in order, and c takes new ones only once none are left.
-func (m *Mux) goLive(ctx context.Context, w *Window, c *websocket.Conn) error {
+// inputDiscarded tells that n kept keystrokes were for a shell the Run no
+// longer has.
+func (m *Mux) inputDiscarded(w *Window, n int) {
+	if n == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setNoticeLocked(fmt.Sprintf("window %d: %d typed bytes discarded — it moved to a new shell", m.indexLocked(w), n))
+}
+
+// goLive makes c, a stream of the Run's epoch, w's stream: the keystrokes
+// kept for it are sent first, in order, and c takes new ones only once
+// none are left. Keystrokes typed for another epoch's shell (the Run
+// moved: a new placement, a fresh shell) are discarded instead; it
+// returns how many.
+func (m *Mux) goLive(ctx context.Context, w *Window, c *websocket.Conn, epoch int) (discarded int, err error) {
+	w.connMu.Lock()
+	w.inEpoch = epoch
+	if len(w.pendingIn) > 0 && w.pendingEpoch != 0 && w.pendingEpoch != epoch {
+		discarded = len(w.pendingIn)
+		w.pendingIn = nil
+	}
+	w.connMu.Unlock()
 	for {
 		w.connMu.Lock()
 		b := w.pendingIn
 		if len(b) == 0 {
 			w.conn = c
 			w.connMu.Unlock()
-			return nil
+			return discarded, nil
 		}
 		w.pendingIn = nil
 		w.connMu.Unlock()
 		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := wsjson.Write(wctx, c, api.StreamData{Data: b})
+		err = wsjson.Write(wctx, c, api.StreamData{Data: b})
 		cancel()
 		if err != nil {
 			w.connMu.Lock()
 			w.pendingIn = append(b, w.pendingIn...)
+			w.pendingEpoch = epoch
 			dropped := w.trimInputLocked()
 			w.connMu.Unlock()
 			m.inputDropped(w, dropped)
-			return err
+			return discarded, err
 		}
 	}
 }
@@ -583,6 +615,7 @@ func (m *Mux) goLive(ctx context.Context, w *Window, c *websocket.Conn) error {
 func (w *Window) dropInput() {
 	w.connMu.Lock()
 	w.pendingIn = nil
+	w.inEpoch, w.pendingEpoch = 0, 0
 	w.connMu.Unlock()
 }
 

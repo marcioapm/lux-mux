@@ -180,7 +180,9 @@ only, and after help or a dialog over it luxmux clears the screen and asks
 the program to redraw (as a resize does). Keys typed while a window's
 stream is down (a refresh, a reconnect) are kept, up to 64 KiB per window,
 and sent in order once it is up again; past that the oldest are dropped,
-with a notice.
+with a notice. Keys kept while the Run moves to a new placement were meant
+for the old shell: they are discarded, with a notice, not typed into the
+fresh one.
 
 If your terminal (or the link to it) cannot keep up, up to 4 MiB of the
 shown window's output waits for it; past that, luxmux drops what waits

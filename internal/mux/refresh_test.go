@@ -285,3 +285,68 @@ func TestKeysTypedDuringReconnectBounded(t *testing.T) {
 	}
 	h.detach()
 }
+
+// pending is what is kept for window i's next stream.
+func (h *harness) pending(i int) []byte {
+	w := h.win(i)
+	w.connMu.Lock()
+	defer w.connMu.Unlock()
+	return append([]byte{}, w.pendingIn...)
+}
+
+// TestKeysTypedBeforeAMoveAreDiscarded: keys typed while the Run moves
+// were meant for the old shell; the fresh shell on the new placement gets
+// none of them, the user is told, and keys typed after reach it.
+func TestKeysTypedBeforeAMoveAreDiscarded(t *testing.T) {
+	var keys inputLog
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook })
+	a := h.live(0)
+	h.type_("before\r")
+	h.waitFor("typed before", func() bool { return bytes.Contains(keys.of(a), []byte("before\r")) })
+	h.lux.Move(a, true)
+	h.waitFor("reconnecting", func() bool { return h.phase(0) == phaseReconnecting })
+	h.type_(":wq\r")
+	h.waitFor("kept", func() bool { return string(h.pending(0)) == ":wq\r" })
+	n := len(keys.of(a))
+	h.lux.Start(a)
+	h.live(0)
+	h.waitScreen("discarded notice", h.contains("window 0: 4 typed bytes discarded — it moved to a new shell"))
+	h.type_("after\r")
+	h.waitFor("typed after", func() bool { return bytes.Contains(keys.of(a), []byte("after\r")) })
+	if got := keys.of(a)[n:]; string(got) != "after\r" {
+		t.Fatalf("the new shell got %q", got)
+	}
+	h.detach()
+}
+
+// TestKeysTypedDuringABlipAreSent: on the same placement (a blip, the
+// stream fell behind) the shell is the same one: kept keys reach it, in
+// order, and nothing is said about discarding.
+func TestKeysTypedDuringABlipAreSent(t *testing.T) {
+	for _, drop := range []string{"blip", "fell behind"} {
+		t.Run(drop, func(t *testing.T) {
+			var keys inputLog
+			var gate attachGate
+			h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook; l.AttachHook = gate.hook })
+			a := h.live(0)
+			gate.hold(a)
+			t.Cleanup(func() { gate.release(a) })
+			if drop == "blip" {
+				h.lux.Blip(a)
+			} else {
+				h.lux.FellBehind(a)
+			}
+			h.waitFor("attach held", func() bool { return gate.held_() == 1 })
+			h.type_("kept-1,")
+			h.type_("kept-2")
+			h.waitFor("kept", func() bool { return string(h.pending(0)) == "kept-1,kept-2" })
+			gate.release(a)
+			h.waitFor("sent", func() bool { return string(keys.of(a)) == "kept-1,kept-2" })
+			h.live(0)
+			if strings.Contains(string(h.term.rawBytes()), "discarded") {
+				t.Fatal("discard notice on the same placement")
+			}
+			h.detach()
+		})
+	}
+}

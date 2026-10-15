@@ -213,10 +213,14 @@ type Window struct {
 
 	// connMu guards conn and pendingIn: keystrokes typed while the window
 	// has no stream (starting, reconnecting, refreshing), sent in order
-	// once one is up (see send).
-	connMu    sync.Mutex
-	conn      *websocket.Conn
-	pendingIn []byte
+	// once one is up (see send). inEpoch is the Run epoch of the last
+	// stream made live; pendingEpoch the one pendingIn was typed for (0:
+	// before any stream in this process).
+	connMu       sync.Mutex
+	conn         *websocket.Conn
+	pendingIn    []byte
+	inEpoch      int
+	pendingEpoch int
 
 	// The emulator is written by its feeder goroutine and read by
 	// previews, both under emuMu.
