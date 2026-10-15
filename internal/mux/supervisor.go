@@ -866,9 +866,11 @@ func (m *Mux) followEvents() {
 			if e.RunID == nil {
 				return
 			}
-			// The feed is the tenant's: only a Run just submitted may be
-			// new-window's (discoverWindows finds those the feed missed).
-			if s, _ := e.Data["state"].(string); e.Type == "state" && s == "submitted" {
+			// The feed is the tenant's and carries no labels: only a Run
+			// just submitted may be new-window's (discoverWindows finds
+			// those the feed missed). luxd announces a submit with an
+			// event of type submitted, never with a state event.
+			if e.Type == luxapi.EventSubmitted {
 				m.considerRun(*e.RunID)
 			}
 			m.event(*e.RunID, e.Event)

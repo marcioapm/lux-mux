@@ -18,6 +18,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/marcioapm/lux/api"
+
+	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
 // SecretsLostReason is luxd's stateReason for a Run stopped because no
@@ -209,12 +211,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// event records an event of a Run, with the lock held.
+// Where a submitted Run's pool came from: the submitted event's poolFrom
+// (lux internal/server/api.go, poolFromSpec and the others).
+const (
+	PoolFromSpec     = "spec"
+	PoolFromTenant   = "tenant-default"
+	PoolFromFallback = "fallback"
+)
+
+// Actor is the submitted event's by: luxd's principal, here the fake's
+// one API key.
+const Actor = "key_test"
+
+// event records an event of a Run, with the lock held. As luxd's addEvent,
+// an event of epoch 0 (before any placement) carries no epoch.
 func (s *Server) event(r *api.Run, typ string, data map[string]any) {
 	id := r.ID
-	ep := r.Epoch
-	s.events = append(s.events, api.FeedEvent{Event: api.Event{ID: int64(len(s.events) + 1), Epoch: &ep, Type: typ, Data: data, Time: time.Now()}, RunID: &id})
+	var ep *int
+	if r.Epoch > 0 {
+		e := r.Epoch
+		ep = &e
+	}
+	s.events = append(s.events, api.FeedEvent{Event: api.Event{ID: int64(len(s.events) + 1), Epoch: ep, Type: typ, Data: data, Time: time.Now()}, RunID: &id})
 	s.cond.Broadcast()
+}
+
+// resolvePool is the pool a submit names, else the default of SetPools'
+// pools, else "default", where it came from, and whether it is one of
+// SetPools' (luxd's resolvePool; known: the pool has an id).
+func (s *Server) resolvePool(name string) (_ api.Pool, from string, known bool) {
+	for _, p := range s.pools {
+		if name != "" && p.Name == name {
+			return p, PoolFromSpec, true
+		}
+		if name == "" && p.IsDefault != nil && *p.IsDefault {
+			return p, PoolFromTenant, true
+		}
+	}
+	if name == "" {
+		return api.Pool{Name: "default"}, PoolFromFallback, false
+	}
+	return api.Pool{Name: name}, PoolFromSpec, false
 }
 
 func (s *Server) setState(r *fakeRun, state, reason string) {
@@ -229,7 +266,7 @@ func (s *Server) setState(r *fakeRun, state, reason string) {
 
 func (s *Server) setStage(r *fakeRun, stage string) {
 	r.run.Stage = stage
-	s.event(r.run, "stage", map[string]any{"stage": stage, "epoch": r.run.Epoch})
+	s.event(r.run, "stage", map[string]any{"stage": stage, "since": time.Now().UTC(), "epoch": r.run.Epoch})
 }
 
 func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
@@ -275,7 +312,14 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.runs[id] = fr
 	s.order = append(s.order, id)
 	s.submits = append(s.submits, sp)
-	s.setState(fr, "submitted", "")
+	run.State = "submitted"
+	pool, from, known := s.resolvePool(sp.Placement.Pool)
+	run.Pool = pool.Name
+	ev := map[string]any{"by": Actor, "pool": pool.Name, "poolFrom": from}
+	if known {
+		ev["poolOwner"] = "tenant"
+	}
+	s.event(run, luxapi.EventSubmitted, ev)
 	s.setStage(fr, "waiting")
 	hold := s.Hold
 	ans := *run
