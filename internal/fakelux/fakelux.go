@@ -461,7 +461,9 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *Server) feed(w http.ResponseWriter, req *http.Request) {
+	s.mu.Lock()
 	after := len(s.events)
+	s.mu.Unlock()
 	if a := req.URL.Query().Get("after"); a != "" {
 		after, _ = strconv.Atoi(a)
 	} else if a := req.Header.Get("Last-Event-ID"); a != "" {
