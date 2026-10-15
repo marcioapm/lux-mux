@@ -253,7 +253,6 @@ func TestResizeReachesEveryStream(t *testing.T) {
 	h.detach()
 }
 
-
 // TestLuxFailureAfterWorkloadExitedIsNotAnExit: lux stops a Run's
 // workload for a timeout (the stream ends with "the workload exited"),
 // then fails it with reason timeout: the window is dead with the reason,

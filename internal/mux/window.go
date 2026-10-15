@@ -190,10 +190,10 @@ type Window struct {
 	// was pressed, for the supervisor.
 	resumable   bool
 	resumeAsked bool
-	tail      screen.Tail
-	epoch     int
-	cancel    context.CancelFunc
-	closed    bool
+	tail        screen.Tail
+	epoch       int
+	cancel      context.CancelFunc
+	closed      bool
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
