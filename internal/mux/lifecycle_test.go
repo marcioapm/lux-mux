@@ -2,6 +2,7 @@ package mux
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/coder/websocket"
 
 	"github.com/marcioapm/lux-mux/internal/fakelux"
@@ -251,6 +253,126 @@ func TestOneKeyReaderHandsBackTheRest(t *testing.T) {
 	b, ok := in.next(nil)
 	if !ok || string(b) != "\recho after\r" {
 		t.Fatalf("handed back %q", b)
+	}
+}
+
+type readerProgram struct {
+	r    *Reader
+	keys []tea.KeyMsg
+}
+
+func (m *readerProgram) Init() tea.Cmd { return nil }
+func (m *readerProgram) View() string  { return "" }
+
+// Update closes the Reader on q, as a dialog's closing key does.
+func (m *readerProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		m.keys = append(m.keys, k)
+		if k.String() == "q" {
+			m.r.Close()
+			return m, tea.Quit
+		}
+		m.r.KeyHandled()
+	}
+	return m, nil
+}
+
+// TestOneKeyReaderPartialEvents: through a real bubbletea program, events
+// longer than its 256-byte read or split across terminal reads arrive
+// whole, the keys after them in the same read follow, and the bytes after
+// the closing key are handed back.
+func TestOneKeyReaderPartialEvents(t *testing.T) {
+	paste := func(s string) string { return "\x1b[200~" + s + "\x1b[201~" }
+	for _, tc := range []struct {
+		name  string
+		parts []string
+		want  string
+	}{
+		{"paste300", []string{paste(strings.Repeat("a", 300))}, strings.Repeat("a", 300)},
+		{"paste1MiB", []string{paste(strings.Repeat("a", 1<<20))}, strings.Repeat("a", 1<<20)},
+		{"pasteTwoReads", []string{"\x1b[200~1234567890", "1234567890\x1b[201~"}, "12345678901234567890"},
+		{"pasteMarkers", []string{"\x1b[", "2", "00", "~hello\x1b", "[20", "1", "~"}, "hello"},
+		{"CSI", []string{"\x1b[", "1;", "5A"}, "ctrl+up"},
+		{"SS3", []string{"\x1bO", "A"}, "up"},
+		{"UTF8", []string{"\xe7", "\x95", "\x8c"}, "界"},
+		{"AltUTF8", []string{"\x1b\xe7", "\x95\x8c"}, "alt+界"},
+	} {
+		ok := t.Run(tc.name, func(t *testing.T) {
+			in := &input{ch: make(chan []byte, len(tc.parts))}
+			for i, part := range tc.parts {
+				if i == len(tc.parts)-1 {
+					part += "zqtail"
+				}
+				in.ch <- []byte(part)
+			}
+			r := &Reader{in: in, done: make(chan struct{}), ack: make(chan struct{}, 1)}
+			r.OneKeyAtATime()
+			defer r.Close()
+			model := &readerProgram{r: r}
+			// A hang shows as the program killed at this deadline; the 1 MiB
+			// paste needs longer under -race on a loaded host.
+			limit := 5 * time.Second
+			if len(tc.want) > 1<<16 {
+				limit = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			defer cancel()
+			p := tea.NewProgram(model, tea.WithInput(r), tea.WithOutput(io.Discard), tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithContext(ctx))
+			if _, err := p.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if len(model.keys) != 3 {
+				t.Fatalf("got %d keys, want event, z, q", len(model.keys))
+			}
+			got := model.keys[0].String()
+			if model.keys[0].Paste {
+				got = string(model.keys[0].Runes)
+			}
+			if got != tc.want || model.keys[1].String() != "z" || model.keys[2].String() != "q" {
+				t.Fatalf("unexpected event or following keys: first length %d", len(got))
+			}
+			b, ok := in.next(nil)
+			if !ok || string(b) != "tail" {
+				t.Fatalf("handback %q", b)
+			}
+		})
+		if !ok {
+			// A hung case would make every later case wait out its deadline.
+			return
+		}
+	}
+}
+
+// TestOneKeyReaderHandsBackPartialEvent: closing while an event is
+// incomplete hands its whole prefix back, ahead of what arrives later.
+func TestOneKeyReaderHandsBackPartialEvent(t *testing.T) {
+	in := &input{ch: make(chan []byte, 2)}
+	in.ch <- []byte("\x1b[200~abc")
+	r := &Reader{in: in, done: make(chan struct{}), ack: make(chan struct{}, 1)}
+	r.OneKeyAtATime()
+	read := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 256))
+		read <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(in.ch) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	r.Close()
+	select {
+	case err := <-read:
+		if err != io.EOF {
+			t.Fatalf("read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("read did not end on Close")
+	}
+	in.ch <- []byte("def")
+	for _, want := range []string{"\x1b[200~abc", "def"} {
+		if b, ok := in.next(nil); !ok || string(b) != want {
+			t.Fatalf("handed back %q, want %q", b, want)
+		}
 	}
 }
 

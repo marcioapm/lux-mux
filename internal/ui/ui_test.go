@@ -1,16 +1,58 @@
 package ui
 
 import (
+	"context"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/marcioapm/lux/api"
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/mux"
 )
+
+// TestUnknownCSIProgramAcknowledgesInput: an unknown CSI parsed by a real
+// bubbletea program is acknowledged as input; the closing key is written
+// only after that acknowledgement, as the one-key Reader does.
+func TestUnknownCSIProgramAcknowledgesInput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	in, out := io.Pipe()
+	defer in.Close()
+	defer out.Close()
+	ack := make(chan struct{}, 1)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		if _, err := out.Write([]byte("\x1b[999~")); err != nil {
+			return
+		}
+		select {
+		case <-ack:
+			_, _ = out.Write([]byte("q"))
+		case <-ctx.Done():
+		}
+	}()
+	h := NewHelp(helpCfg(t, ""), nil, 30, 100)
+	model := releasing{h, func() { out.Close() }, func() {
+		select {
+		case ack <- struct{}{}:
+		default:
+		}
+	}}
+	p := tea.NewProgram(model, tea.WithInput(in), tea.WithOutput(io.Discard), tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithContext(ctx))
+	if _, err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !h.Done {
+		t.Fatal("unknown CSI prevented the closing key")
+	}
+	<-writerDone
+}
 
 type fakeHost struct {
 	wins    []mux.WindowInfo

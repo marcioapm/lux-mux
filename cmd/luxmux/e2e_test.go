@@ -491,6 +491,55 @@ func TestNewWindowDialog(t *testing.T) {
 	p.exited()
 }
 
+// TestPasteIntoDialogs: a paste longer than bubbletea's 256-byte read, or
+// split over writes, leaves each dialog taking keys, and Esc returns to
+// the shell.
+func TestPasteIntoDialogs(t *testing.T) {
+	long := []string{"\x1b[200~" + strings.Repeat("a", 300) + "paste-end\x1b[201~"}
+	split := []string{"\x1b[200~aaaaaaaaaa", "aaaaaaaaaa\x1b[201~"}
+	for _, c := range []struct {
+		name, open, shown string
+		parts             []string
+		// probe is typed after the paste; seen is what proves it arrived.
+		probe, seen string
+		escs        int
+	}{
+		{"repository", "C\t\t\t\t", "▸ Repository", long, "", "paste-end", 1},
+		{"chooser filter", "w/", "filter: _", long, "z", "filter: z_", 2},
+		{"help long", "?", "window chooser", long, "", "", 1},
+		{"help split", "?", "window chooser", split, "", "", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			lux, env := e2eEnv(t)
+			// A shaped pool puts Repository four Tabs from the top.
+			yes := true
+			lux.SetPools([]api.Pool{{Name: "m", IsDefault: &yes, Sizes: []api.PoolSize{{Name: "m-1", CPUs: 1}}}})
+			p := startLuxmux(t, env, "new -s paste")
+			p.wait("prompt", has("$"))
+			p.typ("\x02" + c.open)
+			p.wait("dialog", has(c.shown))
+			for _, s := range c.parts {
+				p.typ(s)
+				time.Sleep(50 * time.Millisecond)
+			}
+			p.typ(c.probe)
+			if c.seen != "" {
+				p.wait("dialog takes keys after the paste", has(c.seen))
+			}
+			for range c.escs {
+				before := p.scr.text()
+				p.typ("\x1b")
+				p.wait("esc handled", func(s string) bool { return s != before })
+			}
+			p.wait("dialog closed", func(s string) bool { return !strings.Contains(s, c.shown) && !strings.Contains(s, "STATE") })
+			p.typ("echo paste-alive\r")
+			p.wait("shell after paste", func(s string) bool { return strings.Count(s, "paste-alive") >= 2 })
+			p.typ("\x02d")
+			p.exited()
+		})
+	}
+}
+
 // TestKeysAfterHelpCloseReachShell: keys in the same write as the key
 // that closes help reach the shell.
 func TestKeysAfterHelpCloseReachShell(t *testing.T) {

@@ -83,15 +83,16 @@ func (in *input) unreadFirst(b []byte) {
 // Reader is the keyboard for a dialog, until Close; what it read and
 // did not hand out by then goes back to the input loop.
 type Reader struct {
-	in      *input
-	done    chan struct{}
-	once    sync.Once
-	cur     []byte
-	closed  bool
-	mu      sync.Mutex
-	ack     chan struct{}
-	waiting bool
-	oneKey  bool
+	in        *input
+	done      chan struct{}
+	once      sync.Once
+	cur       []byte
+	closed    bool
+	mu        sync.Mutex
+	ack       chan struct{}
+	waiting   bool
+	oneKey    bool
+	remaining int
 }
 
 // KeyboardReader gives the keyboard to a dialog until the Reader is closed.
@@ -120,7 +121,7 @@ func (r *Reader) KeyHandled() {
 func keyLen(b []byte) (n int, complete bool) {
 	if b[0] != 0x1b || len(b) == 1 {
 		_, n := utf8.DecodeRune(b)
-		return n, true
+		return n, utf8.FullRune(b)
 	}
 	if bytes.HasPrefix(b, pasteStart) {
 		if i := bytes.Index(b, pasteEnd); i >= 0 {
@@ -143,7 +144,7 @@ func keyLen(b []byte) (n int, complete bool) {
 		return min(3, len(b)), len(b) >= 3
 	}
 	_, n = utf8.DecodeRune(b[1:])
-	return 1 + n, true
+	return 1 + n, utf8.FullRune(b[1:])
 }
 
 func (r *Reader) Read(p []byte) (int, error) {
@@ -176,15 +177,58 @@ func (r *Reader) Read(p []byte) (int, error) {
 		}
 		r.cur = b
 	}
-	b, complete := r.cur, false
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.oneKey && r.remaining == 0 {
+		// Bubbletea emits nothing for a partial event, so it is collected
+		// whole before the first byte is handed out.
+		for owned := false; ; owned = true {
+			k, complete := keyLen(r.cur)
+			if complete {
+				r.remaining = k
+				break
+			}
+			// Close must not hand back a prefix while its tail is in flight.
+			pending := r.cur
+			if !owned {
+				// Appending must not write into a chunk's spare capacity.
+				pending = bytes.Clone(pending)
+			}
+			r.cur = nil
+			r.mu.Unlock()
+			b, ok := r.in.next(r.done)
+			r.mu.Lock()
+			pending = append(pending, b...)
+			// done closes before Close takes mu: either means closing.
+			closing := r.closed
+			select {
+			case <-r.done:
+				closing = true
+			default:
+			}
+			if closing {
+				r.in.unreadFirst(pending)
+				return 0, io.EOF
+			}
+			r.cur = pending
+			if !ok {
+				// The keyboard is gone: what was read is all there is.
+				r.remaining = len(r.cur)
+				break
+			}
+		}
+	}
+	b := r.cur
 	if r.oneKey {
-		var k int
-		k, complete = keyLen(b)
-		b = b[:k]
+		b = b[:r.remaining]
 	}
 	n := copy(p, b)
 	r.cur = r.cur[n:]
-	r.waiting = complete && n == len(b)
+	if r.oneKey {
+		r.remaining -= n
+	}
+	r.waiting = r.oneKey && r.remaining == 0
 	if r.waiting {
 		// An ack left from a key bubbletea read in parts is not this one's.
 		select {

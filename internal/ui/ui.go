@@ -70,6 +70,10 @@ func run(m *mux.Mux, model tea.Model) (tea.Model, error) {
 		p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
 	})
 	defer m.OnResize(nil)
+	// A resize before the hook was set is not lost: the size read after
+	// it is sent once. Send blocks until Run starts and ends with Run.
+	_, rows, cols := m.Terminal()
+	go p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
 	res, err := p.Run()
 	// The program's last frame is still on the alternate screen: the
 	// multiplexer's repaint replaces it.
