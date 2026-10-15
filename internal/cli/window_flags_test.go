@@ -281,8 +281,8 @@ func TestNewWindowWaitsForCapacity(t *testing.T) {
 }
 
 // TestAttachRecordsExternalWindows: a Run new-window made that the file
-// lacks (its record was lost to a process that detached after reading
-// the file) becomes a window on attach; Rebuild names it from its label.
+// lacks (the attached process detached before adopting it) becomes a
+// window on attach, named from its label, once.
 func TestAttachRecordsExternalWindows(t *testing.T) {
 	lux := fakelux.New()
 	defer lux.Close()

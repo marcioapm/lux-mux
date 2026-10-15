@@ -169,9 +169,9 @@ func newWindow(env Env, o windowFlags) error {
 	return nil
 }
 
-// recordExternal appends to sess the windows new-window made while no
-// luxmux had the session but whose record never landed (the file was
-// written by a process that detached after new-window read it).
+// recordExternal appends to sess the Runs new-window made that its file
+// lacks: new-window found the session attached and left the record to
+// that process, which detached before it adopted them.
 func recordExternal(sess *state.Session, runs []*api.Run, cfg *config.Config) {
 	for _, r := range runs {
 		if r.Labels[config.LabelExternal] != "true" || !state.Live(r.State) {
