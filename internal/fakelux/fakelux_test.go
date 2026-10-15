@@ -8,6 +8,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/marcioapm/lux/api"
 )
 
 // bigScreen fills a 200×500 terminal with cells whose snapshot is over
@@ -51,6 +55,47 @@ func TestRestoreAttachWithoutSnapshotIsStrict(t *testing.T) {
 	case <-plain.Behind:
 		t.Fatal("a plain attach was ended")
 	default:
+	}
+}
+
+// TestSnapshotFramedAsShim: as lux-shim, a restore snapshot comes in
+// frames of at most 32 KiB, then the Restored marker.
+func TestSnapshotFramedAsShim(t *testing.T) {
+	s := New()
+	defer s.Close()
+	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(`{"image":{"ref":"alpine"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	id := s.RunIDs()[0]
+	WaitFor(context.Background(), 5*time.Second, func() bool { return s.Run(id).State == "running" })
+	s.Term(id).Output(bytes.Repeat([]byte("history line 0123456789abcdef\r\n"), 4096))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(s.URL, "http")+"/v1/runs/"+id+"/attach?restore=true&rows=24&cols=80", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	ws.SetReadLimit(8 << 20)
+	frames, total := 0, 0
+	for {
+		var d api.StreamData
+		if err := wsjson.Read(ctx, ws, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Restored {
+			break
+		}
+		if len(d.Data) > 32<<10 {
+			t.Fatalf("a %d-byte snapshot frame", len(d.Data))
+		}
+		frames++
+		total += len(d.Data)
+	}
+	if frames < 2 || total <= 32<<10 {
+		t.Fatalf("%d frames, %d bytes: the snapshot did not need framing", frames, total)
 	}
 }
 

@@ -81,6 +81,9 @@ func TestStaleShownWindowIsNotReattached(t *testing.T) {
 	h.lux.Term(a).Output([]byte("\x1b[2J\x1b[HSHOWN-SCREEN"))
 	h.waitScreen("output", h.contains("SHOWN-SCREEN"))
 	n := len(attachesOf(h.lux, a))
+	h.m.mu.Lock()
+	h.m.windows[0].lastAttach = time.Time{}
+	h.m.mu.Unlock()
 	h.type_("\x029")
 	h.noticeShown("no window 9")
 	h.type_("\x02,")
@@ -92,6 +95,12 @@ func TestStaleShownWindowIsNotReattached(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := len(attachesOf(h.lux, a)); got != n {
 		t.Fatalf("%d reattaches of the shown window for overlays", got-n)
+	}
+	h.m.mu.Lock()
+	refresh := h.m.windows[0].refreshing || h.m.windows[0].refreshDue
+	h.m.mu.Unlock()
+	if refresh {
+		t.Fatal("overlay scheduled a refresh")
 	}
 	scr := h.term.screen()
 	if strings.Contains(scr, "refreshing") || !strings.Contains(scr, "SHOWN-SCREEN") {
@@ -117,6 +126,7 @@ func TestStaleShownWindowRestoredAfterHelp(t *testing.T) {
 			h.lux.Term(a).Output([]byte("\x1b[2J\x1b[HQUIET-FINAL\r\n$ "))
 			h.waitScreen("output", h.contains("QUIET-FINAL"))
 			n := len(attachesOf(h.lux, a))
+			before := len(h.term.rawBytes())
 			switch closeBy {
 			case "help":
 				h.type_("\x02?")
@@ -135,6 +145,9 @@ func TestStaleShownWindowRestoredAfterHelp(t *testing.T) {
 				return strings.Contains(s, "QUIET-FINAL") && !strings.Contains(s, "luxmux keys") && !strings.Contains(s, "CHOOSER-OPEN")
 			})
 			h.waitFor("not stale", func() bool { return !h.win(0).q.isStale() })
+			if n := bytes.Count(h.term.rawBytes()[before:], []byte("OVERFLOW-FILL")); n != 0 {
+				t.Fatalf("%d snapshot history lines reached the terminal", n)
+			}
 			h.detach()
 		})
 	}
