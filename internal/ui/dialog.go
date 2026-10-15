@@ -702,7 +702,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 		if dd.open {
 			extra = dd.listLines(vw)
 		}
-		row(s, focused, dd.view(vw, focused), append(extra, errLine(s)...)...)
+		row(s, focused, dd.view(vw), append(extra, errLine(s)...)...)
 	}
 	textRow := func(s stop) {
 		row(s, d.focus == s, d.in[s].View(), errLine(s)...)
@@ -867,9 +867,8 @@ func (dd *dropdown) key(m tea.KeyMsg) (picked bool) {
 	return false
 }
 
-func (dd *dropdown) view(w int, focused bool) string {
-	s := "[ " + fitLine(dd.label(), max(1, min(w, 48)-6)) + " " + palette.accent.Render("▾") + " ]"
-	return s
+func (dd *dropdown) view(w int) string {
+	return "[ " + fitLine(dd.label(), max(1, min(w, 48)-6)) + " " + palette.accent.Render("▾") + " ]"
 }
 
 // listLines are the open list's lines: the filter, then up to
