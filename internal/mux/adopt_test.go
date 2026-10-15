@@ -381,6 +381,31 @@ func TestFailedReadLeftToListing(t *testing.T) {
 	h.detach()
 }
 
+// TestAdoptSizedRun: a sized profile's Run comes back from lux with the
+// size resolved into its resources and kept in sizing; the adopted
+// window's spec is the profile's again (its SpecKey matches, so its warm
+// spares do).
+func TestAdoptSizedRun(t *testing.T) {
+	yes := true
+	h := newHarness(t, cfgTwo+"[profiles.sized]\nimage = \"sized-image\"\nsize = \"m-2\"\n", func(l *fakelux.Server) {
+		l.SetPools([]api.Pool{{Name: "m", IsDefault: &yes, Sizes: []api.PoolSize{
+			{Name: "m-1", CPUs: 1, Memory: 2 << 30, Disk: 10 << 30, Default: true},
+			{Name: "m-2", CPUs: 2, Memory: 4 << 30, Disk: 20 << 30},
+		}}})
+	})
+	h.live(0)
+	id := submitExternal(t, h, "sized", "sized")
+	if r := h.lux.Run(id); r.Spec.Resources.Size != "" || r.Spec.Resources.CPUs != 2 {
+		t.Fatalf("lux stored %+v", r.Spec.Resources)
+	}
+	h.waitFor("adopted", func() bool { return h.nwindows() == 2 && h.window(1) == id })
+	h.detach()
+	s, _, _ := state.Load(h.dir, "s")
+	if got := *s.Windows[1].Spec; got.Size != "m-2" || got.CPUs != 0 || config.SpecKey(got) != config.SpecKey(h.cfg.Profiles["sized"]) {
+		t.Fatalf("adopted spec %+v", got)
+	}
+}
+
 // TestConsideredPruned: Run ids read after their submitted event that
 // were not adoptable (another session's) are forgotten at the next
 // listing, which does not list them.

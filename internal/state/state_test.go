@@ -120,6 +120,26 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	}
 }
 
+// TestRebuildSizedRun: a Run of a sized profile comes back from luxd with
+// the size resolved into cpus, memory and disk and no size in its spec;
+// what was asked is in sizing.requested. The window's spec is the
+// profile's again, size and not resources, so its SpecKey matches.
+func TestRebuildSizedRun(t *testing.T) {
+	prof := config.Profile{Image: "alpine", Pool: "m", Size: "m-2"}
+	sp, err := config.RunSpec(prof, config.Target{Session: "work", Profile: "dev"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.Resources = api.Resources{CPUs: 2, Memory: 4 << 30, Disk: 20 << 30}
+	r := run("run_1", "work", "dev", "running", 1, false)
+	r.Spec = sp
+	r.Sizing = &api.RunSizing{Requested: &api.SizeRequest{Size: "m-2"}, Resolved: &api.SizeResolved{Size: "m-2", CPUs: 2, Memory: 4 << 30, Disk: 20 << 30}}
+	got := WindowFromRun(r, prof).Spec
+	if got.Size != "m-2" || got.CPUs != 0 || got.Memory != "" || got.Disk != "" || config.SpecKey(*got) != config.SpecKey(prof) {
+		t.Fatalf("rebuilt %+v", got)
+	}
+}
+
 func TestRebuild(t *testing.T) {
 	runs := []*api.Run{
 		run("run_3", "work", "app", "running", 30, false),

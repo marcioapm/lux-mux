@@ -29,57 +29,83 @@ func TestWindowFlagsToRunSpec(t *testing.T) {
 		name  string
 		args  []string
 		check func(t *testing.T, sp api.RunSpec)
+		// base, when set, replaces the shared base profile.
+		base *config.Profile
 	}{
 		{"none: the profile", nil, func(t *testing.T, sp api.RunSpec) {
 			want := []api.Repository{repo("base", "https://example.com/base.git", "main", "TOKEN")}
 			if sp.Image.Ref != "alpine" || sp.Resources.Size != "m-2" || !reflect.DeepEqual(sp.Git.Repositories, want) {
 				t.Fatalf("%+v", sp)
 			}
-		}},
+		}, nil},
 		{"two repos replace the profile's", []string{"--repo", "https://example.com/api.git#dev", "--repo", "https://example.com/web.git"}, func(t *testing.T, sp api.RunSpec) {
 			want := []api.Repository{repo("api", "https://example.com/api.git", "dev", "TOKEN"), repo("web", "https://example.com/web.git", "", "TOKEN")}
 			if !reflect.DeepEqual(sp.Git.Repositories, want) || sp.Workload.Workdir != "/workspace/repos/api" {
 				t.Fatalf("%+v workdir %q", sp.Git.Repositories, sp.Workload.Workdir)
 			}
-		}},
+		}, nil},
 		{"--branch on the profile's repository", []string{"--branch", "feature"}, func(t *testing.T, sp api.RunSpec) {
 			if sp.Git.Repositories[0].Ref != "feature" || sp.Git.Repositories[0].URL != "https://example.com/base.git" {
 				t.Fatalf("%+v", sp.Git.Repositories)
 			}
-		}},
+		}, nil},
 		{"--ref on one --repo", []string{"--repo", "https://example.com/api.git", "--ref", "v1.0"}, func(t *testing.T, sp api.RunSpec) {
 			if len(sp.Git.Repositories) != 1 || sp.Git.Repositories[0].Ref != "v1.0" {
 				t.Fatalf("%+v", sp.Git.Repositories)
 			}
-		}},
+		}, nil},
 		{"image pool size", []string{"--image", "debian:12", "--pool", "gpu", "--size", "g-1"}, func(t *testing.T, sp api.RunSpec) {
 			if sp.Image.Ref != "debian:12" || sp.Placement.Pool != "gpu" || sp.Resources.Size != "g-1" {
 				t.Fatalf("%+v", sp)
 			}
-		}},
+		}, nil},
 		{"cpus memory disk replace the size", []string{"--pool", "plain", "--cpus", "3", "--memory", "6Gi", "--disk", "20Gi"}, func(t *testing.T, sp api.RunSpec) {
 			if sp.Resources.Size != "" || sp.Resources.CPUs != 3 || sp.Resources.Memory != 6<<30 || sp.Resources.Disk != 20<<30 {
 				t.Fatalf("%+v", sp.Resources)
 			}
-		}},
+		}, nil},
 		{"secrets add to the profile's", []string{"--secret", "EXTRA", "--secret", "BASE"}, func(t *testing.T, sp api.RunSpec) {
 			want := []api.Secret{{Name: "BASE", As: "env"}, {Name: "EXTRA", As: "env"}, {Name: "TOKEN"}}
 			if !reflect.DeepEqual(sp.Secrets, want) {
 				t.Fatalf("%+v", sp.Secrets)
 			}
-		}},
+		}, nil},
 		{"workdir", []string{"--workdir", "/workspace"}, func(t *testing.T, sp api.RunSpec) {
 			if sp.Workload.Workdir != "/workspace" {
 				t.Fatal(sp.Workload.Workdir)
 			}
-		}},
+		}, nil},
+		{"--size replaces the profile's cpus memory disk", []string{"--size", "m-1"}, func(t *testing.T, sp api.RunSpec) {
+			if sp.Resources != (api.Resources{Size: "m-1"}) {
+				t.Fatalf("%+v", sp.Resources)
+			}
+		}, &config.Profile{Image: "alpine", CPUs: 3, Memory: "6Gi", Disk: "20Gi"}},
+		{"--branch on a one-entry list with a branch", []string{"--branch", "dev"}, func(t *testing.T, sp api.RunSpec) {
+			if r := sp.Git.Repositories; len(r) != 1 || r[0].Ref != "dev" || r[0].Path != "/workspace/app" {
+				t.Fatalf("%+v", r)
+			}
+		}, &config.Profile{Image: "alpine", Repositories: []config.Repository{{URL: "https://example.com/app.git", Branch: "main", Path: "/workspace/app"}}}},
+		{"--branch on the shorthand with a ref", []string{"--branch", "dev"}, func(t *testing.T, sp api.RunSpec) {
+			if r := sp.Git.Repositories; len(r) != 1 || r[0].Ref != "dev" || r[0].URL != "https://example.com/app.git" {
+				t.Fatalf("%+v", r)
+			}
+		}, &config.Profile{Image: "alpine", Repository: "https://example.com/app.git", Ref: "v1"}},
+		{"--ref on the shorthand with a branch", []string{"--ref", "v2"}, func(t *testing.T, sp api.RunSpec) {
+			if r := sp.Git.Repositories; len(r) != 1 || r[0].Ref != "v2" {
+				t.Fatalf("%+v", r)
+			}
+		}, &config.Profile{Image: "alpine", Repository: "https://example.com/app.git", Branch: "main"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o, err := parseWindowFlags("new", c.args, io.Discard)
 			if err != nil {
 				t.Fatal(err)
 			}
-			p, err := o.apply(base)
+			b := base
+			if c.base != nil {
+				b = *c.base
+			}
+			p, err := o.apply(b)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +152,7 @@ func TestWindowFlagsRefused(t *testing.T) {
 			}
 		})
 	}
-	for _, args := range [][]string{{"--nope"}, {"stray"}, {"-n", strings.Repeat("x", 65)}} {
+	for _, args := range [][]string{{"--nope"}, {"stray"}, {"-n", strings.Repeat("x", 65)}, {"-n", "a\nb"}} {
 		if _, err := parseWindowFlags("new-window", args, io.Discard); err == nil {
 			t.Errorf("%q accepted", args)
 		}
@@ -294,6 +320,14 @@ func TestNewWindowRefusals(t *testing.T) {
 	if code := Main(env, []string{"new-window", "-t", "nosuch"}); code == 0 || !strings.Contains(errb.String(), "no session nosuch") {
 		t.Fatalf("unknown session: %s", errb.String())
 	}
+	// A session name that would put its files outside the state directory.
+	errb.Reset()
+	if code := Main(env, []string{"new-window", "-t", "../x"}); code == 0 || !strings.Contains(errb.String(), `session name "../x"`) {
+		t.Fatalf("bad session name: %s", errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(env.StateDir), "x.lock")); !os.IsNotExist(err) {
+		t.Fatalf("a lock outside the state directory: %v", err)
+	}
 	submit(t, lux, "work", "a", false)
 	errb.Reset()
 	if code := Main(env, []string{"new-window", "-t", "work", "-p", "zz"}); code == 0 || !strings.Contains(errb.String(), `no profile named "zz"`) {
@@ -308,6 +342,9 @@ func TestNewWindowRefusals(t *testing.T) {
 	errb.Reset()
 	if code := Main(env, []string{"new", "-s", "fresh", "--image", "nope"}); code == 0 || !strings.Contains(errb.String(), "lux refuses it") {
 		t.Fatalf("new refusal: %s", errb.String())
+	}
+	if _, ok, _ := state.Load(env.StateDir, "fresh"); ok {
+		t.Fatal("a refused new wrote its session")
 	}
 	if n := len(lux.Submits()); n != 1 {
 		t.Fatalf("%d submits after refusals", n)
