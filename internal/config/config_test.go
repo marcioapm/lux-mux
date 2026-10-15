@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -32,10 +33,32 @@ func TestImageForVersion(t *testing.T) {
 		"v0.1.1-0.20261015000000-abcdef": "ghcr.io/marcioapm/luxmux:latest",
 		"v0.2.0-rc.1":                    "ghcr.io/marcioapm/luxmux:latest",
 		"v2.0.0+incompatible":            "ghcr.io/marcioapm/luxmux:latest",
+		"foo-v0.2.0":                     "ghcr.io/marcioapm/luxmux:latest",
 		"":                               "ghcr.io/marcioapm/luxmux:latest",
 	} {
 		if got := imageForVersion(version); got != want {
 			t.Errorf("imageForVersion(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
+func TestImageFromBuildInfo(t *testing.T) {
+	read := func(version string, ok bool) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Main: debug.Module{Path: "github.com/marcioapm/lux-mux", Version: version}}, ok
+		}
+	}
+	for name, c := range map[string]struct {
+		read func() (*debug.BuildInfo, bool)
+		want string
+	}{
+		"release":       {read("v0.2.0", true), "ghcr.io/marcioapm/luxmux:0.2.0"},
+		"other release": {read("v3.4.5", true), "ghcr.io/marcioapm/luxmux:3.4.5"},
+		"devel":         {read("(devel)", true), "ghcr.io/marcioapm/luxmux:latest"},
+		"no build info": {read("v0.2.0", false), "ghcr.io/marcioapm/luxmux:latest"},
+	} {
+		if got := imageFromBuildInfo(c.read); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
 		}
 	}
 }
@@ -108,8 +131,11 @@ func TestExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prefix != "C-b" || c.DefaultProfile != "default" || c.Profiles["default"].Image == "" || c.Profiles["default"].WarmSpare {
+	if c.Prefix != "C-b" || c.DefaultProfile != "default" || c.Profiles["default"].WarmSpare {
 		t.Fatalf("example: %+v", c)
+	}
+	if got := c.Profiles["default"].Image; got != DefaultImage {
+		t.Fatalf("example image = %q, want DefaultImage %q", got, DefaultImage)
 	}
 	// Uncommenting every commented setting must still parse.
 	setting := regexp.MustCompile(`^# (\[|"?[a-z_0-9-]+"? = )`)

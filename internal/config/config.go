@@ -85,21 +85,23 @@ type Config struct {
 const ImageRepository = "ghcr.io/marcioapm/luxmux"
 
 // DefaultImage is the image of the built-in profile used when the
-// configuration defines none: the default image tagged with this binary's
-// module version.
-var DefaultImage = defaultImage()
+// configuration defines none, and the one `config init` writes: the
+// default image tagged with this binary's release version, :latest for
+// any other build.
+var DefaultImage = imageFromBuildInfo(debug.ReadBuildInfo)
 
-func defaultImage() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
+func imageFromBuildInfo(read func() (*debug.BuildInfo, bool)) string {
+	info, ok := read()
+	if !ok || info == nil {
 		return imageForVersion("")
 	}
 	return imageForVersion(info.Main.Version)
 }
 
-// imageForVersion maps a release version (v0.2.0) to its tag (0.2.0);
-// "(devel)", pseudo-versions and pre-releases, which have no published
-// image of their own, map to latest.
+// imageForVersion maps a release version (v0.2.0) to its tag (0.2.0).
+// Everything else maps to latest: "(devel)" and pseudo-versions have no
+// image of their own, and pre-release binaries use latest even though the
+// image workflow publishes :X.Y.Z-rc.N for an rc tag.
 func imageForVersion(version string) string {
 	const prefix = ImageRepository + ":"
 	if !releaseRe.MatchString(version) {
