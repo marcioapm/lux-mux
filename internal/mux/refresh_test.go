@@ -262,9 +262,19 @@ func TestKeysTypedDuringReconnectBounded(t *testing.T) {
 		all = append(all, c...)
 		h.type_(string(c))
 	}
+	want := all[len(all)-pendingInLimit:]
+	// Every chunk typed has reached the window: the notice alone can come
+	// before the last chunks are kept, and those would then go out live.
+	h.waitFor("all keys kept", func() bool {
+		h.m.mu.Lock()
+		w := h.m.windows[0]
+		h.m.mu.Unlock()
+		w.connMu.Lock()
+		defer w.connMu.Unlock()
+		return bytes.Equal(w.pendingIn, want)
+	})
 	h.waitScreen("dropped notice", h.contains("typed bytes dropped"))
 	gate.release(a)
-	want := all[len(all)-pendingInLimit:]
 	h.waitFor("kept keys", func() bool { return len(keys.of(a)) >= len(want) })
 	if got := keys.of(a); !bytes.Equal(got, want) {
 		t.Fatalf("got %d bytes starting %q, want the last %d", len(got), got[:16], len(want))
