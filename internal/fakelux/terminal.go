@@ -22,6 +22,7 @@ type Terminal struct {
 	gone   chan struct{}
 	once   sync.Once
 	closer func()
+	resizes [][2]int
 }
 
 func newTerminal(rows, cols int) *Terminal {
@@ -85,10 +86,18 @@ func (t *Terminal) Resize(rows, cols int) {
 }
 
 func (t *Terminal) resizeLocked(rows, cols int) {
+	t.resizes = append(t.resizes, [2]int{rows, cols})
 	t.screen.Resize(rows, cols)
 	if t.resize != nil {
 		t.resize(rows, cols)
 	}
+}
+
+// Resizes are the sizes the terminal was given, in order.
+func (t *Terminal) Resizes() [][2]int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([][2]int{}, t.resizes...)
 }
 
 // Gone is closed when the process has exited.

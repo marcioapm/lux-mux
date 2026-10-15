@@ -5,6 +5,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/marcioapm/lux/api"
 )
 
@@ -15,6 +17,17 @@ func (s *Server) Blip(id string) {
 	defer s.mu.Unlock()
 	for c := range s.runs[id].conns {
 		c.CloseNow()
+	}
+}
+
+// FellBehind ends the Run's attach streams as a newer host ends a restore
+// attach whose reader fell behind; the Run goes on running.
+func (s *Server) FellBehind(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for c := range s.runs[id].conns {
+		_ = wsjson.Write(context.Background(), c, api.StreamData{Error: "attach fell behind; attach again"})
+		_ = c.Close(websocket.StatusNormalClosure, "")
 	}
 }
 

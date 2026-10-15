@@ -94,15 +94,24 @@ type harness struct {
 	m    *Mux
 	done chan string
 	dir  string
-	env  map[string]string
+	env   map[string]string
+	envMu sync.Mutex
 	cfg  *config.Config
 	rows int
 	cols int
 }
 
 func newHarness(t *testing.T, cfgSrc string, setup func(*fakelux.Server)) *harness {
+	return newHarnessEnv(t, cfgSrc, nil, setup)
+}
+
+// newHarnessEnv is newHarness with variables Lookup finds from the start.
+func newHarnessEnv(t *testing.T, cfgSrc string, env map[string]string, setup func(*fakelux.Server)) *harness {
 	t.Helper()
 	h := &harness{t: t, lux: fakelux.New(), rows: 24, cols: 80, dir: t.TempDir(), env: map[string]string{}}
+	for k, v := range env {
+		h.env[k] = v
+	}
 	t.Cleanup(h.lux.Close)
 	if setup != nil {
 		setup(h.lux)
@@ -136,7 +145,12 @@ func (h *harness) start(sess *state.Session) {
 	m, err := New(Options{
 		Session: "s", Config: h.cfg, Lux: cl, StateDir: h.dir,
 		In: pr, Out: h.term, Size: func() (int, int) { return h.rows, h.cols },
-		Lookup:  func(k string) (string, bool) { v, ok := h.env[k]; return v, ok },
+		Lookup: func(k string) (string, bool) {
+			h.envMu.Lock()
+			defer h.envMu.Unlock()
+			v, ok := h.env[k]
+			return v, ok
+		},
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond,
 		NoticeFor: 50 * time.Millisecond, RestoreWait: 300 * time.Millisecond, Poll: 50 * time.Millisecond,
 	}, sess)
@@ -234,3 +248,14 @@ func (h *harness) reason(i int) string {
 var _ = api.Run{}
 
 func timeout() <-chan time.Time { return time.After(5 * time.Second) }
+
+// setEnv sets (or with ok false, unsets) a variable Lookup finds.
+func (h *harness) setEnv(k, v string, ok bool) {
+	h.envMu.Lock()
+	defer h.envMu.Unlock()
+	if ok {
+		h.env[k] = v
+	} else {
+		delete(h.env, k)
+	}
+}
