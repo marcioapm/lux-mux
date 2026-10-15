@@ -141,6 +141,13 @@ func (s *Server) SetHold(on bool) {
 	s.mu.Unlock()
 }
 
+// SetHoldTerminate sets HoldTerminate while the server is serving.
+func (s *Server) SetHoldTerminate(on bool) {
+	s.mu.Lock()
+	s.HoldTerminate = on
+	s.mu.Unlock()
+}
+
 // FailGets makes each GET of Run id fail with 503 (on) or not.
 func (s *Server) FailGets(id string, on bool) {
 	s.mu.Lock()

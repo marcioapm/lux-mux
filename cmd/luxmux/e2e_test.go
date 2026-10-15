@@ -382,6 +382,65 @@ func TestNewMissingSecretRefused(t *testing.T) {
 	}
 }
 
+// TestAttachRecordsThenForgetsKilled: a Run new-window made while the
+// session was attached elsewhere, never adopted there, is a window on the
+// next attach; killed with C-b &, it stays gone on the attach after,
+// though lux still has it stopping for its terminate.
+func TestAttachRecordsThenForgetsKilled(t *testing.T) {
+	lux, env := e2eEnv(t)
+	var stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	p := startLuxmux(t, env, "new -s rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	// Another process holds the session: new-window leaves the record
+	// to it, and it goes away without adopting.
+	unlock, err := state.Lock(stateDir, "rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := startLuxmux(t, env, "new-window -t rec -n ext")
+	q.exited()
+	unlock()
+	ext := lux.RunIDs()[1]
+	if s, _, _ := state.Load(stateDir, "rec"); len(s.Windows) != 1 {
+		t.Fatalf("new-window wrote the file of an attached session: %+v", s.Windows)
+	}
+
+	p = startLuxmux(t, env, "attach -t rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("recorded window", func(string) bool { return p.scr.title() == "luxmux:rec [1] ext" })
+	// Recorded on attach, it was the session's from the start: not a
+	// window the attached process added (and announced) later.
+	if strings.Contains(p.rawSince(0), "added: ext") {
+		t.Fatal("the Run was adopted after the attach, not recorded by it")
+	}
+	lux.SetHoldTerminate(true)
+	p.typ("\x02&")
+	p.wait("confirm", has("(y/N)"))
+	p.typ("y")
+	p.wait("window killed", func(string) bool { return strings.HasPrefix(p.scr.title(), "luxmux:rec [0]") })
+	if st := lux.Run(ext).State; st != "stopping" {
+		t.Fatalf("killed Run %s", st)
+	}
+	p.typ("\x02d")
+	p.exited()
+
+	p = startLuxmux(t, env, "attach -t rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	if s, _, _ := state.Load(stateDir, "rec"); len(s.Windows) != 1 || s.Windows[0].RunID == ext {
+		t.Fatalf("the killed window came back: %+v", s.Windows)
+	}
+}
+
 // TestEndToEnd drives luxmux in a pty against a fake luxd whose Runs'
 // terminals are local shells.
 func TestEndToEnd(t *testing.T) {

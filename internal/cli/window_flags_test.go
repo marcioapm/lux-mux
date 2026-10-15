@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/api"
 
@@ -334,33 +335,55 @@ func TestNewWindowWaitsForCapacity(t *testing.T) {
 
 // TestAttachRecordsExternalWindows: a Run new-window made that the file
 // lacks (the attached process detached before adopting it) becomes a
-// window on attach, named from its label, once.
+// window on attach, named from its label, once. Runs it did not make, a
+// spare, and Runs terminated or being terminated do not.
 func TestAttachRecordsExternalWindows(t *testing.T) {
 	lux := fakelux.New()
 	defer lux.Close()
-	env, _, _ := testEnv(t, lux, "")
+	lux.SetHoldTerminate(true)
 	cfg, _ := config.Parse([]byte(twoProfiles))
+	c, _ := client(Env{Lux: lux.Config})
 	first := submit(t, lux, "work", "a", false)
-	sp, err := config.RunSpec(config.Profile{Image: "img-b", Repositories: []config.Repository{{URL: "https://example.com/x.git", Branch: "dev"}}},
-		config.Target{Session: "work", Profile: "b"}, nil)
-	if err != nil {
+	external := func(session string, spare bool) string {
+		t.Helper()
+		sp, err := config.RunSpec(config.Profile{Image: "img-b", Repositories: []config.Repository{{URL: "https://example.com/x.git", Branch: "dev"}}},
+			config.Target{Session: session, Profile: "b", Spare: spare}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sp.Labels[config.LabelExternal], sp.Labels[config.LabelWindow] = "true", "ext"
+		r, err := c.Submit(context.Background(), sp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.ID
+	}
+	ext := external("work", false)
+	submit(t, lux, "work", "a", false) // another process's window
+	external("work", true)             // a spare
+	ended := external("work", false)
+	lux.End(ended, "terminated", "terminated")
+	killed := external("work", false)
+	if !fakelux.WaitFor(context.Background(), 5*time.Second, func() bool { return lux.Run(killed).State == "running" }) {
+		t.Fatal("not running")
+	}
+	if err := c.Terminate(context.Background(), killed); err != nil {
 		t.Fatal(err)
 	}
-	sp.Labels[config.LabelExternal], sp.Labels[config.LabelWindow] = "true", "ext"
-	c, _ := client(Env{Lux: lux.Config})
-	ext, err := c.Submit(context.Background(), sp)
-	if err != nil {
-		t.Fatal(err)
+	if st := lux.Run(killed).State; st != "stopping" {
+		t.Fatalf("killed Run %s", st)
 	}
 	runs, _ := c.ListSession(context.Background(), "work")
+	// A Run of another session, as a listing could never return it.
+	other := lux.Run(external("other", false))
+	runs = append(runs, &other)
 	s := &state.Session{Name: "work", Windows: []state.Window{{RunID: first, Name: "a", Profile: "a"}}}
 	recordExternal(s, runs, cfg)
 	recordExternal(s, runs, cfg)
-	if len(s.Windows) != 2 || s.Windows[1].RunID != ext.ID || s.Windows[1].Name != "ext" || s.Windows[1].Profile != "b" {
+	if len(s.Windows) != 2 || s.Windows[1].RunID != ext || s.Windows[1].Name != "ext" || s.Windows[1].Profile != "b" {
 		t.Fatalf("windows %+v", s.Windows)
 	}
 	if r := s.Windows[1].Spec.Repositories; len(r) != 1 || r[0].URL != "https://example.com/x.git" || r[0].Ref != "dev" {
 		t.Fatalf("spec %+v", s.Windows[1].Spec)
 	}
-	_ = env
 }

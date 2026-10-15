@@ -178,10 +178,11 @@ func newWindow(env Env, o windowFlags) error {
 
 // recordExternal appends to sess the Runs new-window made that its file
 // lacks: new-window found the session attached and left the record to
-// that process, which detached before it adopted them.
+// that process, which detached before it adopted them. A Run being
+// terminated (its window was closed there) is not one.
 func recordExternal(sess *state.Session, runs []*api.Run, cfg *config.Config) {
 	for _, r := range runs {
-		if r.Labels[config.LabelExternal] != "true" || !state.Live(r.State) {
+		if !state.Adoptable(r, sess.Name) {
 			continue
 		}
 		if slices.ContainsFunc(sess.Windows, func(w state.Window) bool { return w.RunID == r.ID }) {
