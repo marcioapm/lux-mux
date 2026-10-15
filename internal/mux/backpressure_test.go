@@ -2,6 +2,7 @@ package mux
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -194,8 +195,7 @@ func TestOverflowShownWindowKeepsRawOutput(t *testing.T) {
 
 // TestOverflowWhilePainting: a window switched to whose emulator overflows
 // before the paint was drawn shows the placeholder, and is attached again
-// so lux's snapshot replaces it; the stale queue holds none of the output
-// that arrives meanwhile.
+// so lux's snapshot replaces it.
 func TestOverflowWhilePainting(t *testing.T) {
 	h := newHarness(t, cfgDefault, nil)
 	a := h.live(0)
@@ -224,19 +224,23 @@ func TestOverflowWhilePainting(t *testing.T) {
 	})
 	chunk := bytes.Repeat([]byte("OVERFLOW-FILL-0123456789\r\n"), 1<<14)
 	term := h.lux.Term(a)
-	for sent := 0; sent <= feedLimit+len(chunk) && !w.q.isStale(); sent += len(chunk) {
+	for !w.q.isStale() {
+		w.q.mu.Lock()
+		want := w.q.bytes + len(chunk)
+		w.q.mu.Unlock()
 		term.Output(chunk)
-		h.waitFor("stream drained", func() bool { return term.Queued() < 2<<20 && h.termQueued() < liveLimit/2 })
-	}
-	h.waitFor("stale", w.q.isStale)
-	// More output while stale: dropped, not queued for the emulator.
-	term.Output(chunk)
-	h.waitFor("stream drained", func() bool { return term.Queued() == 0 })
-	w.q.mu.Lock()
-	queued := w.q.bytes
-	w.q.mu.Unlock()
-	if queued != 0 {
-		t.Errorf("a stale queue holds %d bytes", queued)
+		// Paced on what reached the emulator's queue: this attach may be
+		// a plain one, whose host queue misses output silently.
+		ok := fakelux.WaitFor(context.Background(), 5*time.Second, func() bool {
+			w.q.mu.Lock()
+			defer w.q.mu.Unlock()
+			return w.q.stale || w.q.bytes >= want
+		})
+		if !ok {
+			w.q.mu.Lock()
+			defer w.q.mu.Unlock()
+			t.Fatalf("chunk not queued for the emulator: want %d bytes, %d queued", want, w.q.bytes)
+		}
 	}
 	w.emuMu.Unlock()
 	h.waitFor("reattached with restore", func() bool {
@@ -249,6 +253,29 @@ func TestOverflowWhilePainting(t *testing.T) {
 		t.Fatalf("placeholder left:\n%s", h.term.screen())
 	}
 	h.detach()
+}
+
+// TestStaleFeedQueueDropsData: once overflowed, a feed queue takes no
+// output until restart (the stream that replaces it starts from lux's
+// snapshot); resizes and paints are still queued.
+func TestStaleFeedQueueDropsData(t *testing.T) {
+	q := &feedQueue{wake: make(chan struct{}, 1)}
+	big := make([]byte, feedLimit)
+	q.push(feedItem{data: big})
+	if !q.push(feedItem{data: []byte("x")}) || !q.isStale() {
+		t.Fatal("no overflow")
+	}
+	n := len(q.items)
+	q.push(feedItem{data: []byte("while stale")})
+	q.push(feedItem{rows: 10, cols: 20})
+	if q.bytes != 0 || len(q.items) != n+1 || q.items[n].rows != 10 {
+		t.Fatalf("stale queue: %d bytes, %d items (had %d)", q.bytes, len(q.items), n)
+	}
+	q.restart()
+	q.push(feedItem{data: []byte("after")})
+	if q.isStale() || q.bytes != len("after") {
+		t.Fatalf("after restart: stale %v, %d bytes", q.isStale(), q.bytes)
+	}
 }
 
 // TestPreviewOfStaleWindowRefreshes: the chooser's preview of a stale
