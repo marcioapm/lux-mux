@@ -163,7 +163,7 @@ func clamp(i, n int) int {
 func (m *Mux) Session() string { return m.opt.Session }
 
 // Config is the configuration.
-func (m *Mux) Config() *config.Config { return m.opt.Config }
+func (m *Mux) Config() *config.Config { return m.config() }
 
 // Lux is the lux client.
 func (m *Mux) Lux() *luxapi.Client { return m.lux }
@@ -191,8 +191,9 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	})
 	m.mu.Lock()
 	if len(m.windows) == 0 {
+		cfg := m.opt.Config
 		m.mu.Unlock()
-		m.newWindowFrom(m.opt.Config.DefaultProfile, m.opt.Config.Profiles[m.opt.Config.DefaultProfile], "", false)
+		m.newWindowFrom(cfg.DefaultProfile, cfg.Profiles[cfg.DefaultProfile], "", false)
 		m.mu.Lock()
 	}
 	for _, w := range m.windows {
@@ -579,6 +580,7 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)
+	m.dropClaimedLocked(w.RunID)
 	m.closeFeedLocked(w)
 	if len(m.windows) == 0 {
 		m.saveLocked()

@@ -37,7 +37,8 @@ type Session struct {
 	// Claimed are spare Runs that became windows: their luxmux-spare label
 	// stays, so this is how they are told from the spare still waiting.
 	Claimed []string `json:"claimed,omitempty"`
-	// Spares maps a profile name to its warm spare's Run id.
+	// Spares maps a spec key (config.SpecKey) to its waiting warm spare's
+	// Run id.
 	Spares map[string]string `json:"spares,omitempty"`
 	// Recent images and repositories typed in the dialog, newest first.
 	RecentImages []string `json:"recentImages,omitempty"`
@@ -151,16 +152,20 @@ func Rebuild(session string, runs []*api.Run) *Session {
 		prof := r.Labels[config.LabelProfile]
 		if r.Labels[config.LabelSpare] == "true" {
 			// Which spares were claimed is only in the lost file: the
-			// newest of a profile is taken to be its waiting spare, any
+			// newest of a spec is taken to be its waiting spare, any
 			// older one a claimed window.
 			if s.Spares == nil {
 				s.Spares = map[string]string{}
 			}
-			if prev, ok := s.Spares[prof]; ok {
+			key := r.Labels[config.LabelSpec]
+			if key == "" {
+				key = prof
+			}
+			if prev, ok := s.Spares[key]; ok {
 				s.Claimed = append(s.Claimed, prev)
 				s.Windows = append(s.Windows, Window{RunID: prev, Name: prof, Profile: prof})
 			}
-			s.Spares[prof] = r.ID
+			s.Spares[key] = r.ID
 			continue
 		}
 		s.Windows = append(s.Windows, Window{RunID: r.ID, Name: prof, Profile: prof})
@@ -197,6 +202,13 @@ func (s *Session) Reconcile(known map[string]string) {
 			delete(s.Spares, p)
 		}
 	}
+	claimed := s.Claimed[:0]
+	for _, id := range s.Claimed {
+		if st, ok := known[id]; ok && Live(st) {
+			claimed = append(claimed, id)
+		}
+	}
+	s.Claimed = claimed
 }
 
 func (s *Session) at(i int) string {

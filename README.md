@@ -132,12 +132,17 @@ Each window follows its Run on its own:
   window shows `reconnecting… (<stage>)` and attaches when the Run is
   running again. That is a **fresh shell** in a new container: the files in
   `/workspace` are restored, running processes are not.
-- **Stopped or lost and needing its secrets** (lux keeps secret values in
-  memory only): luxmux resumes the Run with the profile's secret values,
-  then attaches.
-- **Ended for good** (terminated, failed): the window shows why, and offers
-  `r` to relaunch a fresh Run of the same profile in that slot or `&` to
-  close it.
+- **Stopped for its secrets, or lost** (lux keeps secret values in memory
+  only; a lost Run's host stopped answering): luxmux resumes the Run with
+  the values of the secrets lux lists for it, then attaches.
+- **Stopped by a person** (`lux stop`, the console): luxmux does not undo
+  that. The window shows `stopped by <reason> — r resume, & close`.
+- **Ended for good** (terminated, failed for a reason of lux's such as
+  `timeout`): the window shows why, and offers `r` to relaunch a fresh Run
+  of the same profile in that slot or `&` to close it.
+- **The shell exited** (lux reports the Run succeeded, or failed with
+  `exit code N` after its stream said the workload exited): the window
+  closes and its Run is terminated.
 
 ## Screens and scrollback
 
@@ -168,8 +173,11 @@ blank, and luxmux asks the shell to redraw its prompt.
 ## Warm spares
 
 With `warm_spare = true`, luxmux keeps one extra started Run of that
-profile, labelled as a spare. A new window of that profile takes it at
-once and a replacement is started. **A spare is a running Run and is
+profile, labelled as a spare (with a hash of the Run's spec). A new window
+whose spec is the same takes it at once and a replacement is started; a
+window from the dialog with an edited spec gets a Run of its own, and a
+spare is kept for it only if it was saved as a profile. A spare found
+stopped or ended when claimed is terminated and replaced. **A spare is a running Run and is
 billed while it waits**: enable it only where instant windows are worth
 that. `kill-session` and `luxmux spares --rm` terminate spares; the
 session's last window closing does too.
@@ -183,8 +191,11 @@ Run is also labelled `luxmux-session=<session>` and
 another machine, a cleaned home directory — `luxmux attach -t NAME`
 rebuilds the session from lux: its non-terminated Runs, ordered by
 creation. That rebuild is lossy: window names become their profile names,
-and of several spares of one profile the newest is taken to be the waiting
+and of several spares of one spec the newest is taken to be the waiting
 one.
+
+One luxmux process attaches a session at a time: a second `luxmux attach`
+of an attached session fails, naming the process that has it.
 
 ## Development
 

@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -29,8 +30,7 @@ type ChooseResult struct {
 
 // newWindowFrom makes a window for a new Run of profile p and shows it at
 // once; the Run is submitted (or a warm spare claimed) in the background,
-// the window showing its progress. relaunch, when not nil, is replaced in
-// its slot instead of a new window being added.
+// the window showing its progress.
 func (m *Mux) newWindowFrom(name string, p config.Profile, title string, _ bool) {
 	if title == "" {
 		title = name
@@ -48,27 +48,33 @@ func (m *Mux) newWindowFrom(name string, p config.Profile, title string, _ bool)
 	})
 }
 
-// launch gets w a Run: its profile's waiting spare, else a new one.
+// launch gets w a Run: a waiting spare of the same spec, else a new one.
 func (m *Mux) launch(w *Window) {
 	if id := m.claimSpare(w); id != "" {
 		m.mu.Lock()
+		if w.closed {
+			m.mu.Unlock()
+			m.terminate(id)
+			return
+		}
 		w.RunID = id
 		m.byRun[id] = w
 		w.steps.note("claimed warm spare " + id)
 		m.saveLocked()
-		if !w.closed {
-			m.startSupervisor(w)
-		}
+		m.startSupervisor(w)
 		m.mu.Unlock()
 		w.poke()
 		return
 	}
-	secrets, err := w.Spec.ResolveSecrets(m.opt.Lookup)
+	m.mu.Lock()
+	spec, profile := w.Spec, w.Profile
+	m.mu.Unlock()
+	secrets, err := spec.ResolveSecrets(m.opt.Lookup)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
 	}
-	sp, err := config.RunSpec(w.Spec, config.Target{Session: m.opt.Session, Profile: w.Profile}, secrets)
+	sp, err := config.RunSpec(spec, config.Target{Session: m.opt.Session, Profile: profile}, secrets)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
@@ -90,11 +96,10 @@ func (m *Mux) launch(w *Window) {
 		}
 		bo = min(2*bo, m.opt.MaxBackoff)
 	}
-	if m.ctx.Err() != nil {
-		return
-	}
 	if err != nil {
-		m.markDead(w, "submit: "+luxapi.Describe(err))
+		if m.ctx.Err() == nil {
+			m.markDead(w, "submit: "+luxapi.Describe(err))
+		}
 		return
 	}
 	m.mu.Lock()
@@ -126,9 +131,11 @@ func (m *Mux) relaunch(w *Window) {
 		w.cancel = nil
 	}
 	delete(m.byRun, old)
+	m.dropClaimedLocked(old)
 	w.RunID = ""
 	w.phase = phaseStarting
 	w.reason = ""
+	w.resumable = false
 	w.status = ""
 	w.hasScreen = false
 	w.attachedOnce = false
@@ -148,57 +155,98 @@ func (m *Mux) relaunch(w *Window) {
 	})
 }
 
-// claimSpare takes the waiting spare of w's profile, if the profile keeps
-// one and it is running or on its way; the Run keeps its spare label, so
-// the claim is recorded in the session file.
+// spareStates are the states a waiting spare may be claimed in.
+var spareStates = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
+
+// claimSpare takes the waiting spare of w's spec (config.SpecKey), if its
+// profile keeps one and it is running or on its way. The Run keeps its
+// spare label, so the claim is recorded in the session file. A spare
+// found gone, stopped or ended is terminated (unless it is) and replaced.
 func (m *Mux) claimSpare(w *Window) string {
-	if !w.Spec.WarmSpare {
-		return ""
-	}
 	m.mu.Lock()
-	id := m.sess.Spares[w.Profile]
-	if id != "" {
-		delete(m.sess.Spares, w.Profile)
-		m.sess.Claimed = append(m.sess.Claimed, id)
-		m.saveLocked()
+	key := ""
+	if w.Spec.WarmSpare {
+		key = config.SpecKey(w.Spec)
+	}
+	id := ""
+	if key != "" {
+		id = m.sess.Spares[key]
+		if id != "" {
+			delete(m.sess.Spares, key)
+			m.saveLocked()
+		}
 	}
 	m.mu.Unlock()
+	if key == "" {
+		return ""
+	}
+	// Whether or not this one is taken, the profile's slot is refilled.
+	defer m.replaceSpare(key)
 	if id == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 	run, err := m.lux.Get(ctx, id)
 	cancel()
-	if err != nil || !(run.State == "running" || run.State == "submitted" || run.State == "scheduled" ||
-		run.State == "starting" || run.State == "provisioning") {
+	if err != nil || !spareStates[run.State] {
+		if err != nil || state.Live(run.State) {
+			m.goSafe(func() { m.terminate(id) })
+		}
 		return ""
 	}
-	m.goSafe(func() { m.ensureSpare(w.Profile, w.Spec) })
+	m.mu.Lock()
+	m.sess.Claimed = append(m.sess.Claimed, id)
+	m.saveLocked()
+	m.mu.Unlock()
 	return id
+}
+
+// replaceSpare submits a new spare for spec key when a configured profile
+// with warm_spare has it: spares are kept for profiles only, not for a
+// dialog's unsaved spec.
+func (m *Mux) replaceSpare(key string) {
+	cfg := m.config()
+	for _, n := range cfg.ProfileNames() {
+		if p := cfg.Profiles[n]; p.WarmSpare && config.SpecKey(p) == key {
+			m.goSafe(func() { m.ensureSpare(n, p) })
+			return
+		}
+	}
+}
+
+// dropClaimedLocked forgets a claimed spare whose window no longer has it.
+func (m *Mux) dropClaimedLocked(id string) {
+	m.sess.Claimed = slices.DeleteFunc(m.sess.Claimed, func(c string) bool { return c == id })
 }
 
 // keepSpares keeps one waiting spare of every configured profile with
 // warm_spare on.
 func (m *Mux) keepSpares() {
 	defer m.wg.Done()
-	for _, n := range m.opt.Config.ProfileNames() {
-		if p := m.opt.Config.Profiles[n]; p.WarmSpare {
+	cfg := m.config()
+	for _, n := range cfg.ProfileNames() {
+		if p := cfg.Profiles[n]; p.WarmSpare {
 			m.ensureSpare(n, p)
 		}
 	}
 }
 
-// ensureSpare submits a spare for profile name unless it has one.
+// ensureSpare submits a spare of profile name, keyed by its spec, unless
+// there is one.
 func (m *Mux) ensureSpare(name string, p config.Profile) {
+	key := config.SpecKey(p)
+	if key == "" {
+		return
+	}
 	m.mu.Lock()
 	if m.sess.Spares == nil {
 		m.sess.Spares = map[string]string{}
 	}
-	if _, ok := m.sess.Spares[name]; ok || m.ctx.Err() != nil {
+	if _, ok := m.sess.Spares[key]; ok || m.ctx.Err() != nil {
 		m.mu.Unlock()
 		return
 	}
-	m.sess.Spares[name] = "" // reserved while submitting
+	m.sess.Spares[key] = "" // reserved while submitting
 	m.mu.Unlock()
 	secrets, err := p.ResolveSecrets(m.opt.Lookup)
 	var run *api.Run
@@ -214,13 +262,13 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err != nil {
-		delete(m.sess.Spares, name)
+		delete(m.sess.Spares, key)
 		if m.ctx.Err() == nil {
 			m.setNoticeLocked(fmt.Sprintf("warm spare for %s: %s", name, luxapi.Describe(err)))
 		}
 		return
 	}
-	m.sess.Spares[name] = run.ID
+	m.sess.Spares[key] = run.ID
 	m.saveLocked()
 }
 
@@ -251,7 +299,7 @@ func (m *Mux) openNewDialog() {
 		if err := SaveProfile(req.SaveAs, req.Profile); err != nil {
 			m.Notice("save profile: " + err.Error())
 		} else {
-			m.opt.Config.Profiles[req.SaveAs] = req.Profile
+			m.addProfile(req.SaveAs, req.Profile)
 		}
 	}
 	m.newWindowFrom(name, req.Profile, "", false)
@@ -273,6 +321,28 @@ func (m *Mux) openChooser() {
 	if res.Select >= 0 {
 		m.Select(res.Select)
 	}
+}
+
+// config is the configuration now. It is never changed in place: a
+// profile saved from the dialog replaces it with a copy (addProfile), so
+// what config returned may be read without the lock.
+func (m *Mux) config() *config.Config {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.opt.Config
+}
+
+// addProfile adds profile p as name to a copy of the configuration.
+func (m *Mux) addProfile(name string, p config.Profile) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := *m.opt.Config
+	c.Profiles = maps.Clone(c.Profiles)
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	c.Profiles[name] = p
+	m.opt.Config = &c
 }
 
 // Recent are the images and repositories typed in the dialog lately.

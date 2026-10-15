@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
@@ -19,7 +22,26 @@ const (
 	// change after submit, so a claimed spare keeps it: the session's state
 	// file records claims.
 	LabelSpare = "luxmux-spare"
+	// LabelSpec is a warm spare's SpecKey: which windows may claim it.
+	LabelSpec = "luxmux-spec"
 )
+
+// SpecKey identifies the Run a profile makes, whatever the profile is
+// named and wherever it runs: a hash of its RunSpec without luxmux's
+// labels or secret values. A warm spare is claimed only by a window whose
+// profile has the same key. Empty for a profile that makes no RunSpec.
+func SpecKey(p Profile) string {
+	sp, err := RunSpec(p, Target{}, nil)
+	if err != nil {
+		return ""
+	}
+	b, err := json.Marshal(sp)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
 
 // Workspace is the state volume every window's Run has, where
 // repositories are cloned and what survives a move.
@@ -63,6 +85,7 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 	sp.Labels[LabelProfile] = t.Profile
 	if t.Spare {
 		sp.Labels[LabelSpare] = "true"
+		sp.Labels[LabelSpec] = SpecKey(p)
 	}
 	if len(p.Env) > 0 {
 		sp.Env = map[string]string{}

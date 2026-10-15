@@ -60,9 +60,10 @@ type Server struct {
 	submits []api.RunSpec
 	terms   []string
 	pools   []api.Pool
-	// Inputs counts StreamData input messages per Run, for tests waiting
-	// on keystrokes; InputHook, if set, is called with each one.
+	// InputHook, if set, is called with each input message's data.
 	InputHook func(runID string, data []byte)
+	// SubmitHook, if set, runs before each submit is answered.
+	SubmitHook func()
 }
 
 type fakeRun struct {
@@ -161,6 +162,9 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	if sp.Image.Ref == "" {
 		writeErr(w, 422, "invalid_spec", "image.ref is required")
 		return
+	}
+	if s.SubmitHook != nil && req.URL.Query().Get("validateOnly") != "true" {
+		s.SubmitHook()
 	}
 	if req.URL.Query().Get("validateOnly") == "true" {
 		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: sp.Placement.Pool}
