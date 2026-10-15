@@ -159,6 +159,16 @@ func (m *Mux) Config() *config.Config { return m.opt.Config }
 // Lux is the lux client.
 func (m *Mux) Lux() *luxapi.Client { return m.lux }
 
+// Terminal is where dialogs draw, and its size.
+func (m *Mux) Terminal() (io.Writer, int, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.out, m.rows, m.cols
+}
+
+// Context ends when the session does.
+func (m *Mux) Context() context.Context { return m.ctx }
+
 // Run shows the session until it is detached, its last window closes, or
 // ctx ends. It returns why: "detached", "exited" or ctx's error.
 func (m *Mux) Run(ctx context.Context) (string, error) {

@@ -46,6 +46,9 @@ func AppendProfileTo(path, name string, p Profile) error {
 	if err != nil {
 		return err
 	}
+	// go-toml writes a bare [profiles] header first, which a file that
+	// has profiles already would declare twice.
+	b = bytes.TrimPrefix(b, []byte("[profiles]\n"))
 	out := append([]byte{}, old...)
 	if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
 		out = append(out, '\n')
