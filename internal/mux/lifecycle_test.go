@@ -85,6 +85,30 @@ func TestKeysKeptForARunThatEndsAreDropped(t *testing.T) {
 	h.detach()
 }
 
+// TestRelaunchSendsNoKeysOfTheOldRun: keys still kept for an ended Run
+// (a write that failed as it ended puts them back) do not reach the Run r
+// relaunches.
+func TestRelaunchSendsNoKeysOfTheOldRun(t *testing.T) {
+	var keys inputLog
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook })
+	a := h.live(0)
+	h.lux.End(a, "failed", "timeout")
+	h.waitScreen("ended", h.contains("r relaunch"))
+	w := h.win(0)
+	w.connMu.Lock()
+	w.pendingIn = []byte("old-run-keys")
+	w.connMu.Unlock()
+	h.type_("r")
+	h.waitFor("relaunched", func() bool { return h.window(0) != "" && h.window(0) != a })
+	b := h.live(0)
+	h.type_("new")
+	h.waitFor("typed", func() bool { return strings.Contains(string(keys.of(b)), "new") })
+	if got := string(keys.of(b)); got != "new" {
+		t.Fatalf("the relaunched Run got %q", got)
+	}
+	h.detach()
+}
+
 // TestKeysOnAFailedWriteAreKept: keys whose write fails because the
 // stream just closed are kept, ahead of those typed after, and sent in
 // order on the next stream.
