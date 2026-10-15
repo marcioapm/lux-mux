@@ -1,7 +1,11 @@
 name: Default image
 
 on:
+  # Every push to main builds and smoke-tests both architectures, so an image
+  # that stopped building (a moved apt package, a rotated key) fails there,
+  # before a release tag names it.
   push:
+    branches: [main]
     tags: ['v*']
   pull_request:
     paths: ['images/**', '.github/workflows/image.yml']
@@ -12,8 +16,8 @@ permissions:
 
 jobs:
   # One job per architecture on its native runner (no QEMU). Every event
-  # builds and smoke-tests; a v* tag also pushes the image by digest, which
-  # the merge job assembles into the tagged multi-arch manifest.
+  # builds and smoke-tests without pushing; a v* tag also pushes the image
+  # by digest, which the merge job assembles into the tagged manifest.
   build:
     strategy:
       fail-fast: false

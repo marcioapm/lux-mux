@@ -31,15 +31,18 @@ luxmux                    # attach the session "main", creating it
 The first window starts at once and shows its Run's progress (queued,
 pulling image, cloning, running) until the shell is ready.
 
-The built-in profile uses `ghcr.io/marcioapm/luxmux:<version>` for a release
-binary and `:latest` for development or pseudo-version builds. It includes
+The built-in profile, and the profile `luxmux config init` writes, use
+`ghcr.io/marcioapm/luxmux:<version>` for a release binary and `:latest` for
+development, pseudo-version or pre-release builds. It includes
 Claude Code, OpenCode, Codex and common development tools; see the
 [image guide](images/default/README.md) for pins, runtime defaults and builds.
+A release's image is published by a workflow that starts with the release
+tag; if `:<version>` cannot be pulled yet (or its build failed), luxmux does
+not fall back by itself: set `image = "ghcr.io/marcioapm/luxmux:latest"`.
 The GHCR package must be made public by its owner after its first push.
 Until then, or for a light image without agents, set `image = "ubuntu:24.04"`
 in `[profiles.default]`. No credentials are included in the image: pass keys
 through profile `secrets` and allow the required provider hosts in `egress`.
-
 
 | Command | |
 | --- | --- |

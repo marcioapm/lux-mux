@@ -82,11 +82,22 @@ merges them into one manifest with provenance and SBOM attestations:
 - a `v*` tag pushes `:<tag without v>` (`v0.2.0` → `:0.2.0`) and `:latest`;
 - `workflow_dispatch` on a tag rebuilds those tags (on a branch it builds
   and smoke-tests without pushing);
-- a pull request touching `images/**` or the workflow builds and
-  smoke-tests both architectures without pushing.
+- every push to `main`, and every pull request touching `images/**` or the
+  workflow, builds and smoke-tests both architectures without pushing, so a
+  broken image shows up before a release is tagged.
 
-A luxmux release binary defaults to the image of its own version; a
-development build defaults to `:latest`.
+A luxmux release binary defaults to the image of its own version, and
+`luxmux config init` writes that tag; a development, pseudo-version or
+pre-release build uses `:latest` for both.
+
+**A release's image exists only once its workflow run is green.** The tag
+publishes the luxmux module and starts the image build at the same moment,
+so for the length of that run (and for good if it fails) a release binary
+names an image that cannot be pulled yet. luxmux cannot detect a failed
+pull and does not fall back by itself: set the image by hand, e.g.
+`image = "ghcr.io/marcioapm/luxmux:latest"` in the profile. Maintainers:
+push the tag, wait for "Default image" to succeed on it, and only then
+announce the release.
 
 **The first push creates a private package.** The owner must make it public
 once, on GitHub: the package's **Package settings → Change visibility →
