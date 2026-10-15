@@ -103,27 +103,182 @@ func TestStaleShownWindowIsNotReattached(t *testing.T) {
 	h.detach()
 }
 
-// TestStaleShownWindowRedrawsAfterHelp: closing help over a stale shown
-// window clears the screen and asks its program to redraw (a resize
-// nudge), without a reattach.
-func TestStaleShownWindowRedrawsAfterHelp(t *testing.T) {
+// TestStaleShownWindowRestoredAfterHelp: closing help, the chooser or the
+// new-window dialog over a stale shown window draws it in full again, so
+// it is attached again with restore and its screen comes back from lux's
+// snapshot, not left blank (a shell at its prompt does not redraw itself).
+func TestStaleShownWindowRestoredAfterHelp(t *testing.T) {
+	for _, closeBy := range []string{"help", "chooser", "dialog"} {
+		t.Run(closeBy, func(t *testing.T) {
+			h := newHarness(t, cfgDefault, nil)
+			h.m.opt.UI = &fakeUI{choose: -1}
+			a := h.live(0)
+			h.overflow(0, a)
+			h.lux.Term(a).Output([]byte("\x1b[2J\x1b[HQUIET-FINAL\r\n$ "))
+			h.waitScreen("output", h.contains("QUIET-FINAL"))
+			n := len(attachesOf(h.lux, a))
+			switch closeBy {
+			case "help":
+				h.type_("\x02?")
+				h.waitScreen("help", h.contains("luxmux keys"))
+				h.type_("x")
+			case "chooser":
+				h.type_("\x02w")
+			case "dialog":
+				h.type_("\x02C")
+			}
+			h.waitFor("reattached with restore", func() bool {
+				as := attachesOf(h.lux, a)
+				return len(as) == n+1 && as[n].Restore
+			})
+			h.waitScreen("screen restored", func(s string) bool {
+				return strings.Contains(s, "QUIET-FINAL") && !strings.Contains(s, "luxmux keys") && !strings.Contains(s, "CHOOSER-OPEN")
+			})
+			h.waitFor("not stale", func() bool { return !h.win(0).q.isStale() })
+			h.detach()
+		})
+	}
+}
+
+// TestStaleShownWindowRestoredAfterSlowTerminal: a terminal that fell
+// behind while the shown window was stale gets its screen back from lux
+// once it caught up.
+func TestStaleShownWindowRestoredAfterSlowTerminal(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.overflow(0, a)
+	h.term.setStall(true)
+	t.Cleanup(func() { h.term.setStall(false) })
+	term := h.lux.Term(a)
+	big := bytes.Repeat([]byte("flood-line-0123456789abcdef\r\n"), (1<<20)/29)
+	for range 6 {
+		term.Output(big)
+		h.waitFor("stream read", func() bool { return term.Queued() < 2<<20 })
+	}
+	h.waitFor("behind", h.m.tw.isBehind)
+	term.Output([]byte("\x1b[2J\x1b[HSLOW-FINAL\r\n$ "))
+	h.term.setStall(false)
+	h.waitScreen("screen restored", h.contains("SLOW-FINAL"))
+	h.waitFor("not stale", func() bool { return !h.win(0).q.isStale() })
+	h.detach()
+}
+
+// TestStalePreviewOfShownWindowDoesNotReattach: the chooser's preview of
+// the stale window under it says so and leaves it attached: closing the
+// chooser restores it.
+func TestStalePreviewOfShownWindowDoesNotReattach(t *testing.T) {
 	h := newHarness(t, cfgDefault, nil)
 	a := h.live(0)
 	h.overflow(0, a)
 	n := len(attachesOf(h.lux, a))
-	term := h.lux.Term(a)
-	r0 := len(term.Resizes())
-	h.type_("\x02?")
-	h.waitScreen("help", h.contains("luxmux keys"))
-	h.type_("x")
-	h.waitFor("help gone", func() bool { return !strings.Contains(h.term.screen(), "luxmux keys") })
-	h.waitFor("redraw nudge", func() bool { return len(term.Resizes()) >= r0+2 })
+	if p := strings.Join(h.m.Preview(0, 5, 40), ""); !strings.Contains(p, "out of date here") {
+		t.Fatalf("preview %q", p)
+	}
+	time.Sleep(100 * time.Millisecond)
 	if got := len(attachesOf(h.lux, a)); got != n {
-		t.Fatalf("%d reattaches", got-n)
+		t.Fatalf("%d reattaches for a preview", got-n)
 	}
-	if strings.Contains(h.term.screen(), "OVERFLOW-FILL") || strings.Contains(h.term.screen(), "refreshing") {
-		t.Fatalf("screen not cleared for the redraw:\n%s", h.term.screen())
+	h.detach()
+}
+
+// TestStaleShownWindowUnderFloodRefreshBounded: a shown window kept stale
+// by a flood, with notices coming and going and help opened and closed
+// over and over, is attached again at most once per refreshEvery, and
+// every key typed meanwhile reaches its shell, in order.
+func TestStaleShownWindowUnderFloodRefreshBounded(t *testing.T) {
+	var keys inputLog
+	var mu sync.Mutex
+	var at []time.Time
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) {
+		l.InputHook = keys.hook
+		l.AttachHook = func(string) { mu.Lock(); at = append(at, time.Now()); mu.Unlock() }
+	})
+	a := h.live(0)
+	w := h.win(0)
+	// The emulator is held for the whole test: every stream after a
+	// restore overflows it again.
+	h.overflow(0, a)
+	w.emuMu.Lock()
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			w.emuMu.Unlock()
+		}
 	}
+	t.Cleanup(release)
+	mu.Lock()
+	at = nil
+	mu.Unlock()
+	stop := make(chan struct{})
+	var bg sync.WaitGroup
+	bg.Add(2)
+	go func() {
+		defer bg.Done()
+		chunk := bytes.Repeat([]byte("FLOOD-0123456789abcdef\r\n"), 1<<14)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Paced on lux's budget only: the terminal may fall behind
+			// (and catch up, another full redraw) as it will.
+			if term := h.lux.Term(a); term != nil && term.Queued() < 2<<20 {
+				term.Output(chunk)
+			} else {
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+	go func() {
+		defer bg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+				h.m.Notice(fmt.Sprintf("notice %d", i))
+			}
+		}
+	}()
+	start := time.Now()
+	var want bytes.Buffer
+	for i := 0; time.Since(start) < 5*time.Second; i++ {
+		if i%10 == 0 {
+			h.type_("\x02?")
+			h.waitFor("help", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.help })
+			h.type_("x")
+			h.waitFor("help closed", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return !h.m.help })
+		}
+		s := fmt.Sprintf("k%03d,", i)
+		want.WriteString(s)
+		h.type_(s)
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(stop)
+	bg.Wait()
+	release()
+	mu.Lock()
+	got := append([]time.Time{}, at...)
+	elapsed := time.Since(start)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("never attached again: the test did not test the limit")
+	}
+	if limit := int(elapsed/refreshEvery) + 1; len(got) > limit {
+		t.Fatalf("%d reattaches in %v (at most %d)", len(got), elapsed, limit)
+	}
+	for i := 1; i < len(got); i++ {
+		if d := got[i].Sub(got[i-1]); d < refreshEvery-100*time.Millisecond {
+			t.Fatalf("reattach %d came %v after the one before", i, d)
+		}
+	}
+	h.waitFor("all keys", func() bool { return len(keys.of(a)) >= want.Len() })
+	if k := keys.of(a); !bytes.Equal(k, want.Bytes()) {
+		t.Fatalf("keys:\n got %q\nwant %q", k, want.Bytes())
+	}
+	t.Logf("%d reattaches in %v", len(got), elapsed.Round(time.Millisecond))
 	h.detach()
 }
 

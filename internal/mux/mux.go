@@ -13,9 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
-	"github.com/marcioapm/lux/api"
 	"github.com/marcioapm/lux/vterm"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -343,8 +340,8 @@ const (
 	paintShow paintKind = iota
 	// paintRedraw: the shown window is drawn again after the terminal
 	// missed some of its output (help or a dialog drew over it, the
-	// terminal fell behind) or resized. A stale window is cleared and its
-	// program asked to redraw itself (a resize nudge); no reattach.
+	// terminal fell behind) or resized. A stale window is cleared and
+	// attached again with restore, which repaints it from the snapshot.
 	paintRedraw
 	// paintOverlay: the shown window's bottom row (a notice, a prompt,
 	// its own line) or title changed. A stale window's terminal holds all
@@ -468,31 +465,14 @@ func (m *Mux) staleScreenLocked(w *Window, kind paintKind, line string) []byte {
 	return b
 }
 
-// staleLocked acts on a stale w painted as kind: a window switched to is
-// attached again; a cleared one gets its program to redraw, at most once
-// per refreshEvery.
+// staleLocked acts on a stale w painted as kind: a window switched to, or
+// the shown one drawn again in full, is attached again with restore (at
+// most once per refreshEvery, see refreshLocked); an overlay change never
+// is.
 func (m *Mux) staleLocked(w *Window, kind paintKind) {
-	switch kind {
-	case paintShow:
+	if kind == paintShow || kind == paintRedraw {
 		m.refreshLocked(w)
-	case paintRedraw:
-		c := w.getConn()
-		if c == nil || time.Since(w.lastNudge) < refreshEvery {
-			return
-		}
-		w.lastNudge = time.Now()
-		rows, cols := m.rows, m.cols
-		m.goSafe(func() { m.nudge(c, rows, cols) })
 	}
-}
-
-// nudge asks the program on c to redraw itself: a resize one row smaller
-// and back, which sends it SIGWINCH.
-func (m *Mux) nudge(c *websocket.Conn, rows, cols int) {
-	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
-	defer cancel()
-	_ = wsjson.Write(ctx, c, api.StreamData{Rows: max(rows-1, 1), Cols: cols})
-	_ = wsjson.Write(ctx, c, api.StreamData{Rows: rows, Cols: cols})
 }
 
 // refreshEvery is the least time between two refreshes of one window: a
@@ -652,15 +632,15 @@ func (m *Mux) Preview(i, rows, cols int) []string {
 		return s
 	}
 	if w.q.isStale() {
-		// The window the terminal shows is redrawn from its own output
-		// when the chooser closes; any other is attached again.
+		// The window the terminal shows is attached again when the
+		// chooser closes (a full redraw); any other is attached now.
 		if w != m.shown {
 			m.refreshLocked(w)
 			m.mu.Unlock()
 			return []string{"  refreshing its screen from lux…"}
 		}
 		m.mu.Unlock()
-		return []string{"  (out of date here; shown as it is when the chooser closes)"}
+		return []string{"  (out of date here; refreshed from lux when the chooser closes)"}
 	}
 	m.mu.Unlock()
 	w.prevMu.Lock()

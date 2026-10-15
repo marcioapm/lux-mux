@@ -172,12 +172,12 @@ it takes nothing. Each window's emulator may lag its stream by up to
 8 MiB. Past that (a flood of CJK, combining marks or truecolour can be
 parsed slower than it arrives), luxmux drops that window's queued output,
 resets its emulator and marks it stale. The next time a stale window is
-switched to or previewed, luxmux attaches it again with restore (at most
-once every 2 s per window) and lux's snapshot rebuilds its screen. For the
-window you are looking at, your terminal has received all of its output
-anyway: a notice or prompt over it is drawn and erased on the bottom row
-only, and after help or a dialog over it luxmux clears the screen and asks
-the program to redraw (as a resize does). Keys typed while a window's
+switched to or previewed, or the window you are looking at is drawn again
+in full (help or a dialog closed over it, your terminal caught up), luxmux
+attaches it again with restore (at most once every 2 s per window) and
+lux's snapshot rebuilds its screen. A notice or prompt over the window you
+are looking at is drawn and erased on the bottom row only: your terminal
+has received all of its output anyway. Keys typed while a window's
 stream is down (a refresh, a reconnect) are kept, up to 64 KiB per window,
 and sent in order once it is up again; past that the oldest are dropped,
 with a notice. Keys kept while the Run moves to a new placement were meant

@@ -34,11 +34,13 @@ const (
 // parses slower than the Run writes, as with long runs of CJK, combining
 // marks or truecolour), the queued output is dropped, the emulator reset
 // and the window marked stale; a stale emulator takes no more output.
-// When a stale window is next switched to or previewed, it is attached
-// again with restore (at most once per refreshEvery) and lux's snapshot
-// rebuilds the emulator; the shown window's terminal has its output
-// already, so for it only the bottom row is redrawn (see paintKind). The
-// shown window's output goes to the terminal unchanged throughout.
+// When a stale window is next switched to or previewed, or the shown one
+// is drawn again in full (help or a dialog closed, the terminal caught
+// up), it is attached again with restore (at most once per refreshEvery)
+// and lux's snapshot rebuilds the emulator; a notice or prompt over the
+// shown window only redraws its bottom row, since the terminal has its
+// output already (see paintKind). The shown window's output goes to the
+// terminal unchanged throughout.
 //
 // The limit trades switch latency against refreshes: a switch to a
 // window waits for its emulator to parse what is queued, at most
@@ -193,12 +195,10 @@ type Window struct {
 	attachedOnce bool
 	// refreshing: the stream was closed so a new attach with restore
 	// rebuilds a stale emulator. lastRefresh: when that was last done;
-	// refreshDue: one is put off until refreshEvery after it. lastNudge:
-	// when a stale shown window's program was last asked to redraw.
+	// refreshDue: one is put off until refreshEvery after it.
 	refreshing  bool
 	refreshDue  bool
 	lastRefresh time.Time
-	lastNudge   time.Time
 	// resumable: the Run is stopped and r resumes it; resumeAsked: r
 	// was pressed, for the supervisor.
 	resumable   bool

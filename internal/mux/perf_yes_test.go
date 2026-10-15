@@ -104,8 +104,9 @@ func (w *delayWriter) Write(p []byte) (int, error) {
 // where vterm parses it slowest, with a notice every 500 ms (another
 // window ending, a spare error), 50 ms to attach, and a terminal taking
 // 1 ms per write; meanwhile Ctrl-C is pressed 100 times. Every Ctrl-C
-// must reach the Run, and the shown window is not attached again for its
-// stale emulator. Set LUXMUX_PERF=1 to run it.
+// must reach the Run, and the shown window is attached again for its
+// stale emulator at most once per refreshEvery (a terminal that catches up
+// redraws it in full). Set LUXMUX_PERF=1 to run it.
 func TestPerfYesFlood(t *testing.T) {
 	if os.Getenv("LUXMUX_PERF") == "" {
 		t.Skip("LUXMUX_PERF=1 runs the measurements")
@@ -159,6 +160,9 @@ func TestPerfYesFlood(t *testing.T) {
 			srv.attachN.Load()-a0, out.placeholders.Load()-p0, stale, lost)
 		if lost != 0 {
 			t.Errorf("%d Ctrl-C lost", lost)
+		}
+		if n := srv.attachN.Load() - a0; n > int64(el/refreshEvery)+1 {
+			t.Errorf("%d reattaches in %v", n, el)
 		}
 		_, _ = kw.Write([]byte("\x02d"))
 		<-done
