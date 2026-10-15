@@ -457,7 +457,9 @@ func TestNewWindowDialog(t *testing.T) {
 	p.typ("m-4")
 	p.wait("filtered", func(s string) bool { return strings.Contains(s, "filter: m-4") && !strings.Contains(s, "m-1  1 cpus") })
 	p.typ("\r")
-	p.wait("size picked", func(s string) bool { return strings.Contains(s, "m-4  4 cpus, 8Gi, 40Gi") && !strings.Contains(s, "filter:") })
+	p.wait("size picked", func(s string) bool {
+		return strings.Contains(s, "m-4  4 cpus, 8Gi, 40Gi") && !strings.Contains(s, "filter:")
+	})
 	p.typ("\x13")
 	if !fakelux.WaitFor(context.Background(), 15*time.Second, func() bool { return len(lux.Submits()) == 2 }) {
 		t.Fatalf("no submit; screen:\n%s", p.scr.text())
@@ -485,6 +487,31 @@ func TestNewWindowDialog(t *testing.T) {
 	if !strings.HasPrefix(p.scr.title(), "luxmux:dlg [1]") {
 		t.Fatalf("title %q", p.scr.title())
 	}
+	p.typ("\x02d")
+	p.exited()
+}
+
+// TestHelpDialog: C-b ? shows the key help over the window; Esc closes it
+// and the shell's screen is back, with what it printed meanwhile.
+func TestHelpDialog(t *testing.T) {
+	lux, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s hlp")
+	p.wait("first prompt", has("$"))
+	p.typ("echo before-help\r")
+	p.wait("before-help", has("\nbefore-help"))
+	p.typ("\x02?")
+	p.wait("help", func(s string) bool {
+		return strings.Contains(s, "Keys") && strings.Contains(s, "C-b w") && strings.Contains(s, "window chooser") &&
+			strings.Contains(s, "before-help")
+	})
+	// Output while the help is open reaches the window and shows after.
+	lux.Term(lux.RunIDs()[0]).Output([]byte("\r\nwhile-help\r\n"))
+	p.typ("\x1b")
+	p.wait("shell back", func(s string) bool {
+		return !strings.Contains(s, "window chooser") && strings.Contains(s, "before-help") && strings.Contains(s, "while-help")
+	})
+	p.typ("echo after-help\r")
+	p.wait("after-help", has("\nafter-help"))
 	p.typ("\x02d")
 	p.exited()
 }
