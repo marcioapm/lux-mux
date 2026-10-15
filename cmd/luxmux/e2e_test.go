@@ -398,6 +398,124 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
+// e2eEnv is a fake luxd whose Runs' terminals are local shells, and the
+// environment luxmux runs in against it.
+func e2eEnv(t *testing.T) (*fakelux.Server, []string) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	lux := fakelux.New()
+	t.Cleanup(lux.Close)
+	lux.NewTerminal = func(*api.Run) *fakelux.Terminal {
+		term, err := fakelux.ShellTerminal(24, 80, []string{"sh"}, []string{"PS1=$ ", "ENV=", "TERM=xterm"})
+		if err != nil {
+			t.Error(err)
+			return fakelux.EchoTerminal(24, 80)
+		}
+		return term
+	}
+	dir := t.TempDir()
+	return lux, []string{
+		"PATH=" + os.Getenv("PATH"), "TERM=xterm-256color", "HOME=" + dir,
+		"XDG_CONFIG_HOME=" + filepath.Join(dir, "config"), "XDG_STATE_HOME=" + filepath.Join(dir, "state"),
+		"LUX_URL=" + lux.URL, "LUX_API_KEY=lux_test",
+	}
+}
+
+// TestNewWindowDialog: C-b C opens the form; a repository, a branch and
+// a size from the list are what the new window's Run is submitted with.
+// Esc closes it with nothing created.
+func TestNewWindowDialog(t *testing.T) {
+	lux, env := e2eEnv(t)
+	yes := true
+	lux.SetPools([]api.Pool{{Name: "m", IsDefault: &yes, Sizes: []api.PoolSize{
+		{Name: "m-1", CPUs: 1, Memory: 2 << 30, Disk: 10 << 30},
+		{Name: "m-4", CPUs: 4, Memory: 8 << 30, Disk: 40 << 30},
+	}}})
+	p := startLuxmux(t, env, "new -s dlg")
+	p.wait("first prompt", has("$"))
+	p.typ("echo first-window\r")
+	p.wait("first window's output", has("\nfirst-window"))
+
+	// The Tabs, in the same write as C-b C, are the dialog's.
+	p.typ("\x02C\t\t\t\t")
+	p.wait("dialog with the pools loaded, over the window's screen", func(s string) bool {
+		return strings.Contains(s, "New window") && strings.Contains(s, "(pool default)") && strings.Contains(s, "first-window")
+	})
+	p.wait("on Repository", has("▸ Repository"))
+	p.typ("https://example.com/team/app.git")
+	p.wait("repository typed", has("https://example.com/team/app.git"))
+	p.typ("\t")
+	p.wait("on Branch", has("▸ Branch"))
+	p.typ("feature-x")
+	p.wait("branch typed", has("feature-x"))
+	p.typ("\x1b[Z\x1b[Z")
+	p.wait("on Size", has("▸ Size"))
+	p.typ("\r")
+	p.wait("size list", has("filter:"))
+	p.typ("m-4")
+	p.wait("filtered", func(s string) bool { return strings.Contains(s, "filter: m-4") && !strings.Contains(s, "m-1  1 cpus") })
+	p.typ("\r")
+	p.wait("size picked", func(s string) bool {
+		return strings.Contains(s, "m-4  4 cpus, 8Gi, 40Gi") && !strings.Contains(s, "filter:")
+	})
+	p.typ("\x13")
+	if !fakelux.WaitFor(context.Background(), 15*time.Second, func() bool { return len(lux.Submits()) == 2 }) {
+		t.Fatalf("no submit; screen:\n%s", p.scr.text())
+	}
+	sp := lux.Submits()[1]
+	if sp.Git == nil || len(sp.Git.Repositories) != 1 || sp.Git.Repositories[0].URL != "https://example.com/team/app.git" ||
+		sp.Git.Repositories[0].Ref != "feature-x" || sp.Resources.Size != "m-4" {
+		t.Fatalf("submitted %+v", sp)
+	}
+	p.wait("window 1", func(string) bool { return strings.HasPrefix(p.scr.title(), "luxmux:dlg [1]") })
+	p.wait("dialog closed", func(s string) bool { return !strings.Contains(s, "New window") })
+
+	// Esc: nothing created, the window's shell is back and takes keys.
+	p.typ("\x02C")
+	p.wait("dialog again", func(s string) bool {
+		return strings.Contains(s, "New window") && strings.Contains(s, "(pool default)")
+	})
+	p.typ("\x1b")
+	p.wait("dialog closed by esc", func(s string) bool { return !strings.Contains(s, "New window") })
+	p.typ("echo after-esc\r")
+	p.wait("shell after esc", has("\nafter-esc"))
+	if n := len(lux.Submits()); n != 2 {
+		t.Fatalf("%d submits after esc", n)
+	}
+	if !strings.HasPrefix(p.scr.title(), "luxmux:dlg [1]") {
+		t.Fatalf("title %q", p.scr.title())
+	}
+	p.typ("\x02d")
+	p.exited()
+}
+
+// TestHelpDialog: C-b ? shows the key help over the window; Esc closes it
+// and the shell's screen is back, with what it printed meanwhile.
+func TestHelpDialog(t *testing.T) {
+	lux, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s hlp")
+	p.wait("first prompt", has("$"))
+	p.typ("echo before-help\r")
+	p.wait("before-help", has("\nbefore-help"))
+	p.typ("\x02?")
+	p.wait("help", func(s string) bool {
+		return strings.Contains(s, "Keys") && strings.Contains(s, "C-b w") && strings.Contains(s, "window chooser") &&
+			strings.Contains(s, "before-help")
+	})
+	// Output while the help is open reaches the window and shows after.
+	lux.Term(lux.RunIDs()[0]).Output([]byte("\r\nwhile-help\r\n"))
+	p.typ("\x1b")
+	p.wait("shell back", func(s string) bool {
+		return !strings.Contains(s, "window chooser") && strings.Contains(s, "before-help") && strings.Contains(s, "while-help")
+	})
+	p.typ("echo after-help\r")
+	p.wait("after-help", has("\nafter-help"))
+	p.typ("\x02d")
+	p.exited()
+}
+
 // TestPanicGivesTerminalBack: a panic inside luxmux (here in a window's
 // supervisor, resolving a secret to resume its Run) restores the terminal
 // before printing the panic, and luxmux exits non-zero.

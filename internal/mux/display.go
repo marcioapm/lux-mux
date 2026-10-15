@@ -156,7 +156,7 @@ func (m *Mux) Notice(text string) {
 // stays until the window is next switched to.
 func (m *Mux) drawOverlayLocked() {
 	w := m.activeLocked()
-	if w == nil || m.suspended || m.help {
+	if w == nil || m.suspended {
 		return
 	}
 	line := m.overlayLineLocked(w)
@@ -176,34 +176,6 @@ func (m *Mux) drawOverlayLocked() {
 	})
 }
 
-// helpLines is the key help overlay.
-func (m *Mux) helpLines() []string {
-	p := m.opt.Config.Prefix
-	l := []string{
-		" luxmux keys (prefix " + p + ", then):", "",
-		"  c      new window (default profile)",
-		"  C      new window (dialog)",
-		"  n p    next / previous window",
-		"  0-9    select window",
-		"  l      last window",
-		"  '      select window by index",
-		"  w      window chooser",
-		"  ,      rename window",
-		"  &      kill window",
-		"  r      resume a stopped Run / relaunch an ended one",
-		"  d      detach (the Runs keep running)",
-		"  ?      this help",
-		"  " + p + "    send " + p + " to the shell",
-	}
-	if len(m.opt.Config.Keys.Direct) > 0 {
-		l = append(l, "", " without the prefix:")
-		for k, v := range m.opt.Config.Keys.Direct {
-			l = append(l, fmt.Sprintf("  %-6s %s", k, v))
-		}
-	}
-	return append(l, "", " press any key to return")
-}
-
 // prompt is a one-line question on the bottom row, answered by typing.
 type prompt struct {
 	label  string
@@ -216,7 +188,7 @@ type prompt struct {
 // cancelled.
 func (m *Mux) askLocked(label string, initial string, single bool, done func(string, bool)) {
 	m.promptState = &prompt{label: label, text: []rune(initial), single: single, done: done}
-	if w := m.activeLocked(); w != nil && !m.suspended && !m.help && !w.keys.Zero() {
+	if w := m.activeLocked(); w != nil && !m.suspended && !w.keys.Zero() {
 		// The prompt reads plain keys; closing it repaints the window,
 		// which sets its keyboard modes again.
 		m.tw.enqueue(screen.ResetKeysHere(nil))

@@ -345,6 +345,20 @@ func (m *Mux) openChooser() {
 	}
 }
 
+// openHelp shows the key help.
+func (m *Mux) openHelp() {
+	if m.opt.UI == nil {
+		m.Notice("no key help in this build")
+		return
+	}
+	m.suspend(true)
+	err := m.opt.UI.Help(m)
+	m.suspend(false)
+	if err != nil {
+		m.Notice("help: " + err.Error())
+	}
+}
+
 // config is the configuration now. It is never changed in place: a
 // profile saved from the dialog replaces it with a copy (addProfile), so
 // what config returned may be read without the lock.

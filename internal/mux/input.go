@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/marcioapm/lux-mux/internal/config"
-	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
 // input reads the keyboard in one goroutine and hands chunks to whoever
@@ -155,13 +154,6 @@ func (m *Mux) handleInput(b []byte) {
 			m.mu.Unlock()
 			return
 		}
-		if m.help {
-			// Any key closes the help; the key itself is used up.
-			m.help = false
-			m.repaintLocked()
-			m.mu.Unlock()
-			return
-		}
 		if m.promptState != nil {
 			b = m.promptKeysLocked(b)
 			m.mu.Unlock()
@@ -190,7 +182,7 @@ func (m *Mux) handleInput(b []byte) {
 		m.mu.Unlock()
 		for _, a := range acts {
 			switch {
-			case a.IsCmd() && (a.Cmd.Op == config.OpChoose || a.Cmd.Op == config.OpNewDialog):
+			case a.IsCmd() && (a.Cmd.Op == config.OpChoose || a.Cmd.Op == config.OpNewDialog || a.Cmd.Op == config.OpHelp):
 				// What was typed after the key is the dialog's: Feed
 				// stops at a command, so this is the last action.
 				m.in.unreadFirst(rest)
@@ -231,6 +223,8 @@ func (m *Mux) command(c config.Command) {
 		m.openNewDialog()
 	case config.OpChoose:
 		m.openChooser()
+	case config.OpHelp:
+		m.openHelp()
 	case config.OpRelaunch:
 		m.mu.Lock()
 		w := m.activeLocked()
@@ -291,11 +285,5 @@ func (m *Mux) commandLocked(c config.Command) {
 				m.goSafe(func() { m.closeWindow(w, true, "") })
 			}
 		})
-	case config.OpHelp:
-		// While help is shown no output reaches the terminal (the
-		// emulators still take it); closing it repaints the window.
-		m.help = true
-		b := append([]byte{0x18}, screen.Text(nil, m.helpLines(), m.rows, m.cols)...)
-		m.tw.enqueue(b)
 	}
 }

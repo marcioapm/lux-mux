@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"bytes"
 	"maps"
 	"slices"
 	"strings"
@@ -107,6 +108,10 @@ type fakeUI struct {
 	opened chan struct{}
 	read   int
 	got    []byte
+
+	helpMu   sync.Mutex
+	helpOpen bool
+	helpGot  []byte
 }
 
 func (f *fakeUI) Choose(m *Mux) (ChooseResult, error) {
@@ -134,6 +139,44 @@ func (f *fakeUI) Choose(m *Mux) (ChooseResult, error) {
 }
 
 func (f *fakeUI) NewDialog(m *Mux) (*NewWindowRequest, error) { return f.req, nil }
+
+// Help draws a marker and reads the keyboard until an 'x', which closes
+// it; what it read is in helpGot.
+func (f *fakeUI) Help(m *Mux) error {
+	out, _, _ := m.Terminal()
+	_, _ = out.Write([]byte("\x1b[2J\x1b[HHELP-OPEN luxmux keys"))
+	f.helpMu.Lock()
+	f.helpOpen, f.helpGot = true, nil
+	f.helpMu.Unlock()
+	kb := m.KeyboardReader()
+	defer kb.Close()
+	buf := make([]byte, 64)
+	for {
+		n, err := kb.Read(buf)
+		f.helpMu.Lock()
+		f.helpGot = append(f.helpGot, buf[:n]...)
+		done := bytes.IndexByte(buf[:n], 'x') >= 0 || err != nil
+		if done {
+			f.helpOpen = false
+		}
+		f.helpMu.Unlock()
+		if done {
+			return nil
+		}
+	}
+}
+
+func (f *fakeUI) helpState() (open bool, got []byte) {
+	f.helpMu.Lock()
+	defer f.helpMu.Unlock()
+	return f.helpOpen, append([]byte{}, f.helpGot...)
+}
+
+// helpOn reports whether the harness's fake help is open.
+func (h *harness) helpOn() bool {
+	open, _ := h.m.opt.UI.(*fakeUI).helpState()
+	return open
+}
 
 // TestDialogsHandBackTheTerminal: after the chooser closes, the chosen
 // window is painted from its emulator over what the chooser drew.

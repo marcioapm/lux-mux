@@ -35,7 +35,7 @@ const (
 // marks or truecolour), the queued output is dropped, the emulator reset
 // and the window marked stale; a stale emulator takes no more output.
 // When a stale window is next switched to or previewed, or the shown one
-// is drawn again in full (help or a dialog closed, the terminal caught
+// is drawn again in full (a dialog closed, the terminal caught
 // up), it is attached again with restore (at most once per refreshEvery)
 // and lux's snapshot rebuilds the emulator; a notice or prompt over the
 // shown window only redraws its bottom row, since the terminal has its
