@@ -65,6 +65,7 @@ func newPerfServer(payload []byte) *perfServer {
 		if r.URL.Query().Get("restore") == "true" {
 			// A short snapshot: a blank screen.
 			_ = wsjson.Write(ctx, ws, api.StreamData{Data: []byte("\x1b[?25l\x1b[?1049l\x1b[H\x1b[2J\x1b[?25h")})
+			_ = wsjson.Write(ctx, ws, api.StreamData{Restored: true})
 		}
 		frames := encodeFrames(s.payload)
 		for _, f := range frames {
