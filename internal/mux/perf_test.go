@@ -23,6 +23,9 @@ import (
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
+// streamChunk is the largest output frame lux-shim sends.
+const streamChunk = 32 << 10
+
 // perfServer is a luxd with one running Run whose attach stream sends
 // payload in 32 KiB output frames (after a restore snapshot when asked),
 // and reports the time each input frame arrives.

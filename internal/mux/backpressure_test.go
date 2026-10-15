@@ -10,6 +10,14 @@ import (
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 )
 
+// isBehind reports whether live output was dropped and no repaint has
+// been queued since.
+func (t *termWriter) isBehind() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.behind
+}
+
 // inputLog records the keystrokes each Run's streams received.
 type inputLog struct {
 	mu  sync.Mutex

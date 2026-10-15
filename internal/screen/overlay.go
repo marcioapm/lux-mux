@@ -24,18 +24,6 @@ func Overlay(b []byte, t *vterm.Terminal, y int, text string) []byte {
 	return Cursor(b, t)
 }
 
-// Restore appends what redraws row y from t and puts the cursor back:
-// taking an overlay down.
-func Restore(b []byte, t *vterm.Terminal, y int) []byte {
-	_, cols := t.Size()
-	b = append(b, "\x1b[?25l\x1b[?6l\x1b[?7l"...)
-	b = Row(b, t, y, cols)
-	if t.Mode(7) {
-		b = Mode(b, 7, true)
-	}
-	return Cursor(b, t)
-}
-
 // Fit pads or cuts s to exactly n columns (one column per rune; luxmux's
 // own texts are narrow).
 func Fit(s string, n int) string {

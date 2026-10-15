@@ -21,9 +21,6 @@ import (
 // the cursor's visibility and leaves the alternate screen first).
 var snapshotPrefix = []byte("\x1b[?25l\x1b[?1049l")
 
-// streamChunk is the largest output frame lux-shim sends.
-const streamChunk = 32 << 10
-
 // Stream end messages from luxd and the shim.
 const (
 	errWorkloadExited = "the workload exited"

@@ -113,14 +113,6 @@ func (t *termWriter) add(it termItem) {
 	t.signal()
 }
 
-// isBehind reports whether live output was dropped and no repaint has
-// been queued since.
-func (t *termWriter) isBehind() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.behind
-}
-
 // caughtUpDone is called by the repaint caughtUp asked for, under m.mu
 // before it queues the repaint: live output after it is queued again.
 func (t *termWriter) caughtUpDone() {

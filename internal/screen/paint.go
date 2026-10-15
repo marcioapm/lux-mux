@@ -154,7 +154,8 @@ func snapState(t *vterm.Terminal) termState {
 	}
 }
 
-// KeypadAndShape are t's keypad mode and cursor shape.
+// KeypadAndShape are t's keypad mode and cursor shape. Only tests call it
+// (here and in mux), to read what a terminal was left with.
 func KeypadAndShape(t *vterm.Terminal) (keypad bool, shape int) {
 	st := snapState(t)
 	return st.keypad, st.shape
