@@ -348,6 +348,26 @@ repositories=[{url="https://example.com/api.git",path="/workspace/api"},{url="ht
 	p.exited()
 }
 
+// TestNewMissingSecretRefused: luxmux new with a --secret whose value is
+// nowhere exits 1 in a terminal, with no Run and no session file.
+func TestNewMissingSecretRefused(t *testing.T) {
+	lux, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s nosecret --secret LUXMUX_E2E_NOPE")
+	if code := p.exitCode(); code != 1 || !strings.Contains(p.scr.text(), "secret values not found") {
+		t.Fatalf("exit %d\n%s", code, p.scr.text())
+	}
+	if n := len(lux.RunIDs()); n != 0 {
+		t.Fatalf("%d Runs", n)
+	}
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			if _, ok, _ := state.Load(filepath.Join(dir, "luxmux"), "nosecret"); ok {
+				t.Fatal("a session file was written")
+			}
+		}
+	}
+}
+
 func TestEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")

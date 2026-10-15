@@ -229,6 +229,11 @@ func newSessionWith(env Env, name string, o windowFlags) error {
 	if err := dryRun(ctx, env, c, name, profile, p); err != nil {
 		return err
 	}
+	// As new-window: values not found are refused before the session
+	// exists, not left to a dead first window.
+	if _, err := p.ResolveSecrets(env.Lookup); err != nil {
+		return err
+	}
 	// Only -p pins the session's default; without it C-b c follows
 	// default_profile.
 	return runMuxFirst(env, c, &state.Session{Name: name, DefaultProfile: o.Profile}, &p)

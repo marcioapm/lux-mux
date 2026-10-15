@@ -159,6 +159,31 @@ func TestWindowProfileChoice(t *testing.T) {
 	}
 }
 
+// TestNewMissingSecretValues: luxmux new whose secrets (a --secret, or the
+// -p profile's) have no value exits 1 naming them, before the session
+// exists: no Run, no session file.
+func TestNewMissingSecretValues(t *testing.T) {
+	lux := fakelux.New()
+	defer lux.Close()
+	env, _, errb := testEnv(t, lux, "")
+	writeConfig(t, env, twoProfiles+"[profiles.s]\nimage = \"img-s\"\nsecrets = [\"PROFILE_TOKEN\"]\n")
+	for _, args := range [][]string{
+		{"new", "-s", "fresh", "--secret", "NOPE"},
+		{"new", "-s", "fresh", "-p", "s"},
+	} {
+		errb.Reset()
+		if code := Main(env, args); code != 1 || !strings.Contains(errb.String(), "secret values not found") {
+			t.Fatalf("%q: %d %q", args, code, errb.String())
+		}
+		if len(lux.Submits()) != 0 {
+			t.Fatalf("%q: submitted", args)
+		}
+		if _, ok, _ := state.Load(env.StateDir, "fresh"); ok {
+			t.Fatalf("%q: a session file", args)
+		}
+	}
+}
+
 // TestNewWindowSessionDefaultGone: new-window without -p in a session
 // whose default profile left the configuration makes a window of
 // default_profile, as C-b c does, and says so.
