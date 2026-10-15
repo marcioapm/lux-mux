@@ -143,15 +143,42 @@ func TestWindowProfileChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range []struct{ flag, session, want string }{
-		{"", "", "a"}, {"", "b", "b"}, {"c", "b", "c"}, {"c", "", "c"},
+		{"", "", "a"}, {"", "b", "b"}, {"c", "b", "c"}, {"c", "", "c"}, {"", "gone", "a"}, {"b", "gone", "b"},
 	} {
-		name, p, err := windowProfile(cfg, c.session, windowFlags{Profile: c.flag})
+		var warn strings.Builder
+		name, p, err := windowProfile(cfg, c.session, windowFlags{Profile: c.flag}, &warn)
 		if err != nil || name != c.want || p.Image != "img-"+c.want {
 			t.Errorf("-p %q session %q: %q %q %v", c.flag, c.session, name, p.Image, err)
 		}
+		if got, want := warn.String() != "", c.session == "gone" && c.flag == ""; got != want {
+			t.Errorf("-p %q session %q: warning %q", c.flag, c.session, warn.String())
+		}
 	}
-	if _, _, err := windowProfile(cfg, "", windowFlags{Profile: "zz"}); err == nil || !strings.Contains(err.Error(), `no profile named "zz"`) {
+	if _, _, err := windowProfile(cfg, "", windowFlags{Profile: "zz"}, io.Discard); err == nil || !strings.Contains(err.Error(), `no profile named "zz"`) {
 		t.Fatal(err)
+	}
+}
+
+// TestNewWindowSessionDefaultGone: new-window without -p in a session
+// whose default profile left the configuration makes a window of
+// default_profile, as C-b c does, and says so.
+func TestNewWindowSessionDefaultGone(t *testing.T) {
+	lux := fakelux.New()
+	defer lux.Close()
+	env, _, errb := testEnv(t, lux, "")
+	writeConfig(t, env, twoProfiles)
+	first := submit(t, lux, "work", "a", false)
+	if err := state.Save(env.StateDir, &state.Session{Name: "work", DefaultProfile: "gone", Windows: []state.Window{{RunID: first, Name: "a", Profile: "a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"new-window", "-t", "work"}); code != 0 {
+		t.Fatal(errb.String())
+	}
+	if sp := lux.Submits()[1]; sp.Labels[config.LabelProfile] != "a" || sp.Image.Ref != "img-a" {
+		t.Fatalf("submitted %+v", sp)
+	}
+	if !strings.Contains(errb.String(), `default profile "gone" is not in the configuration; using "a"`) {
+		t.Fatalf("no warning: %q", errb.String())
 	}
 }
 

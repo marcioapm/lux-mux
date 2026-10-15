@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -93,11 +94,17 @@ func blockers(a *api.SubmitAnswer) []string {
 }
 
 // windowProfile is the profile a new window is made from: -p, else the
-// session's default, else the configuration's, with the overrides on it.
-func windowProfile(cfg *config.Config, sessionDefault string, o windowFlags) (string, config.Profile, error) {
+// session's default while the configuration has it, else the
+// configuration's (as C-b c), with the overrides on it. A session default
+// that is gone is said on warn.
+func windowProfile(cfg *config.Config, sessionDefault string, o windowFlags, warn io.Writer) (string, config.Profile, error) {
 	name := o.Profile
-	if name == "" {
-		name = sessionDefault
+	if name == "" && sessionDefault != "" {
+		if _, ok := cfg.Profiles[sessionDefault]; ok {
+			name = sessionDefault
+		} else {
+			fmt.Fprintf(warn, "luxmux: the session's default profile %q is not in the configuration; using %q\n", sessionDefault, cfg.DefaultProfile)
+		}
 	}
 	if name == "" {
 		name = cfg.DefaultProfile
@@ -151,7 +158,7 @@ func newWindow(env Env, o windowFlags) error {
 	if !ok && len(sess.Windows) == 0 {
 		return fmt.Errorf("no session %s: luxmux new -s %s", o.Session, o.Session)
 	}
-	profile, p, err := windowProfile(cfg, sess.DefaultProfile, o)
+	profile, p, err := windowProfile(cfg, sess.DefaultProfile, o, env.Stderr)
 	if err != nil {
 		return err
 	}

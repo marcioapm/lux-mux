@@ -222,7 +222,7 @@ func newSessionWith(env Env, name string, o windowFlags) error {
 	if err != nil {
 		return err
 	}
-	profile, p, err := windowProfile(cfg, "", o)
+	profile, p, err := windowProfile(cfg, "", o, env.Stderr)
 	if err != nil {
 		return err
 	}
