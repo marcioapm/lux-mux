@@ -280,6 +280,7 @@ func (m *Mux) output(w *Window, data []byte) {
 		m.tw.enqueueLive(data)
 	}
 	w.tail.Add(data)
+	w.keyModes.Write(data)
 	w.q.push(feedItem{data: data})
 }
 
@@ -339,10 +340,17 @@ func (m *Mux) repaintLocked() {
 	}
 	title := m.titleLocked(w)
 	pend := w.tail.Pending()
+	// The keyboard modes as of the output queued before this paint: the
+	// position the paint takes in the terminal's order. An ended window's
+	// program reads no keys; r and & are read plain.
+	km := w.keyModes.Modes()
+	if w.phase == phaseDead {
+		km = screen.KeyModes{}
+	}
 	m.paintLocked(w, func(b []byte, t *vtermT) []byte {
 		// CAN ends whatever sequence the previous output stopped inside.
 		b = append(b, 0x18)
-		b = screen.Paint(b, t, title)
+		b = screen.Paint(b, t, title, km)
 		if line != "" {
 			rows, _ := t.Size()
 			b = screen.Overlay(b, t, rows-1, line)

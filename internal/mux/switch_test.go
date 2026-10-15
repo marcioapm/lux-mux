@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/marcioapm/lux/vterm"
 )
 
 const cfgDefault = ""
@@ -32,7 +34,6 @@ func TestSwitchRepaintsAndRestoresModes(t *testing.T) {
 	h.lux.Term(b).Output([]byte("\x1b[?1049h\x1b[H\x1b[2JFULLSCREEN-B"))
 	h.waitScreen("window 1 alt screen", h.contains("FULLSCREEN-B"))
 
-	before := len(h.term.rawBytes())
 	h.type_("\x020")
 	h.waitScreen("window 0 back", h.contains("first-window-text"))
 	h.waitFor("window 0 modes back", func() bool { return h.term.mode(2004) && h.term.mode(1) && h.term.mode(1000) })
@@ -45,10 +46,25 @@ func TestSwitchRepaintsAndRestoresModes(t *testing.T) {
 	if h.title() != "luxmux:s [0] default" {
 		t.Fatalf("title %q", h.title())
 	}
-	// The colour came from the emulator, as SGR 31.
-	paint := h.term.rawBytes()[before:]
-	if !bytes.Contains(paint, []byte("\x1b[0;31mRED")) {
-		t.Fatalf("repaint lacks the red word: %q", paint)
+	// The red word is painted in the style its window's emulator has.
+	h.m.mu.Lock()
+	w := h.m.windows[0]
+	h.m.mu.Unlock()
+	var want vterm.Style
+	w.withEmu(func(e *vtermT) {
+		if x, y, ok := findText(e, "RED"); ok {
+			want = e.Cell(x, y).Style
+		}
+	})
+	if want.Fg == 0 {
+		t.Fatal("the emulator has no red word")
+	}
+	h.term.mu.Lock()
+	x, y, ok := findText(h.term.vt, "RED")
+	got := h.term.vt.Cell(x, y).Style
+	h.term.mu.Unlock()
+	if !ok || got != want {
+		t.Fatalf("red word on the terminal: found %v, style %+v, the window has %+v", ok, got, want)
 	}
 
 	h.type_("\x021")
@@ -58,6 +74,26 @@ func TestSwitchRepaintsAndRestoresModes(t *testing.T) {
 }
 
 func (h *harness) title() string { return h.term.title() }
+
+// findText is where s starts on t's shown screen (ASCII s, one cell per byte).
+func findText(t *vterm.Terminal, s string) (x, y int, ok bool) {
+	rows, cols := t.Size()
+	for y := range rows {
+		var b strings.Builder
+		for x := range cols {
+			c := t.Cell(x, y)
+			if c.Ch == 0 {
+				b.WriteByte(' ')
+			} else {
+				b.WriteRune(c.Ch)
+			}
+		}
+		if i := strings.Index(b.String(), s); i >= 0 {
+			return i, y, true
+		}
+	}
+	return 0, 0, false
+}
 
 // TestLiveOutputPassesThroughRaw: the active window's output reaches the
 // terminal byte for byte; another window's does not reach it at all.

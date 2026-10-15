@@ -27,6 +27,9 @@ type clientTerm struct {
 	mu  sync.Mutex
 	raw bytes.Buffer
 	vt  *vterm.Terminal
+	// keys follows the keyboard modes the terminal was set to, which vt
+	// does not keep.
+	keys screen.KeyTracker
 	// stall, while set, blocks every Write until it is closed: a terminal
 	// (or link) that takes nothing.
 	stallMu sync.Mutex
@@ -61,7 +64,14 @@ func (c *clientTerm) Write(p []byte) (int, error) {
 	defer c.mu.Unlock()
 	c.raw.Write(p)
 	c.vt.Write(p)
+	c.keys.Write(p)
 	return len(p), nil
+}
+
+func (c *clientTerm) keyModes() screen.KeyModes {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.keys.Modes()
 }
 
 // screen is the visible screen, rows joined by newlines, trailing blanks cut.

@@ -42,10 +42,14 @@ const dirty = "\x1b[?1h\x1b[?5h\x1b[?12h\x1b[?66h\x1b[?1004h\x1b[?1005h\x1b[?100
 	"\x1b[?9h\x1b[?1000h\x1b[?1001h\x1b[?1002h\x1b[?1003h\x1b[?2004h\x1b[?7l\x1b[3;10r\x1b[?6h\x1b[?25l\x1b=\x1b[5 q" +
 	"\x1b[4h\x1b[1;31m\x1b(0"
 
+// wantModes are the DEC private modes a window's program may set that
+// Paint replays and Reset turns off: the list vterm.Snapshot restores.
+var wantModes = []int{1, 5, 12, 66, 1004, 1005, 1006, 1015, 9, 1000, 1001, 1002, 1003, 2004}
+
 // TestPaintModes: every mode Paint replays ends as the window has it,
 // whichever way the terminal had it before.
 func TestPaintModes(t *testing.T) {
-	for _, n := range replayModes {
+	for _, n := range wantModes {
 		for _, on := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%d=%v", n, on), func(t *testing.T) {
 				set := fmt.Sprintf("\x1b[?%dh", n)
@@ -57,7 +61,7 @@ func TestPaintModes(t *testing.T) {
 				if on {
 					before = fmt.Sprintf("\x1b[?%dl", n)
 				}
-				c := client(before, Paint(nil, w, ""))
+				c := client(before, Paint(nil, w, "", KeyModes{}))
 				if c.Mode(n) != on {
 					t.Fatalf("mode %d is %v, the window has %v", n, c.Mode(n), on)
 				}
@@ -71,8 +75,8 @@ func TestPaintModes(t *testing.T) {
 // their defaults and the text where it belongs.
 func TestPaintResetsWhatThePreviousWindowLeft(t *testing.T) {
 	w := src("line one\r\nline two")
-	c := client(dirty, Paint(nil, w, ""))
-	for _, n := range replayModes {
+	c := client(dirty, Paint(nil, w, "", KeyModes{}))
+	for _, n := range wantModes {
 		if c.Mode(n) {
 			t.Errorf("mode %d left on", n)
 		}
@@ -105,7 +109,7 @@ func TestPaintResetsWhatThePreviousWindowLeft(t *testing.T) {
 // all replayed.
 func TestPaintWindowSettings(t *testing.T) {
 	w := src("\x1b[5;20r\x1b[?6h\x1b[3;7H\x1b[?7l\x1b[?25l\x1b=\x1b[4 q")
-	c := client("", Paint(nil, w, "title-x"))
+	c := client("", Paint(nil, w, "title-x", KeyModes{}))
 	if c.Mode(7) {
 		t.Error("autowrap on")
 	}
@@ -133,7 +137,7 @@ func TestPaintWindowSettings(t *testing.T) {
 func TestPaintAltScreenKeepsMainScreen(t *testing.T) {
 	w := src("W0-L1\r\nW0-L2\r\n$ vim\x1b[?1049h\x1b[H\x1b[2JVIM-SCREEN")
 	other := strings.Repeat("OTHER-WINDOW-TEXT\r\n", 8)
-	c := client(other, Paint(nil, w, ""))
+	c := client(other, Paint(nil, w, "", KeyModes{}))
 	if !c.AltScreen() || rowText(c, 0, false) != "VIM-SCREEN" {
 		t.Fatalf("alt %v row 0 %q", c.AltScreen(), rowText(c, 0, false))
 	}
@@ -160,7 +164,7 @@ func TestPaintSGR(t *testing.T) {
 		fmt.Fprintf(&out, "\x1b[%d;1H\x1b[%smX%d\x1b[m", i+1, s, i)
 	}
 	w := src(out.String())
-	c := client("", Paint(nil, w, ""))
+	c := client("", Paint(nil, w, "", KeyModes{}))
 	for i, s := range styles {
 		for x := 0; x < 3; x++ {
 			if got, want := c.Cell(x, i), w.Cell(x, i); got.Style != want.Style || c.Text(got) != w.Text(want) {
@@ -177,7 +181,7 @@ func TestPaintSGR(t *testing.T) {
 // in the same cells.
 func TestPaintWideAndCombined(t *testing.T) {
 	w := src("日本語 e\u0301 👩\u200d💻 end")
-	c := client("", Paint(nil, w, ""))
+	c := client("", Paint(nil, w, "", KeyModes{}))
 	if got, want := rowText(c, 0, false), rowText(w, 0, false); got != want {
 		t.Fatalf("%q, the window has %q", got, want)
 	}
@@ -187,7 +191,7 @@ func TestPaintWideAndCombined(t *testing.T) {
 // set and shows the main screen with a visible default cursor.
 func TestReset(t *testing.T) {
 	c := client(dirty+"\x1b[?1049h", Reset(nil))
-	for _, n := range replayModes {
+	for _, n := range wantModes {
 		if c.Mode(n) {
 			t.Errorf("mode %d left on", n)
 		}

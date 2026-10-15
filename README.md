@@ -66,6 +66,15 @@ The prefix is `C-b` (configurable). Press it twice to send it to the shell.
 Everything else you type goes to the shell immediately; bracketed paste
 passes through untouched.
 
+Programs that turn on the kitty keyboard protocol or xterm's
+modifyOtherKeys (nvim, vim, fish and others do) make your terminal send the
+prefix and the keys after it as escape sequences; luxmux recognises those
+too, and pressing the prefix twice sends the program one prefix in the
+same encoding. These keyboard modes are kept per window: switching to
+another window, opening a prompt, help or a dialog, and detaching turn
+them off in your terminal, and showing the window again turns its own
+back on.
+
 **The chooser** (`w`) lists windows with their state, image, size,
 repository@branch and age; arrows or `j`/`k` move, Enter switches, `/`
 filters as you type, `,` renames, `x` kills (with confirmation), Esc or `q`

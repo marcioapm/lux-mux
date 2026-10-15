@@ -34,6 +34,9 @@ type Machine struct {
 	// partial: the end of the previous chunk, a possible start of a paste
 	// marker split across reads.
 	partial []byte
+	// eaten are the keys, sent encoded, whose presses luxmux took: their
+	// releases are dropped too.
+	eaten []rune
 }
 
 type binding struct {
@@ -75,7 +78,9 @@ var PrefixKeys = map[byte]config.Command{
 // order. It stops at the first command: rest is the input after it, to be
 // fed again (or handed to whatever the command opened). Bytes for the
 // window are returned as they came, in as few Sends as possible: outside a
-// prefix or a binding, a read is passed through whole.
+// prefix or a binding, a read is passed through whole. Keys a program had
+// the terminal send as escape sequences (the kitty keyboard protocol,
+// xterm modifyOtherKeys) are recognised as the keys they stand for.
 func (m *Machine) Feed(b []byte) (acts []Action, rest []byte) {
 	if len(m.partial) > 0 {
 		b = append(m.partial, b...)
@@ -104,6 +109,15 @@ func (m *Machine) Feed(b []byte) (acts []Action, rest []byte) {
 			continue
 		}
 		c := b[i]
+		if c == 0x1b {
+			if ev, n, ok := decodeKey(b[i:]); ok {
+				if cmd, done := m.encodedKey(ev, b, &i, n, &start, flush); done {
+					acts = append(acts, Action{Cmd: cmd})
+					return acts, b[i:]
+				}
+				continue
+			}
+		}
 		if m.afterPrefix {
 			m.afterPrefix = false
 			if c == m.prefix {

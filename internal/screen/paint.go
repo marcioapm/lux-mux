@@ -28,18 +28,28 @@ var replayModes = []int{
 // main screen, and over it the alternate screen when t shows that, every
 // row written in place (nothing is pushed into the terminal's
 // scrollback), the scroll region, the modes in replayModes, autowrap,
-// origin mode, keypad mode and cursor shape, then the cursor. title, when
-// not empty, is set with OSC 2. The pen ends in the default style: vterm
-// does not export the remote program's current pen.
-func Paint(b []byte, t *vterm.Terminal, title string) []byte {
+// origin mode, keypad mode, cursor shape and the keyboard modes km, then
+// the cursor. title, when not empty, is set with OSC 2. The pen ends in
+// the default style: vterm does not export the remote program's current
+// pen.
+func Paint(b []byte, t *vterm.Terminal, title string, km KeyModes) []byte {
 	rows, cols := t.Size()
 	// Leave whatever state a previous window left that changes how the
 	// rows below are drawn or how keys are sent: origin mode, scroll
 	// region, insert mode, pen, line-drawing character sets, keypad mode,
-	// cursor shape.
+	// cursor shape, keyboard modes.
 	// Leaving the alternate screen first: it restores the cursor state
 	// saved on entering it, origin mode included.
 	b = append(b, "\x1b[?1049l\x1b[?25l\x1b[?6l\x1b[r\x1b[4l\x1b[m\x1b(B\x1b)B\x0f\x1b[?7h\x1b>\x1b[0 q"...)
+	b = ResetKeys(b)
+	if !t.AltScreen() && !km.Alt.zero() {
+		// The alternate screen's own kitty stack, for when the program
+		// enters it again; its rows are not drawn.
+		b = append(b, "\x1b[?1049h"...)
+		b = appendKitty(b, km.Alt)
+		b = append(b, "\x1b[?1049l"...)
+	}
+	b = appendKitty(b, km.Main)
 	// The main screen first, so a program leaving the alternate screen
 	// later uncovers this window's main screen, not another window's.
 	for y := 0; y < rows; y++ {
@@ -55,9 +65,15 @@ func Paint(b []byte, t *vterm.Terminal, title string) []byte {
 		}
 		b = CUP(b, y, x)
 		b = append(b, "\x1b[?1049h"...)
+		b = appendKitty(b, km.Alt)
 		for y := 0; y < rows; y++ {
 			b = Row(b, t, y, cols)
 		}
+	}
+	if km.ModifyOtherKeys > 0 {
+		b = append(b, "\x1b[>4;"...)
+		b = strconv.AppendInt(b, int64(km.ModifyOtherKeys), 10)
+		b = append(b, 'm')
 	}
 	top, bot := t.ScrollRegion()
 	if top != 0 || bot != rows-1 {
@@ -289,12 +305,13 @@ func Mode(b []byte, n int, on bool) []byte {
 }
 
 // Reset is what luxmux leaves the client terminal with on detach: the
-// modes a remote program may have set turned off, the main screen, the
-// default pen, the cursor shown in its default shape.
+// modes a remote program may have set turned off, keyboard modes included,
+// the main screen, the default pen, the cursor shown in its default shape.
 func Reset(b []byte) []byte {
 	// Leaving the alternate screen first: it restores the cursor state
 	// saved on entering it, origin mode included.
 	b = append(b, "\x1b[?1049l\x1b[?6l\x1b[r\x1b[m\x1b[4l\x1b(B\x1b)B\x0f\x1b[?7h"...)
+	b = ResetKeys(b)
 	for _, n := range replayModes {
 		b = Mode(b, n, false)
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
@@ -425,6 +426,12 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 		return false
 	}
 	moved := w.hasScreen && w.epoch != 0 && run.Epoch != w.epoch
+	if run.Epoch != w.epoch {
+		// A new placement runs a new shell, which set no keyboard modes.
+		// On the same one the program keeps those it set: the snapshot
+		// does not carry them.
+		w.keyModes.Reset()
+	}
 	firstHere := !w.attachedOnce
 	w.attachedOnce = true
 	w.epoch = run.Epoch
@@ -456,6 +463,7 @@ func (m *Mux) outputQuiet(w *Window, data []byte) {
 		return
 	}
 	w.tail.Add(data)
+	w.keyModes.Write(data)
 	w.q.push(feedItem{data: data})
 }
 
@@ -641,7 +649,11 @@ func (m *Mux) suspend(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.suspended = on
-	if !on {
+	if on {
+		// The dialog reads keys as a terminal sends them without the
+		// shown window's keyboard modes.
+		m.tw.enqueue(screen.ResetKeys(nil))
+	} else {
 		m.repaintLocked()
 	}
 }

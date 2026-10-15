@@ -197,6 +197,11 @@ type prompt struct {
 // cancelled.
 func (m *Mux) askLocked(label string, initial string, single bool, done func(string, bool)) {
 	m.promptState = &prompt{label: label, text: []rune(initial), single: single, done: done}
+	if w := m.activeLocked(); w != nil && !m.suspended && !m.help && !w.keyModes.Modes().Zero() {
+		// The prompt reads plain keys; closing it repaints the window,
+		// which sets its keyboard modes again.
+		m.tw.enqueue(screen.ResetKeysHere(nil))
+	}
 	m.drawOverlayLocked()
 }
 

@@ -151,6 +151,10 @@ func (m *Mux) inputLoop() {
 func (m *Mux) handleInput(b []byte) {
 	for len(b) > 0 {
 		m.mu.Lock()
+		if b = m.keys.SkipReleases(b); len(b) == 0 {
+			m.mu.Unlock()
+			return
+		}
 		if m.help {
 			// Any key closes the help; the key itself is used up.
 			m.help = false
