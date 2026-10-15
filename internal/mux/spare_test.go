@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,17 +247,21 @@ func TestClaimedSpareForgottenWhenItsWindowCloses(t *testing.T) {
 
 // spareSubmitHeld makes a session whose next spare submit (the
 // replacement after C-b c claims the spare) is held until release is
-// closed; it returns once that submit reached lux, with the claimed spare.
-func spareSubmitHeld(t *testing.T) (h *harness, first, claimed string, release chan struct{}) {
+// called (or the test ends); it returns once that submit reached lux,
+// with the claimed spare.
+func spareSubmitHeld(t *testing.T) (h *harness, first, claimed string, release func()) {
 	h = newHarness(t, cfgSpare, nil)
 	first = h.live(0)
 	h.waitFor("spare", func() bool { return spareOf(h) != "" })
 	claimed = spareOf(h)
-	release = make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
 	var held atomic.Bool
 	h.lux.SubmitHook = func() {
 		held.Store(true)
-		<-release
+		<-gate
 	}
 	h.type_("\x02c")
 	h.waitFor("window 1 on the spare", func() bool { return h.window(1) == claimed })
@@ -274,7 +279,7 @@ func TestSpareSubmitWhenSessionEnds(t *testing.T) {
 	h.waitFor("one window", func() bool { return h.nwindows() == 1 })
 	h.lux.Term(first).Exit()
 	h.waitFor("ending", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.ending })
-	close(release)
+	release()
 	select {
 	case r := <-h.done:
 		if r != "exited" {
@@ -302,7 +307,7 @@ func TestSpareSubmitWhenDetached(t *testing.T) {
 	h, _, _, release := spareSubmitHeld(t)
 	h.type_("\x02d")
 	time.Sleep(50 * time.Millisecond)
-	close(release)
+	release()
 	select {
 	case r := <-h.done:
 		if r != "detached" {
