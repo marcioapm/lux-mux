@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -58,8 +59,30 @@ type Config struct {
 }
 
 // DefaultImage is the image of the built-in profile used when the
-// configuration defines none.
-const DefaultImage = "ubuntu:24.04"
+// configuration defines none: the default image tagged with this binary's
+// module version.
+var DefaultImage = defaultImage()
+
+func defaultImage() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return imageForVersion("")
+	}
+	return imageForVersion(info.Main.Version)
+}
+
+// imageForVersion maps a release version (v0.2.0) to its tag (0.2.0);
+// "(devel)", pseudo-versions and pre-releases, which have no published
+// image of their own, map to latest.
+func imageForVersion(version string) string {
+	const prefix = "ghcr.io/marcioapm/luxmux:"
+	if !releaseRe.MatchString(version) {
+		return prefix + "latest"
+	}
+	return prefix + strings.TrimPrefix(version, "v")
+}
+
+var releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
 // DefaultShell starts bash as a login shell where the image has it, sh otherwise.
 var DefaultShell = []string{"sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"}

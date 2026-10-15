@@ -31,6 +31,16 @@ luxmux                    # attach the session "main", creating it
 The first window starts at once and shows its Run's progress (queued,
 pulling image, cloning, running) until the shell is ready.
 
+The built-in profile uses `ghcr.io/marcioapm/luxmux:<version>` for a release
+binary and `:latest` for development or pseudo-version builds. It includes
+Claude Code, OpenCode, Codex and common development tools; see the
+[image guide](images/default/README.md) for pins, runtime defaults and builds.
+The GHCR package must be made public by its owner after its first push.
+Until then, or for a light image without agents, set `image = "ubuntu:24.04"`
+in `[profiles.default]`. No credentials are included in the image: pass keys
+through profile `secrets` and allow the required provider hosts in `egress`.
+
+
 | Command | |
 | --- | --- |
 | `luxmux` | attach the default session (`main`), or create it |
@@ -123,8 +133,12 @@ warm_spare = false
 ```
 
 Each window's Run is a generic tty workload running the profile's shell,
-with a state volume at `/workspace`; the repository is cloned to
-`/workspace/repos/<name>` and is the shell's working directory.
+with state volumes at `/workspace` and `/home/agent`; the repository is cloned to
+`/workspace/repos/<name>` and is the shell's working directory. The default
+image runs as `agent`, with its HOME at `/home/agent`, so agent configuration
+and sessions survive moves too. Custom images choose their own `USER` and
+passwd home; homes elsewhere are not persisted by these volumes.
+
 
 Secret values come from the `secrets_from` .env file, else from the
 environment variable of the same name, as with `lux run`. They are sent

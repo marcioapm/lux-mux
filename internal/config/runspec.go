@@ -72,7 +72,10 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 			Command: DefaultShell,
 			Workdir: p.Workdir,
 		},
-		Volumes: []api.Volume{{Name: "workspace", Path: Workspace, Kind: "state"}},
+		Volumes: []api.Volume{
+			{Name: "workspace", Path: Workspace, Kind: "state"},
+			{Name: "home", Path: "/home/agent", Kind: "state"},
+		},
 	}
 	if len(p.Shell) > 0 {
 		sp.Workload.Command = append([]string{}, p.Shell...)

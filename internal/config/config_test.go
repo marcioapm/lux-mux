@@ -23,6 +23,23 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+func TestImageForVersion(t *testing.T) {
+	for version, want := range map[string]string{
+		"v0.2.0":                         "ghcr.io/marcioapm/luxmux:0.2.0",
+		"v1.10.3":                        "ghcr.io/marcioapm/luxmux:1.10.3",
+		"(devel)":                        "ghcr.io/marcioapm/luxmux:latest",
+		"v0.2.0-0.20261015000000-abcdef": "ghcr.io/marcioapm/luxmux:latest",
+		"v0.1.1-0.20261015000000-abcdef": "ghcr.io/marcioapm/luxmux:latest",
+		"v0.2.0-rc.1":                    "ghcr.io/marcioapm/luxmux:latest",
+		"v2.0.0+incompatible":            "ghcr.io/marcioapm/luxmux:latest",
+		"":                               "ghcr.io/marcioapm/luxmux:latest",
+	} {
+		if got := imageForVersion(version); got != want {
+			t.Errorf("imageForVersion(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
 func TestParseProfiles(t *testing.T) {
 	c, err := Parse([]byte(`
 prefix = "C-a"
@@ -156,7 +173,10 @@ func TestRunSpec(t *testing.T) {
 		Secrets: []api.Secret{{Name: "NPM_TOKEN", Value: "n", As: "env"}, {Name: "GH_TOKEN", Value: "g"}},
 		Git: &api.Git{Repositories: []api.Repository{{Name: "my-app", URL: "git@github.com:example/My.App.git",
 			Ref: "dev", Credential: "GH_TOKEN"}}},
-		Volumes:   []api.Volume{{Name: "workspace", Path: "/workspace", Kind: "state"}},
+		Volumes: []api.Volume{
+			{Name: "workspace", Path: "/workspace", Kind: "state"},
+			{Name: "home", Path: "/home/agent", Kind: "state"},
+		},
 		Resources: api.Resources{Size: "m-2-arm64"},
 		Placement: api.Placement{Pool: "m"},
 		Network:   api.Network{Egress: []api.EgressRule{{Host: "github.com"}, {CIDR: "10.0.0.0/8"}}},
