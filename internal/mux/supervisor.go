@@ -17,12 +17,10 @@ import (
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
-// the cursor's visibility and leaves the alternate screen first): the
-// first frame of an attach tells a host with restore from one without.
+// the cursor's visibility and leaves the alternate screen first).
 var snapshotPrefix = []byte("\x1b[?25l\x1b[?1049l")
 
-// streamChunk is the largest output frame lux-shim sends: a snapshot
-// arrives as full chunks and a shorter last one.
+// streamChunk is the largest output frame lux-shim sends.
 const streamChunk = 32 << 10
 
 // Stream end messages from luxd and the shim.
@@ -322,9 +320,12 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		}
 	})
 
-	// The first frame says whether the host restores: a snapshot starts
-	// with snapshotPrefix. None within RestoreWait, or live output first:
-	// a host from before restore.
+	// The first frame says what the host does. A host with restore sends
+	// the snapshot (starting with snapshotPrefix), then one frame marked
+	// Restored where live output starts; with no snapshot to send (the
+	// screen over its limit, or its emulator gone) the marker comes
+	// first. A host from before restore sends neither: live output, or
+	// nothing within RestoreWait.
 	var first *api.StreamData
 	select {
 	case <-ctx.Done():
@@ -335,7 +336,7 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		}
 	case <-time.After(m.opt.RestoreWait):
 	}
-	if first != nil && first.Data == nil {
+	if first != nil && first.Data == nil && !first.Restored {
 		return m.streamEnd(ctx, first, readErr)
 	}
 	restoring := first != nil && bytes.HasPrefix(first.Data, snapshotPrefix)
@@ -346,22 +347,25 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		_ = wsjson.Write(ctx, conn, api.StreamData{Rows: max(rows-1, 1), Cols: cols})
 		_ = wsjson.Write(ctx, conn, api.StreamData{Rows: rows, Cols: cols})
 	}
+	// quiet: the snapshot goes to the emulator only, until the marker.
 	quiet := restoring && !raw
 	handle := func(d api.StreamData) (attachEnd, string, bool) {
 		if d.Error != "" || d.ExitCode != nil {
 			end, why := m.streamEnd(ctx, &d, readErr)
 			return end, why, true
 		}
+		if d.Restored {
+			if quiet {
+				quiet = false
+				m.restored(w)
+			}
+			return 0, "", false
+		}
 		if len(d.Data) == 0 {
 			return 0, "", false
 		}
 		if quiet {
 			m.outputQuiet(w, d.Data)
-			if len(d.Data) < streamChunk {
-				// The snapshot's last chunk: show the window as restored.
-				quiet = false
-				m.restored(w)
-			}
 			return 0, "", false
 		}
 		m.output(w, d.Data)
@@ -607,6 +611,7 @@ func (m *Mux) event(runID string, e api.Event) {
 
 // Resize takes the terminal's new size: every emulator and every stream.
 func (m *Mux) Resize(rows, cols int) {
+	rows, cols = clampSize(rows, cols)
 	m.mu.Lock()
 	if rows == m.rows && cols == m.cols {
 		m.mu.Unlock()

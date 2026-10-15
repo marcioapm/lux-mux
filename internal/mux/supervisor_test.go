@@ -1,6 +1,8 @@
 package mux
 
 import (
+	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -451,4 +453,109 @@ func TestPanicRestoresTerminal(t *testing.T) {
 	if kp, sh := h.term.keypadShape(); kp || sh != 0 {
 		t.Fatalf("keypad %v shape %d", kp, sh)
 	}
+}
+
+// TestRestoredMarkerEndsSnapshot: a window not shown when attached takes
+// its snapshot quietly, however it is chunked, until the Restored marker;
+// what follows is live.
+func TestRestoredMarkerEndsSnapshot(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	// A screen whose snapshot takes several 32 KiB frames.
+	var b strings.Builder
+	for y := range 24 {
+		fmt.Fprintf(&b, "\x1b[%d;1H", y+1)
+		for x := range 80 {
+			fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm#", x, y, x+y)
+		}
+	}
+	h.lux.Term(a).Output([]byte(b.String() + "\x1b[mMARK-A"))
+	h.type_("\x02c")
+	h.live(1)
+	h.detach()
+	h.start(nil)
+	h.live(0)
+	h.live(1)
+	h.type_("\x020")
+	h.waitScreen("window 0 restored", h.contains("MARK-A"))
+	h.lux.Term(a).Output([]byte("\r\nLIVE-AFTER"))
+	h.waitScreen("live after the marker", h.contains("LIVE-AFTER"))
+	h.detach()
+}
+
+// TestRestoredMarkerWithoutSnapshot: a host with restore that has no
+// snapshot to send sends the marker first: the window goes live at once
+// (not after RestoreWait, as for a host from before restore), from a
+// blank screen the shell is asked to redraw.
+func TestRestoredMarkerWithoutSnapshot(t *testing.T) {
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.NoSnapshot = true; l.Hold = true })
+	h.waitFor("submitted", func() bool { return len(h.lux.RunIDs()) == 1 })
+	id := h.lux.RunIDs()[0]
+	h.lux.Start(id)
+	h.waitFor("attached", func() bool { return len(attachesOf(h.lux, id)) == 1 })
+	start := time.Now()
+	h.live(0)
+	if d := time.Since(start); d >= h.m.opt.RestoreWait {
+		t.Fatalf("live after %v: waited as for a host without restore", d)
+	}
+	term := h.lux.Term(id)
+	h.waitFor("redraw nudge", func() bool {
+		return reflect.DeepEqual(term.Resizes(), [][2]int{{24, 80}, {23, 80}, {24, 80}})
+	})
+	h.type_("typed-live\r\n")
+	h.waitScreen("live", h.contains("typed-live"))
+	h.detach()
+}
+
+// TestHugeTerminalClamped: a terminal larger than lux allows attaches at
+// lux's largest size, 200×500, and resizes to it.
+func TestHugeTerminalClamped(t *testing.T) {
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) {})
+	id := h.live(0)
+	h.m.Resize(300, 900)
+	term := h.lux.Term(id)
+	h.waitFor("resize", func() bool {
+		r := term.Resizes()
+		return len(r) > 0 && r[len(r)-1] == [2]int{200, 500}
+	})
+	h.lux.Blip(id)
+	h.waitFor("reattached", func() bool { return len(attachesOf(h.lux, id)) >= 2 && h.lux.Streams(id) > 0 })
+	a := attachesOf(h.lux, id)
+	if last := a[len(a)-1]; last.Rows != 200 || last.Cols != 500 {
+		t.Fatalf("attach %+v", last)
+	}
+	h.m.mu.Lock()
+	w := h.m.windows[0]
+	h.m.mu.Unlock()
+	w.withEmu(func(t2 *vtermT) {
+		if r, c := t2.Size(); r != 200 || c != 500 {
+			t.Errorf("emulator %dx%d", r, c)
+		}
+	})
+	h.detach()
+}
+
+// TestRestoreBudgetReattaches: a restore attach whose stream falls more
+// than the host's budget behind (as lux-shim ends it) is attached again
+// with restore, and the screen is right afterwards.
+func TestRestoreBudgetReattaches(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	id := h.live(0)
+	n := len(attachesOf(h.lux, id))
+	// m.mu held: the stream's reader stops at its next frame, and the
+	// host queues output for it past its budget.
+	h.m.mu.Lock()
+	term := h.lux.Term(id)
+	chunk := bytes.Repeat([]byte("x"), 64<<10)
+	for range fakelux.SnapshotLimit/len(chunk) + 64 {
+		term.Output(chunk)
+	}
+	h.m.mu.Unlock()
+	h.waitFor("reattached", func() bool { return len(attachesOf(h.lux, id)) > n && h.lux.Streams(id) > 0 })
+	if a := attachesOf(h.lux, id); !a[len(a)-1].Restore {
+		t.Fatal("reattach without restore")
+	}
+	term.Output([]byte("\x1b[2J\x1b[HAFTER-BUDGET"))
+	h.waitScreen("screen right", h.contains("AFTER-BUDGET"))
+	h.detach()
 }

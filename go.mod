@@ -7,8 +7,9 @@ require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
-	github.com/marcioapm/lux v0.1.30-0.20261015011705-7592369c6b47
+	github.com/marcioapm/lux v0.1.30-0.20261015033052-f5a9f85071d2
 	github.com/pelletier/go-toml/v2 v2.4.3
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 )
 
@@ -35,6 +36,5 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )

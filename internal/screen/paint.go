@@ -109,7 +109,7 @@ type termState struct {
 // cell holds no ESC).
 func snapState(t *vterm.Terminal) termState {
 	var st termState
-	snap := t.Snapshot(1)
+	snap := t.Snapshot(0)
 	i := bytes.Index(snap, snapshotReset)
 	if i < 0 {
 		return st

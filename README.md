@@ -167,8 +167,18 @@ previewed or has an overlay taken down, luxmux attaches it again with
 restore and lux's snapshot rebuilds its screen. Your terminal itself has
 received all of the shown window's output either way.
 
+If your terminal (or the link to it) cannot keep up, up to 4 MiB of the
+shown window's output waits for it; past that, luxmux drops what waits
+and, once the terminal took the rest, repaints the window from its
+emulator: you miss scrolled-by output in your terminal's scrollback, never
+the screen's state, and lux never drops the stream for it.
+
+lux attaches at most 200×500: a larger terminal shows each window in its
+top-left 200 rows and 500 columns.
+
 A host whose lux-shim predates restore sends no snapshot: the window starts
-blank, and luxmux asks the shell to redraw its prompt.
+blank, and luxmux asks the shell to redraw its prompt. So does a host with
+restore whose screen was too large to snapshot.
 
 ## Warm spares
 

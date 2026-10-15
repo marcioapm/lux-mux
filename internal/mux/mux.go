@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marcioapm/lux/vterm"
+
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/keys"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
@@ -135,7 +137,9 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: newTermWriter(opt.Out),
 		sess: sess, byRun: map[string]*Window{}, done: make(chan string, 1)}
 	m.in = &input{r: opt.In, spawn: m.goSafe}
-	m.rows, m.cols = opt.Size()
+	m.tw.caughtUp = m.terminalCaughtUp
+	m.goSafe(m.tw.run)
+	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	for _, sw := range sess.Windows {
 		spec := opt.Config.Profiles[sw.Profile]
@@ -150,6 +154,13 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
 	return m, nil
+}
+
+// clampSize bounds a terminal size to what lux attaches with and its
+// emulators keep: at most MaxRows×MaxCols (luxd refuses larger). A larger
+// terminal shows windows in its top-left corner.
+func clampSize(rows, cols int) (int, int) {
+	return min(max(rows, 1), vterm.MaxRows), min(max(cols, 1), vterm.MaxCols)
 }
 
 func clamp(i, n int) int {
@@ -257,25 +268,29 @@ func (m *Mux) closeFeedLocked(w *Window) {
 }
 
 // output takes a chunk of w's stream: queued for the terminal at once if
-// w is shown, and for its emulator. Neither waits: the emulator's queue is
-// bounded by dropping (feedLimit), and a slow terminal is waited for by
-// the stream's reader after the lock is released.
+// w is shown, and for its emulator. Neither waits: both queues are bounded
+// by dropping (liveLimit, feedLimit), so the stream is always read.
 func (m *Mux) output(w *Window, data []byte) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if w.closed {
-		m.mu.Unlock()
 		return
 	}
-	shown := m.showingLocked(w)
-	if shown {
-		m.tw.enqueue(data)
+	if m.showingLocked(w) {
+		m.tw.enqueueLive(data)
 	}
 	w.tail.Add(data)
 	w.q.push(feedItem{data: data})
-	m.mu.Unlock()
-	if shown {
-		m.tw.waitBelow(m.ctx, writeLimit)
-	}
+}
+
+// terminalCaughtUp repaints the shown window once a terminal that fell
+// behind took everything queued: the output it missed is in the window's
+// emulator.
+func (m *Mux) terminalCaughtUp() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tw.caughtUpDone()
+	m.repaintLocked()
 }
 
 // showingLocked reports whether w's output goes to the terminal now: it is

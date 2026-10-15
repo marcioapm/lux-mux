@@ -18,7 +18,7 @@ type Terminal struct {
 	in      io.Writer
 	resize  func(rows, cols int)
 	screen  *vterm.Terminal
-	subs    map[chan []byte]bool
+	subs    map[*Sub]bool
 	gone    chan struct{}
 	once    sync.Once
 	closer  func()
@@ -27,34 +27,66 @@ type Terminal struct {
 }
 
 func newTerminal(rows, cols int) *Terminal {
-	return &Terminal{screen: vterm.New(rows, cols, 2000), subs: map[chan []byte]bool{}, gone: make(chan struct{})}
+	return &Terminal{screen: vterm.New(rows, cols, 2000), subs: map[*Sub]bool{}, gone: make(chan struct{})}
+}
+
+// As lux-shim: a snapshot is at most SnapshotLimit bytes (history lines
+// dropped first; a screen bigger than that alone gets no snapshot); a
+// plain attach misses output past PlainQueue reads queued; a restore
+// attach with more than SnapshotLimit bytes queued is ended (Behind).
+const (
+	SnapshotLimit = 128 * 32 << 10
+	PlainQueue    = 256
+)
+
+// Sub is one attach's copy of the terminal's output.
+type Sub struct {
+	C      chan []byte
+	strict bool
+	queued int
+	// Behind is closed when a restore attach fell behind and was ended.
+	Behind chan struct{}
+}
+
+// taken records that the stream sent b.
+func (s *Sub) taken(t *Terminal, b []byte) {
+	t.mu.Lock()
+	s.queued -= len(b)
+	t.mu.Unlock()
 }
 
 // Join subscribes to the output; with restore it resizes to rows×cols
-// first (when given) and returns the snapshot the output continues from.
-func (t *Terminal) Join(restore bool, rows, cols int) ([]byte, chan []byte) {
-	// As lux-shim's subscriber buffer: a stream more than 256 outputs
-	// behind misses output.
-	ch := make(chan []byte, 256)
+// first (when given) and returns the snapshot the output continues from
+// (nil when the screen alone is over SnapshotLimit).
+func (t *Terminal) Join(restore bool, rows, cols int) ([]byte, *Sub) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var snap []byte
 	if restore {
 		if rows > 0 && cols > 0 {
-			t.resizeLocked(rows, cols)
+			t.resizeLocked(min(rows, vterm.MaxRows), min(cols, vterm.MaxCols))
 		}
-		snap = t.screen.Snapshot(128 * 32 << 10)
+		snap = t.screen.Snapshot(SnapshotLimit)
+		if len(snap) > SnapshotLimit {
+			snap = nil
+		}
 	}
-	t.subs[ch] = true
-	return snap, ch
+	sub := &Sub{strict: snap != nil, Behind: make(chan struct{})}
+	if sub.strict {
+		sub.C = make(chan []byte, 1<<16)
+	} else {
+		sub.C = make(chan []byte, PlainQueue)
+	}
+	t.subs[sub] = true
+	return snap, sub
 }
 
-// Leave unsubscribes ch.
-func (t *Terminal) Leave(ch chan []byte) {
+// Leave unsubscribes sub.
+func (t *Terminal) Leave(sub *Sub) {
 	t.mu.Lock()
-	if t.subs[ch] {
-		delete(t.subs, ch)
-		close(ch)
+	if t.subs[sub] {
+		delete(t.subs, sub)
+		close(sub.C)
 	}
 	t.mu.Unlock()
 }
@@ -65,13 +97,32 @@ func (t *Terminal) Output(p []byte) {
 	defer t.mu.Unlock()
 	t.screen.Write(p)
 	b := append([]byte{}, p...)
-	for ch := range t.subs {
-		// As lux-shim: a stream that cannot keep up misses output.
+	for sub := range t.subs {
+		if sub.strict && sub.queued+len(b) > SnapshotLimit {
+			delete(t.subs, sub)
+			close(sub.Behind)
+			continue
+		}
 		select {
-		case ch <- b:
+		case sub.C <- b:
+			if sub.strict {
+				sub.queued += len(b)
+			}
 		default:
+			// A plain attach that cannot keep up misses output.
 		}
 	}
+}
+
+// Queued is the most output any restore attach has queued, not yet sent.
+func (t *Terminal) Queued() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for sub := range t.subs {
+		n = max(n, sub.queued)
+	}
+	return n
 }
 
 // Input writes to the process.

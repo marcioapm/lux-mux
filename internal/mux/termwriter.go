@@ -1,7 +1,6 @@
 package mux
 
 import (
-	"context"
 	"io"
 	"sync"
 	"time"
@@ -9,24 +8,38 @@ import (
 
 // termWriter is the only writer of the user's terminal. Writes are queued
 // in order and written by one goroutine, so whoever queues (the input
-// loop, a window's stream) never waits on a slow or stalled terminal while
-// it holds m.mu. A slot holds a place in the order for bytes made later
-// (a repaint drawn once its window's emulator caught up).
+// loop, a window's stream) never waits on a slow or stalled terminal. A
+// slot holds a place in the order for bytes made later (a repaint drawn
+// once its window's emulator caught up).
+//
+// Live output never waits either: lux ends a stream whose reader stops
+// reading, so the stream must be read whatever the terminal does. When
+// the live output queued for the terminal passes liveLimit, it is dropped
+// and no more is queued until the terminal has taken everything else;
+// then caughtUp runs, and the window is repainted from its emulator. As
+// tmux does, a terminal that cannot keep up misses output (from its own
+// scrollback), never the screen's state.
 type termWriter struct {
 	out io.Writer
+	// caughtUp runs, on the writer's goroutine, once the queue is empty
+	// after live output was dropped.
+	caughtUp func()
 
 	mu      sync.Mutex
 	q       []termItem
 	n       int           // bytes queued, slots not counted
+	live    int           // of n, live output
 	drained chan struct{} // closed and replaced whenever n shrinks
+	behind  bool          // live output was dropped; caughtUp is due
 	wake    chan struct{}
 	closed  bool
 	exited  chan struct{}
 }
 
 type termItem struct {
-	b []byte
-	s *slot
+	b    []byte
+	s    *slot
+	live bool
 }
 
 // slot is a place in the terminal's output filled later, once.
@@ -40,28 +53,68 @@ func (s *slot) fill(b []byte) {
 	close(s.done)
 }
 
-// writeLimit is how much output may wait for the terminal before a
-// window's stream reader waits (outside every lock) for it to drain.
-const writeLimit = 1 << 20
+// liveLimit is how much live output may wait for the terminal; dialogs
+// writing through Write wait while more than that is queued.
+const liveLimit = 4 << 20
 
+// newTermWriter makes the writer; the caller runs its run goroutine.
 func newTermWriter(out io.Writer) *termWriter {
-	t := &termWriter{out: out, drained: make(chan struct{}), wake: make(chan struct{}, 1), exited: make(chan struct{})}
-	go t.run()
-	return t
+	return &termWriter{out: out, drained: make(chan struct{}), wake: make(chan struct{}, 1), exited: make(chan struct{})}
 }
 
 // enqueue queues b, which the caller no longer changes. It never blocks.
-func (t *termWriter) enqueue(b []byte) {
-	if len(b) == 0 {
+func (t *termWriter) enqueue(b []byte) { t.add(termItem{b: b}) }
+
+// enqueueLive queues a window's live output, or drops it (see
+// termWriter). It never blocks.
+func (t *termWriter) enqueueLive(b []byte) { t.add(termItem{b: b, live: true}) }
+
+func (t *termWriter) add(it termItem) {
+	if len(it.b) == 0 {
 		return
 	}
 	t.mu.Lock()
-	if !t.closed {
-		t.q = append(t.q, termItem{b: b})
-		t.n += len(b)
+	switch {
+	case t.closed:
+	case it.live && t.behind:
+	case it.live && t.live+len(it.b) > liveLimit:
+		kept := t.q[:0]
+		for _, x := range t.q {
+			if x.live {
+				t.n -= len(x.b)
+			} else {
+				kept = append(kept, x)
+			}
+		}
+		clear(t.q[len(kept):])
+		t.q = kept
+		t.live = 0
+		t.behind = true
+	default:
+		t.q = append(t.q, it)
+		t.n += len(it.b)
+		if it.live {
+			t.live += len(it.b)
+		}
 	}
 	t.mu.Unlock()
 	t.signal()
+}
+
+// isBehind reports whether live output was dropped and no repaint has
+// been queued since.
+func (t *termWriter) isBehind() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.behind
+}
+
+// caughtUpDone is called by the repaint caughtUp asked for, under m.mu
+// before it queues the repaint: live output after it is queued again.
+func (t *termWriter) caughtUpDone() {
+	t.mu.Lock()
+	t.behind = false
+	t.mu.Unlock()
 }
 
 // slot queues a place for bytes filled in later.
@@ -83,30 +136,19 @@ func (t *termWriter) signal() {
 	}
 }
 
-// Write copies p into the queue and waits while too much is queued: the
-// dialogs draw through it, in order with everything else.
+// Write copies p into the queue and waits while more than liveLimit is
+// queued: the dialogs draw through it, in order with everything else.
 func (t *termWriter) Write(p []byte) (int, error) {
 	t.enqueue(append([]byte{}, p...))
-	t.waitBelow(context.Background(), writeLimit)
-	return len(p), nil
-}
-
-// waitBelow waits until at most limit bytes are queued, ctx ends or the
-// writer is closed.
-func (t *termWriter) waitBelow(ctx context.Context, limit int) {
 	for {
 		t.mu.Lock()
-		if t.n <= limit || t.closed {
+		if t.n <= liveLimit || t.closed {
 			t.mu.Unlock()
-			return
+			return len(p), nil
 		}
 		ch := t.drained
 		t.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return
-		}
+		<-ch
 	}
 }
 
@@ -118,6 +160,14 @@ func (t *termWriter) run() {
 			if t.closed {
 				t.mu.Unlock()
 				return
+			}
+			if t.behind && t.caughtUp != nil {
+				t.mu.Unlock()
+				t.caughtUp()
+				t.mu.Lock()
+				if len(t.q) > 0 || t.closed {
+					continue
+				}
 			}
 			t.mu.Unlock()
 			<-t.wake
@@ -138,6 +188,9 @@ func (t *termWriter) run() {
 		t.mu.Lock()
 		if it.s == nil {
 			t.n -= len(it.b)
+			if it.live {
+				t.live -= len(it.b)
+			}
 			close(t.drained)
 			t.drained = make(chan struct{})
 		}

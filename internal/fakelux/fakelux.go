@@ -46,6 +46,9 @@ type Server struct {
 	// NoRestore makes attach ignore restore, as a host whose lux-shim
 	// predates it.
 	NoRestore bool
+	// NoSnapshot makes a restore attach send no snapshot, only the
+	// Restored marker, as a host whose screen is over the snapshot limit.
+	NoSnapshot bool
 	// Hold keeps new Runs queued (submitted) until Start is called.
 	Hold bool
 
@@ -387,6 +390,11 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	}
 	s.attachs = append(s.attachs, AttachReq{RunID: id, Restore: restore, Rows: rows, Cols: cols})
 	s.cond.Broadcast()
+	if rows > 200 || cols > 500 {
+		s.mu.Unlock()
+		writeErr(w, 422, "invalid_request", "rows and cols are at most 200 and 500")
+		return
+	}
 	if r.run.State != "running" || r.term == nil {
 		st := r.run.State
 		s.mu.Unlock()
@@ -394,7 +402,7 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	t := r.term
-	noRestore := s.NoRestore
+	noRestore, noSnapshot := s.NoRestore, s.NoSnapshot
 	s.mu.Unlock()
 
 	ws, err := websocket.Accept(w, req, nil)
@@ -413,6 +421,9 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	}()
 	snap, sub := t.Join(restore && !noRestore, rows, cols)
 	defer t.Leave(sub)
+	if noSnapshot {
+		snap = nil
+	}
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
 	go func() {
@@ -440,16 +451,31 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 		}
 		snap = snap[n:]
 	}
+	if restore && !noRestore {
+		// Where live output starts, with or without a snapshot.
+		if wsjson.Write(ctx, ws, api.StreamData{Restored: true}) != nil {
+			return
+		}
+	}
+	send := func(b []byte) error {
+		err := wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: b})
+		sub.taken(t, b)
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-sub.Behind:
+			_ = wsjson.Write(ctx, ws, api.StreamData{Error: ErrAttachFellBehind})
+			_ = ws.Close(websocket.StatusNormalClosure, "")
 			return
 		case <-t.Gone():
 			// Drain what the process wrote last.
 			for {
 				select {
-				case b := <-sub:
-					_ = wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: b})
+				case b := <-sub.C:
+					_ = send(b)
 					continue
 				default:
 				}
@@ -458,11 +484,11 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 			_ = wsjson.Write(ctx, ws, api.StreamData{Error: ErrWorkloadExited})
 			_ = ws.Close(websocket.StatusNormalClosure, "")
 			return
-		case b, ok := <-sub:
+		case b, ok := <-sub.C:
 			if !ok {
 				return
 			}
-			if wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: b}) != nil {
+			if send(b) != nil {
 				return
 			}
 		}

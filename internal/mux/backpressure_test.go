@@ -32,8 +32,9 @@ func (l *inputLog) of(id string) []byte {
 }
 
 // TestKeysFlowWhileTerminalStalled: a terminal that takes no output does
-// not hold up the keyboard: keystrokes still reach the active window's
-// stream and C-b d still detaches.
+// not hold up the keyboard or the stream: keystrokes still reach the
+// active window's stream, its output is still read (lux does not drop the
+// stream), and C-b d still detaches.
 func TestKeysFlowWhileTerminalStalled(t *testing.T) {
 	var keys inputLog
 	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook })
@@ -42,16 +43,21 @@ func TestKeysFlowWhileTerminalStalled(t *testing.T) {
 	h.waitScreen("echo", h.contains("ready"))
 	h.term.setStall(true)
 	t.Cleanup(func() { h.term.setStall(false) })
-	// More output than the terminal queue holds: the stream's reader now
-	// waits for the terminal.
-	big := bytes.Repeat([]byte("flood-line-0123456789abcdef\r\n"), (3<<20)/29)
-	h.lux.Term(a).Output(big)
-	h.lux.Term(a).Output(big)
-	time.Sleep(100 * time.Millisecond)
+	// More output than the terminal's queue holds, paced within the
+	// host's budget for the stream.
+	big := bytes.Repeat([]byte("flood-line-0123456789abcdef\r\n"), (1<<20)/29)
+	term := h.lux.Term(a)
+	for range 8 {
+		term.Output(big)
+		h.waitFor("stream read", func() bool { return term.Queued() < 2<<20 })
+	}
 	h.type_("typed-while-stalled")
 	h.waitFor("keys reached the stream", func() bool {
 		return bytes.Contains(keys.of(a), []byte("typed-while-stalled"))
 	})
+	if n := len(attachesOf(h.lux, a)); n != 1 {
+		t.Fatalf("%d attaches: the stream was dropped", n)
+	}
 	h.type_("\x02d")
 	select {
 	case r := <-h.done:
@@ -63,8 +69,37 @@ func TestKeysFlowWhileTerminalStalled(t *testing.T) {
 	}
 }
 
+// TestSlowTerminalCatchesUp: a terminal that fell more than liveLimit
+// behind misses the output in between, then shows the window's screen as
+// it is.
+func TestSlowTerminalCatchesUp(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.type_("ready\r\n")
+	h.waitScreen("echo", h.contains("ready"))
+	h.term.setStall(true)
+	big := bytes.Repeat([]byte("flood-line-0123456789abcdef\r\n"), (1<<20)/29)
+	term := h.lux.Term(a)
+	for range 6 {
+		term.Output(big)
+		h.waitFor("stream read", func() bool { return term.Queued() < 2<<20 })
+	}
+	h.waitFor("behind", h.m.tw.isBehind)
+	term.Output([]byte("\x1b[2J\x1b[HFINAL-SCREEN"))
+	h.waitFor("emulator", func() bool { return strings.Contains(h.emuScreen(0), "FINAL-SCREEN") })
+	h.term.setStall(false)
+	h.waitScreen("final screen", func(s string) bool { return s == h.emuScreen(0) })
+	if !strings.Contains(h.term.screen(), "FINAL-SCREEN") {
+		t.Fatal("final screen missing")
+	}
+	h.type_("after\r\n")
+	h.waitScreen("live again", h.contains("after"))
+	h.detach()
+}
+
 // overflow fills window i's emulator queue past feedLimit while its
-// emulator is held, then lets it go.
+// emulator is held, then lets it go. The output is paced so the host's
+// own budget for the stream is never passed: luxmux reads it all.
 func (h *harness) overflow(i int, id string) {
 	h.t.Helper()
 	h.m.mu.Lock()
@@ -72,8 +107,10 @@ func (h *harness) overflow(i int, id string) {
 	h.m.mu.Unlock()
 	w.emuMu.Lock()
 	chunk := bytes.Repeat([]byte("OVERFLOW-FILL-0123456789\r\n"), 1<<14)
+	term := h.lux.Term(id)
 	for sent := 0; sent <= feedLimit+len(chunk); sent += len(chunk) {
-		h.lux.Term(id).Output(chunk)
+		term.Output(chunk)
+		h.waitFor("stream drained", func() bool { return term.Queued() < 2<<20 && h.termQueued() < liveLimit/2 })
 	}
 	h.waitFor("stale", w.q.isStale)
 	w.emuMu.Unlock()
@@ -195,4 +232,11 @@ func TestEmulatorKeepsNoHistory(t *testing.T) {
 		}
 	})
 	h.detach()
+}
+
+// termQueued is how much live output waits for the terminal.
+func (h *harness) termQueued() int {
+	h.m.tw.mu.Lock()
+	defer h.m.tw.mu.Unlock()
+	return h.m.tw.live
 }
