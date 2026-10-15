@@ -14,10 +14,6 @@ ARG UV_SHA256_AMD64=eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf9
 ARG UV_SHA256_ARM64=9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14
 # sha256 of https://cli.github.com/packages/githubcli-archive-keyring.gpg
 ARG GH_KEYRING_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
-ARG CLAUDE_CODE_VERSION=2.1.301
-ARG OPENCODE_VERSION=1.19.1
-ARG CODEX_VERSION=0.162.1
-ARG VERSION=devel
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
@@ -57,6 +53,11 @@ RUN set -eux; \
     rm -f /tmp/node.tar.xz /tmp/uv.tar.gz
 
 # The CLIs live under /opt/npm, outside the home, so a fresh or restored home keeps them.
+# Agent versions are declared here, not at the top: an ARG in scope is part of a RUN's
+# cache key, so bumping one rebuilds only this layer.
+ARG CLAUDE_CODE_VERSION=2.1.301
+ARG OPENCODE_VERSION=1.19.1
+ARG CODEX_VERSION=0.162.1
 RUN set -eux; \
     npm install --global --no-update-notifier --no-fund --no-audit \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
@@ -81,6 +82,8 @@ ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_ERROR_REPORTING=1 \
     OPENCODE_DISABLE_AUTOUPDATE=true
 
+# The release version only labels the image; declared last so it invalidates nothing.
+ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
       org.opencontainers.image.description="luxmux default workload image: shell tools, Node LTS, Python with uv, Claude Code, OpenCode and Codex" \
       org.opencontainers.image.licenses="ELv2" \
