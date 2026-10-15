@@ -186,8 +186,10 @@ type Window struct {
 	// refreshing: the stream was closed so a new attach with restore
 	// rebuilds a stale emulator.
 	refreshing bool
-	// resumable: the Run is stopped and r resumes it.
-	resumable bool
+	// resumable: the Run is stopped and r resumes it; resumeAsked: r
+	// was pressed, for the supervisor.
+	resumable   bool
+	resumeAsked bool
 	tail      screen.Tail
 	epoch     int
 	cancel    context.CancelFunc

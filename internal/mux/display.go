@@ -48,8 +48,12 @@ func (m *Mux) statusScreen(b []byte, w *Window) []byte {
 		lines = append(lines, " Run "+w.RunID)
 	}
 	lines = append(lines, "")
-	switch w.phase {
-	case phaseDead:
+	switch {
+	case w.phase == phaseDead && w.resumable:
+		lines = append(lines, " "+w.reason, "",
+			" r  resume the Run",
+			" &  close this window")
+	case w.phase == phaseDead:
 		lines = append(lines, " ended: "+w.reason, "",
 			" r  relaunch a fresh Run of this profile in this window",
 			" &  close this window")

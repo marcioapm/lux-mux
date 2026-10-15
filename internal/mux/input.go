@@ -159,7 +159,7 @@ func (m *Mux) handleInput(b []byte) {
 			switch b[0] {
 			case 'r':
 				m.mu.Unlock()
-				m.relaunch(w)
+				m.relaunchOrResume(w)
 				b = b[1:]
 				continue
 			case '&':
@@ -182,6 +182,19 @@ func (m *Mux) handleInput(b []byte) {
 	}
 }
 
+// relaunchOrResume is r on an ended window: a stopped Run is resumed, any
+// other is replaced by a fresh one.
+func (m *Mux) relaunchOrResume(w *Window) {
+	m.mu.Lock()
+	resumable := w.resumable
+	m.mu.Unlock()
+	if resumable {
+		m.resume(w)
+		return
+	}
+	m.relaunch(w)
+}
+
 // command runs a key's command.
 func (m *Mux) command(c config.Command) {
 	switch c.Op {
@@ -199,7 +212,7 @@ func (m *Mux) command(c config.Command) {
 		w := m.activeLocked()
 		m.mu.Unlock()
 		if w != nil {
-			m.relaunch(w)
+			m.relaunchOrResume(w)
 		}
 	default:
 		m.mu.Lock()

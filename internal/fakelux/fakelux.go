@@ -234,10 +234,15 @@ func (s *Server) watchExit(id string, t *Terminal) {
 	if r == nil || r.term != t || r.run.State != "running" {
 		return
 	}
-	code := 0
+	code := t.ExitCode()
 	r.run.ExitCode = &code
-	s.setState(r, "succeeded", "")
-	s.setStage(r, "succeeded")
+	if code == 0 {
+		s.setState(r, "succeeded", "")
+		s.setStage(r, "succeeded")
+	} else {
+		s.setState(r, "failed", fmt.Sprintf("exit code %d", code))
+		s.setStage(r, "failed")
+	}
 }
 
 func (s *Server) list(w http.ResponseWriter, req *http.Request) {
@@ -446,7 +451,7 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 				}
 				break
 			}
-			_ = wsjson.Write(ctx, ws, api.StreamData{Error: "the workload exited"})
+			_ = wsjson.Write(ctx, ws, api.StreamData{Error: ErrWorkloadExited})
 			_ = ws.Close(websocket.StatusNormalClosure, "")
 			return
 		case b, ok := <-sub:

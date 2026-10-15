@@ -23,6 +23,7 @@ type Terminal struct {
 	once    sync.Once
 	closer  func()
 	resizes [][2]int
+	code    int
 }
 
 func newTerminal(rows, cols int) *Terminal {
@@ -32,7 +33,9 @@ func newTerminal(rows, cols int) *Terminal {
 // Join subscribes to the output; with restore it resizes to rows×cols
 // first (when given) and returns the snapshot the output continues from.
 func (t *Terminal) Join(restore bool, rows, cols int) ([]byte, chan []byte) {
-	ch := make(chan []byte, 4096)
+	// As lux-shim's subscriber buffer: a stream more than 256 outputs
+	// behind misses output.
+	ch := make(chan []byte, 256)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var snap []byte
@@ -103,7 +106,23 @@ func (t *Terminal) Resizes() [][2]int {
 // Gone is closed when the process has exited.
 func (t *Terminal) Gone() <-chan struct{} { return t.gone }
 
-// Exit ends the terminal as if its process exited.
+// ExitWith ends the terminal as if its process exited with code.
+func (t *Terminal) ExitWith(code int) {
+	t.mu.Lock()
+	t.code = code
+	t.mu.Unlock()
+	t.Exit()
+}
+
+// ExitCode is the code the process exited with.
+func (t *Terminal) ExitCode() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.code
+}
+
+// Exit ends the terminal as if its process exited (with code 0, unless
+// ExitWith set another).
 func (t *Terminal) Exit() {
 	t.once.Do(func() {
 		close(t.gone)
@@ -170,7 +189,11 @@ func ShellTerminal(rows, cols int, argv []string, env []string) (*Terminal, erro
 			}
 		}
 		_ = cmd.Wait()
-		t.Exit()
+		if cmd.ProcessState != nil {
+			t.ExitWith(max(cmd.ProcessState.ExitCode(), 0))
+		} else {
+			t.Exit()
+		}
 	}()
 	return t, nil
 }

@@ -56,8 +56,9 @@ func (m *Mux) startSupervisor(w *Window) {
 
 // supervise follows w's Run until the window closes: it attaches while
 // the Run runs, shows its progress while it starts or moves, resumes it
-// with its secrets when it is stopped or lost, and marks the window dead
-// when the Run ended for good.
+// when lux stopped it for its secrets or lost it, and otherwise shows how
+// it ended: a stopped Run waits for r to resume it, an ended one for r to
+// relaunch.
 func (m *Mux) supervise(ctx context.Context, w *Window) {
 	bo := m.opt.Backoff
 	wait := func(d time.Duration) {
@@ -67,7 +68,11 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 		}
 	}
 	grow := func() { bo = min(2*bo, m.opt.MaxBackoff) }
-	exiting := false
+	// exitedEpoch is the epoch whose last stream ended with the shim's
+	// "the workload exited" (0: none since the last attach). Only that,
+	// and lux's exit-code reason for the same epoch, is the shell's exit:
+	// the shim sends it for any stop of the workload (a move, a timeout).
+	exitedEpoch := 0
 	for ctx.Err() == nil {
 		gctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		run, err := m.lux.Get(gctx, w.RunID)
@@ -86,17 +91,28 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			grow()
 			continue
 		}
+		if run.Epoch != exitedEpoch {
+			exitedEpoch = 0
+		}
 		m.noteRun(w, run)
 		switch run.State {
 		case "running":
+			if exitedEpoch != 0 {
+				// The shell exited; lux is ending the Run.
+				m.setWaiting(w, "shell exited")
+				wait(bo)
+				grow()
+				continue
+			}
 			end, why := m.attachOnce(ctx, w, run)
 			switch end {
 			case endStopped:
 				return
 			case endExited:
-				exiting = true
+				exitedEpoch = run.Epoch
+				bo = m.opt.Backoff
 				m.setWaiting(w, "shell exited")
-				wait(m.opt.Backoff)
+				wait(bo)
 			case endDropped:
 				// Attached and then lost: try again at once, then back off.
 				bo = m.opt.Backoff
@@ -106,11 +122,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				m.setWaiting(w, why)
 				wait(bo)
 			default:
-				if exiting {
-					m.setWaiting(w, "shell exited")
-				} else {
-					m.setWaiting(w, why)
-				}
+				m.setWaiting(w, why)
 				wait(bo)
 				grow()
 			}
@@ -120,6 +132,16 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				m.waitClosed(ctx, w)
 				return
 			}
+			if !autoResume(run) && !m.takeResumeAsked(w) {
+				// Stopped by a person (lux stop, the console): r resumes.
+				m.markStopped(w, stoppedLine(run))
+				select {
+				case <-ctx.Done():
+				case <-w.notify:
+				case <-time.After(m.opt.Poll):
+				}
+				continue
+			}
 			if err := m.resumeRun(ctx, w, run); err != nil {
 				m.markDead(w, "cannot resume: "+err.Error())
 				m.waitClosed(ctx, w)
@@ -127,7 +149,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			}
 			bo = m.opt.Backoff
 		case "succeeded", "failed":
-			if run.State == "succeeded" || strings.HasPrefix(run.StateReason, "exit code") || exiting {
+			if run.State == "succeeded" || (exitedEpoch == run.Epoch && strings.HasPrefix(run.StateReason, "exit code")) {
 				m.shellExited(w)
 				return
 			}
@@ -156,6 +178,71 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 	}
 }
 
+// secretsLostReason is luxd's stateReason for a Run it stopped because no
+// luxd held its secret values any more.
+const secretsLostReason = "secrets must be supplied again: resume with them"
+
+// autoResume reports whether lux, not a person, left run stopped or lost
+// in a way luxmux resumes without asking: its secrets must be supplied
+// again, or its host was lost.
+func autoResume(run *api.Run) bool {
+	return run.State == "lost" || strings.HasPrefix(run.StateReason, secretsLostReason)
+}
+
+// stoppedLine says who stopped a Run.
+func stoppedLine(run *api.Run) string {
+	switch r := strings.TrimSpace(run.StateReason); {
+	case r == "" || r == "stop":
+		return "stopped by lux stop"
+	default:
+		return "stopped by " + r
+	}
+}
+
+// takeResumeAsked reports (and forgets) that r asked to resume w's Run.
+func (m *Mux) takeResumeAsked(w *Window) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	asked := w.resumeAsked
+	w.resumeAsked = false
+	return asked
+}
+
+// markStopped shows that w's Run is stopped and r resumes it.
+func (m *Mux) markStopped(w *Window, why string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w.closed || (w.phase == phaseDead && w.resumable && w.reason == why) {
+		return
+	}
+	w.phase = phaseDead
+	w.resumable = true
+	w.reason = why
+	if m.activeLocked() == w {
+		m.repaintLocked()
+	} else {
+		m.setNoticeLocked(fmt.Sprintf("window %d %s", m.indexLocked(w), why))
+	}
+}
+
+// resume asks w's supervisor to resume its stopped Run (the r key).
+func (m *Mux) resume(w *Window) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w.closed || !w.resumable {
+		return
+	}
+	w.resumable = false
+	w.resumeAsked = true
+	w.phase = phaseReconnecting
+	if !w.hasScreen {
+		w.phase = phaseStarting
+	}
+	w.reason = "resuming"
+	m.repaintLocked()
+	w.poke()
+}
+
 // refreshing reports whether w's stream was closed to rebuild its screen.
 func (m *Mux) refreshing(w *Window) bool {
 	m.mu.Lock()
@@ -167,36 +254,25 @@ func (m *Mux) refreshing(w *Window) bool {
 // is relaunched (which starts a new supervisor).
 func (m *Mux) waitClosed(ctx context.Context, w *Window) { <-ctx.Done() }
 
-// resumeRun resumes a stopped or lost Run with every one of its secrets,
-// their values found as the profile says (lux keeps none).
+// resumeRun resumes a stopped or lost Run with the secrets lux lists for
+// it, their values found as the window's profile says (lux keeps none).
 func (m *Mux) resumeRun(ctx context.Context, w *Window, run *api.Run) error {
 	m.setWaiting(w, "resuming "+run.State+" Run")
-	var secrets []api.Secret
-	if len(run.Secrets) > 0 {
-		vals, err := w.Spec.ResolveSecrets(m.opt.Lookup)
-		if err != nil {
-			return err
-		}
-		have := map[string]string{}
-		var missing []string
-		for _, s := range run.Secrets {
-			v, ok := vals[s.Name]
-			if !ok {
-				if v, ok = m.opt.Lookup(s.Name); !ok {
-					missing = append(missing, s.Name)
-					continue
-				}
-			}
-			have[s.Name] = v
-		}
-		if len(missing) > 0 {
-			return fmt.Errorf("no value for its secrets %s", strings.Join(missing, ", "))
-		}
-		secrets = config.SecretValues(have)
+	names := make([]string, 0, len(run.Secrets))
+	for _, s := range run.Secrets {
+		names = append(names, s.Name)
 	}
+	m.mu.Lock()
+	spec := w.Spec
+	m.mu.Unlock()
+	vals, err := spec.ResolveNamed(names, m.opt.Lookup)
+	if err != nil {
+		return err
+	}
+	secrets := config.SecretValues(vals)
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	err := m.lux.Resume(rctx, run.ID, secrets)
+	err = m.lux.Resume(rctx, run.ID, secrets)
 	if err != nil && luxapi.IsStatus(err, http.StatusConflict) {
 		// Resuming already, or its state moved on: the loop reads it again.
 		return nil
@@ -452,6 +528,7 @@ func (m *Mux) markDead(w *Window, why string) {
 		return
 	}
 	w.phase = phaseDead
+	w.resumable = false
 	w.reason = why
 	if m.activeLocked() == w {
 		m.repaintLocked()

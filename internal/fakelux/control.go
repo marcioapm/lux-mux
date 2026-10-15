@@ -10,6 +10,19 @@ import (
 	"github.com/marcioapm/lux/api"
 )
 
+// Error strings luxd and lux-shim end an attach stream with.
+const (
+	// ErrWorkloadExited: the shim, when the workload's terminal closed
+	// (its shell exited, or lux stopped it).
+	ErrWorkloadExited = "the workload exited"
+	// ErrStreamDropped and ErrHostDisconnected: luxd, when the stream's
+	// reader fell behind its hub, or the Run's host went away.
+	ErrStreamDropped    = "the stream fell behind and was dropped"
+	ErrHostDisconnected = "the Run's host disconnected"
+	// ErrAttachFellBehind: the shim, when a restore attach fell behind.
+	ErrAttachFellBehind = "attach fell behind; attach again"
+)
+
 // Blip drops the Run's attach streams, as a network blip or a laptop
 // sleeping does; the Run goes on running with the same terminal.
 func (s *Server) Blip(id string) {
@@ -20,19 +33,45 @@ func (s *Server) Blip(id string) {
 	}
 }
 
-// FellBehind ends the Run's attach streams as a newer host ends a restore
-// attach whose reader fell behind; the Run goes on running.
-func (s *Server) FellBehind(id string) {
+// DropStreams ends the Run's attach streams with msg, as luxd or the shim
+// does (ErrStreamDropped, ErrHostDisconnected, ErrAttachFellBehind); the
+// Run goes on running.
+func (s *Server) DropStreams(id, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for c := range s.runs[id].conns {
-		_ = wsjson.Write(context.Background(), c, api.StreamData{Error: "attach fell behind; attach again"})
+		_ = wsjson.Write(context.Background(), c, api.StreamData{Error: msg})
 		_ = c.Close(websocket.StatusNormalClosure, "")
 	}
 }
 
+// FellBehind ends the Run's attach streams as the shim ends a restore
+// attach whose reader fell behind; the Run goes on running.
+func (s *Server) FellBehind(id string) { s.DropStreams(id, ErrAttachFellBehind) }
+
+// stopWorkload kills the Run's workload as lux does before any stop: the
+// terminal exits, so each attach stream gets ErrWorkloadExited, and
+// returns once they ended; the Run's state is the caller's to change.
+func (s *Server) stopWorkload(id string) {
+	s.mu.Lock()
+	r := s.runs[id]
+	t := r.term
+	r.term = nil
+	s.mu.Unlock()
+	if t == nil {
+		return
+	}
+	t.Exit()
+	WaitFor(context.Background(), 2*time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(r.conns) == 0
+	})
+}
+
 // Move stops the Run's placement and resumes it elsewhere, as a drain or
-// a migration does with resumePolicy auto: a new placement, a new
+// a migration does with resumePolicy auto: the workload stops (the
+// streams end with ErrWorkloadExited), then a new placement with a new
 // terminal (a fresh shell). With hold, it stays waiting until Start.
 func (s *Server) Move(id string, hold bool) {
 	s.mu.Lock()
@@ -40,17 +79,12 @@ func (s *Server) Move(id string, hold bool) {
 	s.setState(r, "stopping", "")
 	r.run.StageReason = "drain"
 	s.setStage(r, "stopping")
-	for c := range r.conns {
-		c.CloseNow()
-	}
-	t := r.term
-	r.term = nil
+	s.mu.Unlock()
+	s.stopWorkload(id)
+	s.mu.Lock()
 	s.setState(r, "resuming", "auto-resume after drain")
 	s.setStage(r, "waiting")
 	s.mu.Unlock()
-	if t != nil {
-		t.Exit()
-	}
 	if !hold {
 		s.Start(id)
 	}
@@ -58,37 +92,28 @@ func (s *Server) Move(id string, hold bool) {
 
 // LoseSecrets stops the Run as luxd does when it no longer holds its
 // secret values: stopped, resumable only with them.
-func (s *Server) LoseSecrets(id string) {
-	s.mu.Lock()
-	r := s.runs[id]
-	for c := range r.conns {
-		c.CloseNow()
-	}
-	t := r.term
-	r.term = nil
-	s.setState(r, "stopped", SecretsLostReason)
-	s.setStage(r, "stopped")
-	s.mu.Unlock()
-	if t != nil {
-		t.Exit()
-	}
-}
+func (s *Server) LoseSecrets(id string) { s.End(id, "stopped", SecretsLostReason) }
 
-// End ends the Run in state (terminated or failed) with reason.
+// End stops the Run's workload, then ends the Run in state with reason,
+// as lux does: stopped ("stop" for lux stop), lost, failed ("timeout",
+// "disk limit exceeded", "exit code N") or terminated.
 func (s *Server) End(id, state, reason string) {
+	s.stopWorkload(id)
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	r := s.runs[id]
-	for c := range r.conns {
-		c.CloseNow()
-	}
-	t := r.term
-	r.term = nil
 	s.setState(r, state, reason)
 	s.setStage(r, state)
-	s.mu.Unlock()
-	if t != nil {
-		t.Exit()
-	}
+}
+
+// SetState changes the Run's state and reason and nothing else (no
+// stream, no terminal is touched).
+func (s *Server) SetState(id, state, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.runs[id]
+	s.setState(r, state, reason)
+	s.setStage(r, state)
 }
 
 // Term is the Run's current terminal (nil when it has none).
