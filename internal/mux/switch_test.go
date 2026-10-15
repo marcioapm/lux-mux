@@ -159,3 +159,46 @@ func TestShellExitClosesWindow(t *testing.T) {
 		t.Fatal("Run 0 not terminated")
 	}
 }
+
+// TestAltScreenProgramExitShowsOwnMainScreen: window 0 runs a full-screen
+// program; after switching from window 1 back to it, the program's exit
+// uncovers window 0's own main screen, not window 1's text.
+func TestAltScreenProgramExitShowsOwnMainScreen(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.lux.Term(a).Output([]byte("W0-L1\r\nW0-L2\r\n$ vim\x1b[?1049h\x1b[H\x1b[2JVIM-SCREEN"))
+	h.waitScreen("vim", h.contains("VIM-SCREEN"))
+	h.type_("\x02c")
+	b := h.live(1)
+	h.lux.Term(b).Output([]byte(strings.Repeat("WINDOW-ONE-TEXT\r\n", 8)))
+	h.waitScreen("window 1 text", h.contains("WINDOW-ONE-TEXT"))
+	h.type_("\x020")
+	h.waitScreen("vim back", h.contains("VIM-SCREEN"))
+	h.lux.Term(a).Output([]byte("\x1b[?1049l\r\n$ PROMPT"))
+	h.waitScreen("prompt", h.contains("$ PROMPT"))
+	scr := h.term.screen()
+	if strings.Contains(scr, "WINDOW-ONE-TEXT") || !strings.Contains(scr, "W0-L1\nW0-L2\n$ vim") {
+		t.Fatalf("after vim exited:\n%s", scr)
+	}
+	h.detach()
+}
+
+// TestKeypadAndCursorShapeDoNotCarryOver: keypad mode and the cursor
+// shape a window's program set are not left on for another window, and
+// the cursor shape is the default again after detach.
+func TestKeypadAndCursorShapeDoNotCarryOver(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.lux.Term(a).Output([]byte("\x1b=\x1b[6 q"))
+	h.waitFor("set on the terminal", func() bool { kp, sh := h.term.keypadShape(); return kp && sh == 6 })
+	h.type_("\x02c")
+	h.live(1)
+	h.waitFor("window 1 shown", func() bool { return h.title() == "luxmux:s [1] default" })
+	h.waitFor("reset for window 1", func() bool { kp, sh := h.term.keypadShape(); return !kp && sh == 0 })
+	h.type_("\x020")
+	h.waitFor("window 0 has them back", func() bool { kp, sh := h.term.keypadShape(); return kp && sh == 6 })
+	h.detach()
+	if kp, sh := h.term.keypadShape(); kp || sh != 0 {
+		t.Fatalf("after detach keypad %v shape %d", kp, sh)
+	}
+}

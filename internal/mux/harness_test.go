@@ -15,6 +15,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/screen"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
@@ -82,6 +83,12 @@ func (c *clientTerm) mode(n int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.vt.Mode(n)
+}
+
+func (c *clientTerm) keypadShape() (bool, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return screen.KeypadAndShape(c.vt)
 }
 
 func (c *clientTerm) altScreen() bool {

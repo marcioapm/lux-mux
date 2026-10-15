@@ -98,7 +98,7 @@ func blankRow(t *vterm.Terminal, y, cols int) bool {
 // row, the cursor hidden. It draws luxmux's own screens (a window's
 // progress, its end, the key help).
 func Text(b []byte, lines []string, rows, cols int) []byte {
-	b = append(b, "\x1b[?25l\x1b[?6l\x1b[r\x1b[m\x1b[?7l\x1b[?1049l\x1b[H\x1b[2J"...)
+	b = append(b, "\x1b[?25l\x1b[?6l\x1b[r\x1b[m\x1b>\x1b[0 q\x1b[?7l\x1b[?1049l\x1b[H\x1b[2J"...)
 	for i, l := range lines {
 		if i >= rows {
 			break
