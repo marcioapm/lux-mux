@@ -225,6 +225,48 @@ func TestEndedWindowReadsKeysPlain(t *testing.T) {
 	h.detach()
 }
 
+// TestOneKeyReaderHandsBackTheRest: a dialog reading one key at a time
+// that closes on a key leaves the rest of that chunk to the input loop,
+// split at key boundaries.
+func TestOneKeyReaderHandsBackTheRest(t *testing.T) {
+	in := &input{ch: make(chan []byte, 1)}
+	in.once.Do(func() {})
+	in.ch <- []byte("\x1b[A?\recho after\r")
+	r := &Reader{in: in, done: make(chan struct{}), ack: make(chan struct{}, 1)}
+	r.OneKeyAtATime()
+	buf := make([]byte, 256)
+	var keys []string
+	for range 2 {
+		n, err := r.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, string(buf[:n]))
+		r.KeyHandled()
+	}
+	if keys[0] != "\x1b[A" || keys[1] != "?" {
+		t.Fatalf("keys %q", keys)
+	}
+	r.Close()
+	b, ok := in.next(nil)
+	if !ok || string(b) != "\recho after\r" {
+		t.Fatalf("handed back %q", b)
+	}
+}
+
+// TestReleasesAfterCommandDoNotClosePrompt: kitty reports C-b , then the
+// releases of , and C-b: the releases are dropped, so the rename prompt
+// opened by the command stays open and takes the text typed after.
+func TestReleasesAfterCommandDoNotClosePrompt(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	h.live(0)
+	h.type_("\x1b[98;5:1u\x1b[44;1:1u")
+	h.waitScreen("rename prompt", h.contains("rename window:"))
+	h.type_("\x1b[44;1:3u\x1b[98;5:3uabc\r")
+	h.waitFor("renamed", func() bool { return h.title() == "luxmux:s [0] defaultabc" })
+	h.detach()
+}
+
 // TestReleasesDoNotCloseHelp: the releases of C-b and ? (kitty's report
 // event types), read after help opened, go to the help and do not close
 // it.

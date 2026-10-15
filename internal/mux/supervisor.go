@@ -930,7 +930,12 @@ func (m *Mux) Resize(rows, cols int) {
 		}
 	}
 	m.repaintLocked()
+	resize := m.onResize
+	suspended := m.suspended
 	m.mu.Unlock()
+	if suspended && resize != nil {
+		resize(rows, cols)
+	}
 	for _, c := range conns {
 		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
 		_ = wsjson.Write(ctx, c, api.StreamData{Rows: rows, Cols: cols})

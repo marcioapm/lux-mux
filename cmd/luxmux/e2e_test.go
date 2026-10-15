@@ -491,6 +491,59 @@ func TestNewWindowDialog(t *testing.T) {
 	p.exited()
 }
 
+// TestKeysAfterHelpCloseReachShell: keys in the same write as the key
+// that closes help reach the shell.
+func TestKeysAfterHelpCloseReachShell(t *testing.T) {
+	_, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s handback")
+	p.wait("prompt", has("$"))
+	p.typ("\x02?")
+	p.wait("help", has("window chooser"))
+	p.typ("?\recho after-close\r")
+	p.wait("command after closing key", func(s string) bool { return strings.Count(s, "after-close") >= 2 })
+	p.typ("\x02d")
+	p.exited()
+}
+
+// TestDialogsFollowResize: help and the new-window dialog re-center when
+// the terminal grows, and say it is too small when it shrinks below them.
+func TestDialogsFollowResize(t *testing.T) {
+	for _, dialog := range []struct{ key, title string }{{"?", "Keys"}, {"C", "New window"}} {
+		t.Run(dialog.title, func(t *testing.T) {
+			_, env := e2eEnv(t)
+			p := startLuxmux(t, env, "new -s resize")
+			p.wait("prompt", has("$"))
+			p.typ("\x02" + dialog.key)
+			p.wait("dialog", has(dialog.title))
+			resize := func(rows, cols uint16) {
+				p.scr.mu.Lock()
+				p.scr.vt.Resize(int(rows), int(cols))
+				p.scr.mu.Unlock()
+				if err := pty.Setsize(p.f, &pty.Winsize{Rows: rows, Cols: cols}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resize(40, 160)
+			p.wait("recentered box", func(s string) bool {
+				for _, line := range strings.Split(s, "\n") {
+					if left := strings.IndexRune(line, '╭'); left >= 0 {
+						runes := []rune(line)
+						right := slices.Index(runes, '╮')
+						return strings.Contains(s, dialog.title) && right >= 0 && left == 159-right && left > 20
+					}
+				}
+				return false
+			})
+			resize(10, 30)
+			p.wait("too small", has("too small"))
+			p.typ("\x1b")
+			p.wait("dialog closed", func(s string) bool { return !strings.Contains(s, "too small") })
+			p.typ("\x02d")
+			p.exited()
+		})
+	}
+}
+
 // TestHelpDialog: C-b ? shows the key help over the window; Esc closes it
 // and the shell's screen is back, with what it printed meanwhile.
 func TestHelpDialog(t *testing.T) {

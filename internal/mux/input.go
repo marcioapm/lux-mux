@@ -1,11 +1,18 @@
 package mux
 
 import (
+	"bytes"
 	"io"
 	"strconv"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux-mux/internal/config"
+)
+
+var (
+	pasteStart = []byte("\x1b[200~")
+	pasteEnd   = []byte("\x1b[201~")
 )
 
 // input reads the keyboard in one goroutine and hands chunks to whoever
@@ -76,43 +83,115 @@ func (in *input) unreadFirst(b []byte) {
 // Reader is the keyboard for a dialog, until Close; what it read and
 // did not hand out by then goes back to the input loop.
 type Reader struct {
-	in     *input
-	done   chan struct{}
-	once   sync.Once
-	cur    []byte
-	closed bool
-	mu     sync.Mutex
+	in      *input
+	done    chan struct{}
+	once    sync.Once
+	cur     []byte
+	closed  bool
+	mu      sync.Mutex
+	ack     chan struct{}
+	waiting bool
+	oneKey  bool
 }
 
 // KeyboardReader gives the keyboard to a dialog until the Reader is closed.
 func (m *Mux) KeyboardReader() *Reader {
-	return &Reader{in: m.in, done: make(chan struct{})}
+	return &Reader{in: m.in, done: make(chan struct{}), ack: make(chan struct{}, 1)}
+}
+
+// OneKeyAtATime makes each Read return at most one key, and the next Read
+// wait until the dialog calls KeyHandled for it: the dialog then never
+// reads past the key that closes it, and Close hands the rest back.
+func (r *Reader) OneKeyAtATime() { r.oneKey = true }
+
+// KeyHandled reports that the dialog took the key the last Read returned.
+func (r *Reader) KeyHandled() {
+	select {
+	case r.ack <- struct{}{}:
+	default:
+	}
+}
+
+// keyLen is the length of the first key in b, as bubbletea parses keys: a
+// bracketed paste whole (to its end marker), an X10 mouse report (6
+// bytes), a CSI or SS3 sequence to its final byte, Alt with the rune
+// after ESC, else one UTF-8 rune. complete is false when b ends inside
+// the key: bubbletea then reads on without delivering anything.
+func keyLen(b []byte) (n int, complete bool) {
+	if b[0] != 0x1b || len(b) == 1 {
+		_, n := utf8.DecodeRune(b)
+		return n, true
+	}
+	if bytes.HasPrefix(b, pasteStart) {
+		if i := bytes.Index(b, pasteEnd); i >= 0 {
+			return i + len(pasteEnd), true
+		}
+		return len(b), false
+	}
+	switch b[1] {
+	case '[':
+		if len(b) >= 3 && b[2] == 'M' {
+			return min(6, len(b)), len(b) >= 6
+		}
+		for i := 2; i < len(b); i++ {
+			if b[i] >= 0x40 && b[i] <= 0x7e {
+				return i + 1, true
+			}
+		}
+		return len(b), false
+	case 'O':
+		return min(3, len(b)), len(b) >= 3
+	}
+	_, n = utf8.DecodeRune(b[1:])
+	return 1 + n, true
 }
 
 func (r *Reader) Read(p []byte) (int, error) {
 	r.mu.Lock()
-	if len(r.cur) > 0 {
-		n := copy(p, r.cur)
-		r.cur = r.cur[n:]
-		r.mu.Unlock()
-		return n, nil
-	}
+	wait := r.oneKey && r.waiting
 	r.mu.Unlock()
-	b, ok := r.in.next(r.done)
-	if !ok {
+	if wait {
+		select {
+		case <-r.ack:
+		case <-r.done:
+			return 0, io.EOF
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
 		return 0, io.EOF
 	}
-	select {
-	case <-r.done:
-		// Closed while this read waited: the chunk is the input loop's.
-		r.in.unread(b)
-		return 0, io.EOF
-	default:
+	if len(r.cur) == 0 {
+		r.mu.Unlock()
+		b, ok := r.in.next(r.done)
+		r.mu.Lock()
+		if !ok {
+			return 0, io.EOF
+		}
+		if r.closed {
+			// Closed while this read waited: the chunk is the input loop's.
+			r.in.unreadFirst(b)
+			return 0, io.EOF
+		}
+		r.cur = b
+	}
+	b, complete := r.cur, false
+	if r.oneKey {
+		var k int
+		k, complete = keyLen(b)
+		b = b[:k]
 	}
 	n := copy(p, b)
-	r.mu.Lock()
-	r.cur = b[n:]
-	r.mu.Unlock()
+	r.cur = r.cur[n:]
+	r.waiting = complete && n == len(b)
+	if r.waiting {
+		// An ack left from a key bubbletea read in parts is not this one's.
+		select {
+		case <-r.ack:
+		default:
+		}
+	}
 	return n, nil
 }
 
@@ -121,8 +200,9 @@ func (r *Reader) Close() error {
 	r.once.Do(func() {
 		close(r.done)
 		r.mu.Lock()
+		r.closed = true
 		if len(r.cur) > 0 {
-			r.in.unread(r.cur)
+			r.in.unreadFirst(r.cur)
 			r.cur = nil
 		}
 		r.mu.Unlock()

@@ -28,7 +28,8 @@ type finisher interface{ finished() bool }
 // program's read loop ends at once instead of after bubbletea's timeout.
 type releasing struct {
 	tea.Model
-	release func()
+	release    func()
+	keyHandled func()
 }
 
 func (r releasing) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -36,8 +37,24 @@ func (r releasing) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	r.Model = m
 	if f, ok := m.(finisher); ok && f.finished() {
 		r.release()
+	} else if inputMsg(msg) && r.keyHandled != nil {
+		r.keyHandled()
 	}
 	return r, cmd
+}
+
+// inputMsg reports a message bubbletea makes of keyboard input, the
+// unexported ones for bytes and sequences it does not know included.
+func inputMsg(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyMsg, tea.MouseMsg, tea.FocusMsg, tea.BlurMsg:
+		return true
+	}
+	switch fmt.Sprintf("%T", msg) {
+	case "tea.unknownInputByteMsg", "tea.unknownCSISequenceMsg":
+		return true
+	}
+	return false
 }
 
 // run runs model on the session's terminal with the keyboard, in the
@@ -45,9 +62,14 @@ func (r releasing) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func run(m *mux.Mux, model tea.Model) (tea.Model, error) {
 	out, _, _ := m.Terminal()
 	kb := m.KeyboardReader()
+	kb.OneKeyAtATime()
 	defer kb.Close()
-	p := tea.NewProgram(releasing{model, func() { kb.Close() }}, tea.WithInput(kb), tea.WithOutput(out), tea.WithAltScreen(),
+	p := tea.NewProgram(releasing{model, func() { kb.Close() }, kb.KeyHandled}, tea.WithInput(kb), tea.WithOutput(out), tea.WithAltScreen(),
 		tea.WithContext(m.Context()), tea.WithoutSignalHandler())
+	m.OnResize(func(rows, cols int) {
+		p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
+	})
+	defer m.OnResize(nil)
 	res, err := p.Run()
 	// The program's last frame is still on the alternate screen: the
 	// multiplexer's repaint replaces it.

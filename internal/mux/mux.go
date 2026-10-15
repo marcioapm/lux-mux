@@ -94,6 +94,7 @@ type Mux struct {
 	rows      int
 	cols      int
 	suspended bool
+	onResize  func(rows, cols int)
 	sess      *state.Session
 	notice    string
 	noticeGen int
@@ -211,6 +212,13 @@ func (m *Mux) Terminal() (io.Writer, int, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.tw, m.rows, m.cols
+}
+
+// OnResize registers the open dialog's resize handler; nil clears it.
+func (m *Mux) OnResize(fn func(rows, cols int)) {
+	m.mu.Lock()
+	m.onResize = fn
+	m.mu.Unlock()
 }
 
 // Context ends when the session does.
