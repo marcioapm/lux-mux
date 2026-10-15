@@ -184,6 +184,9 @@ func (m *Mux) handleInput(b []byte) {
 			}
 		}
 		acts, rest := m.keys.Feed(b)
+		// An ended window's Run takes no keys: they would reach a resumed
+		// shell later, out of context.
+		dead := w != nil && w.phase == phaseDead
 		m.mu.Unlock()
 		for _, a := range acts {
 			switch {
@@ -195,7 +198,7 @@ func (m *Mux) handleInput(b []byte) {
 				return
 			case a.IsCmd():
 				m.command(a.Cmd)
-			case w != nil:
+			case w != nil && !dead:
 				m.send(w, a.Send)
 			}
 		}

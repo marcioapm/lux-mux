@@ -67,6 +67,9 @@ type Server struct {
 	InputHook func(runID string, data []byte)
 	// SubmitHook, if set, runs before each submit is answered.
 	SubmitHook func()
+	// AttachHook, if set, runs before each attach to a running Run is
+	// accepted: a slow attach.
+	AttachHook func(runID string)
 }
 
 type fakeRun struct {
@@ -403,7 +406,11 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	}
 	t := r.term
 	noRestore, noSnapshot := s.NoRestore, s.NoSnapshot
+	hook := s.AttachHook
 	s.mu.Unlock()
+	if hook != nil {
+		hook(id)
+	}
 
 	ws, err := websocket.Accept(w, req, nil)
 	if err != nil {

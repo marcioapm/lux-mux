@@ -34,10 +34,18 @@ const (
 // parses slower than the Run writes, as with long runs of CJK, combining
 // marks or truecolour), the queued output is dropped, the emulator reset
 // and the window marked stale; a stale emulator takes no more output.
-// The next time the window must be painted (shown, an overlay taken down,
-// previewed), it is attached again with restore instead, and lux's
-// snapshot rebuilds the emulator. The shown window's output goes to the
-// terminal unchanged throughout.
+// When a stale window is next switched to or previewed, it is attached
+// again with restore (at most once per refreshEvery) and lux's snapshot
+// rebuilds the emulator; the shown window's terminal has its output
+// already, so for it only the bottom row is redrawn (see paintKind). The
+// shown window's output goes to the terminal unchanged throughout.
+//
+// The limit trades switch latency against refreshes: a switch to a
+// window waits for its emulator to parse what is queued, at most
+// feedLimit. At 8 MiB that is up to 0.48 s for `yes` at 200×500 (vterm
+// parses it at about 17.6 MB/s), 0.16 s for CJK (53 MB/s), a few ms for
+// a 50×200 build log; a smaller limit makes windows go stale, and pay a
+// restore snapshot of up to 4 MiB, more often.
 const feedLimit = 8 << 20
 
 // feedItem is one thing for a window's emulator, in stream order: output,
@@ -184,8 +192,13 @@ type Window struct {
 	// terminal, or it was not shown then).
 	attachedOnce bool
 	// refreshing: the stream was closed so a new attach with restore
-	// rebuilds a stale emulator.
-	refreshing bool
+	// rebuilds a stale emulator. lastRefresh: when that was last done;
+	// refreshDue: one is put off until refreshEvery after it. lastNudge:
+	// when a stale shown window's program was last asked to redraw.
+	refreshing  bool
+	refreshDue  bool
+	lastRefresh time.Time
+	lastNudge   time.Time
 	// resumable: the Run is stopped and r resumes it; resumeAsked: r
 	// was pressed, for the supervisor.
 	resumable   bool
@@ -198,8 +211,12 @@ type Window struct {
 	cancel   context.CancelFunc
 	closed   bool
 
-	connMu sync.Mutex
-	conn   *websocket.Conn
+	// connMu guards conn and pendingIn: keystrokes typed while the window
+	// has no stream (starting, reconnecting, refreshing), sent in order
+	// once one is up (see send).
+	connMu    sync.Mutex
+	conn      *websocket.Conn
+	pendingIn []byte
 
 	// The emulator is written by its feeder goroutine and read by
 	// previews, both under emuMu.

@@ -70,11 +70,7 @@ func Paint(b []byte, t *vterm.Terminal, title string, km KeyModes) []byte {
 			b = Row(b, t, y, cols)
 		}
 	}
-	if km.ModifyOtherKeys > 0 {
-		b = append(b, "\x1b[>4;"...)
-		b = strconv.AppendInt(b, int64(km.ModifyOtherKeys), 10)
-		b = append(b, 'm')
-	}
+	b = appendModifyOtherKeys(b, km)
 	top, bot := t.ScrollRegion()
 	if top != 0 || bot != rows-1 {
 		b = append(b, "\x1b["...)

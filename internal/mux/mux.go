@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/marcioapm/lux/api"
 	"github.com/marcioapm/lux/vterm"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -90,8 +93,16 @@ type Mux struct {
 	// promptState is the open prompt; help: the key help is shown.
 	promptState *prompt
 	help        bool
-	done        chan string // the reason Run returns
-	crashOnce   sync.Once
+	// shown is the window whose screen the terminal shows, painted and
+	// followed by its live output since (nil: luxmux's own screen, or a
+	// window with none). Help and dialogs drawn over it leave it set:
+	// closing them redraws it.
+	shown *Window
+	// ending: the last window closed; spares submitted from now on are
+	// terminated, not recorded.
+	ending    bool
+	done      chan string // the reason Run returns
+	crashOnce sync.Once
 }
 
 // ErrNoSession is returned by Open for attach to a session lux has no
@@ -321,16 +332,45 @@ func (m *Mux) titleLocked(w *Window) string {
 	return fmt.Sprintf("luxmux:%s [%d] %s", m.opt.Session, m.indexLocked(w), w.Name)
 }
 
-// repaintLocked shows the active window as it is: its emulator's screen
-// and modes when it has one, its progress or its end otherwise, and the
-// bottom line it needs.
-func (m *Mux) repaintLocked() {
+// paintKind is why a window is painted; it decides what is drawn instead
+// when its emulator is stale (see feedLimit).
+type paintKind int
+
+const (
+	// paintShow: the window is switched to: the terminal has none of its
+	// screen. A stale window shows a placeholder and is attached again
+	// with restore (refreshLocked).
+	paintShow paintKind = iota
+	// paintRedraw: the shown window is drawn again after the terminal
+	// missed some of its output (help or a dialog drew over it, the
+	// terminal fell behind) or resized. A stale window is cleared and its
+	// program asked to redraw itself (a resize nudge); no reattach.
+	paintRedraw
+	// paintOverlay: the shown window's bottom row (a notice, a prompt,
+	// its own line) or title changed. A stale window's terminal holds all
+	// of its output already: only the bottom row is drawn or erased.
+	paintOverlay
+)
+
+// repaintLocked draws the active window again (paintRedraw).
+func (m *Mux) repaintLocked() { m.paintActiveLocked(paintRedraw) }
+
+// overlayGoneLocked draws the active window after its bottom-row overlay
+// or title changed (paintOverlay).
+func (m *Mux) overlayGoneLocked() { m.paintActiveLocked(paintOverlay) }
+
+// paintActiveLocked shows the active window as it is: its emulator's
+// screen and modes when it has one, its progress or its end otherwise,
+// and the bottom line it needs. A window the terminal is not showing is
+// painted as paintShow whatever kind says.
+func (m *Mux) paintActiveLocked(kind paintKind) {
 	w := m.activeLocked()
 	if w == nil || m.suspended || m.help {
 		return
 	}
 	line := m.overlayLineLocked(w)
 	if !w.hasScreen {
+		m.shown = nil
 		b := append([]byte{0x18}, m.statusScreen(nil, w)...)
 		if line != "" {
 			b = m.plainOverlay(b, line)
@@ -338,16 +378,14 @@ func (m *Mux) repaintLocked() {
 		m.tw.enqueue(b)
 		return
 	}
+	if m.shown != w {
+		kind = paintShow
+	}
+	m.shown = w
 	title := m.titleLocked(w)
 	pend := w.tail.Pending()
-	// The keyboard modes as of the output queued before this paint: the
-	// position the paint takes in the terminal's order. An ended window's
-	// program reads no keys; r and & are read plain.
-	km := w.keyModes.Modes()
-	if w.phase == phaseDead {
-		km = screen.KeyModes{}
-	}
-	m.paintLocked(w, func(b []byte, t *vtermT) []byte {
+	km := m.keyModesLocked(w)
+	m.paintLocked(w, kind, line, func(b []byte, t *vtermT) []byte {
 		// CAN ends whatever sequence the previous output stopped inside.
 		b = append(b, 0x18)
 		b = screen.Paint(b, t, title, km)
@@ -359,15 +397,25 @@ func (m *Mux) repaintLocked() {
 	})
 }
 
+// keyModesLocked are the keyboard modes w's program set, as of the output
+// queued so far (the place a paint queued now takes in the terminal's
+// order). An ended window's program reads no keys: r and & are read plain.
+func (m *Mux) keyModesLocked(w *Window) screen.KeyModes {
+	if w.phase == phaseDead {
+		return screen.KeyModes{}
+	}
+	return w.keyModes.Modes()
+}
+
 // paintLocked queues for the terminal what draw makes from w's emulator,
 // once the emulator has taken every output queued before: in the
-// terminal's order, without waiting. A stale emulator is not painted:
-// the window is attached again so lux's snapshot rebuilds it, and a
-// placeholder is shown meanwhile.
-func (m *Mux) paintLocked(w *Window, draw func([]byte, *vtermT) []byte) {
-	fallback := m.staleScreenLocked(w)
+// terminal's order, without waiting. A stale emulator is not painted;
+// what is drawn instead depends on kind (see paintKind). line is the
+// bottom row's overlay.
+func (m *Mux) paintLocked(w *Window, kind paintKind, line string, draw func([]byte, *vtermT) []byte) {
+	fallback := m.staleScreenLocked(w, kind, line)
 	if w.q.isStale() {
-		m.refreshLocked(w)
+		m.staleLocked(w, kind)
 		m.tw.enqueue(fallback)
 		return
 	}
@@ -381,39 +429,106 @@ func (m *Mux) paintLocked(w *Window, draw func([]byte, *vtermT) []byte) {
 				return
 			}
 			s.fill(fallback)
-			m.goSafe(func() { m.refreshStale(w) })
+			m.goSafe(func() {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				if !w.closed && w.q.isStale() {
+					m.staleLocked(w, kind)
+				}
+			})
 		},
 	})
 }
 
-// staleScreenLocked is what shows while a stale window's screen is rebuilt.
-func (m *Mux) staleScreenLocked(w *Window) []byte {
-	b := append([]byte{0x18}, screen.Text(nil, []string{
-		fmt.Sprintf(" luxmux: window %d (%s): refreshing its screen from lux…", m.indexLocked(w), w.Name)}, m.rows, m.cols)...)
-	b = append(b, "\x1b]2;"...)
-	b = append(b, m.titleLocked(w)...)
-	return append(b, 0x07)
+// staleScreenLocked is what a stale w shows in place of a paint of kind.
+func (m *Mux) staleScreenLocked(w *Window, kind paintKind, line string) []byte {
+	b := []byte{0x18}
+	switch kind {
+	case paintShow:
+		b = screen.Text(b, []string{
+			fmt.Sprintf(" luxmux: window %d (%s): refreshing its screen from lux…", m.indexLocked(w), w.Name)}, m.rows, m.cols)
+		if line != "" {
+			b = m.plainOverlay(b, line)
+		}
+	case paintRedraw:
+		b = screen.Blank(b, m.keyModesLocked(w), w.keyModes.AltScreen())
+		if line != "" {
+			b = m.bottomRow(b, line)
+		}
+		b = append(b, w.tail.Pending()...)
+	case paintOverlay:
+		b = m.bottomRow(b, line)
+		b = append(b, w.tail.Pending()...)
+	}
+	if kind == paintShow {
+		b = append(b, "\x1b]2;"...)
+		b = append(b, m.titleLocked(w)...)
+		b = append(b, 0x07)
+	}
+	return b
 }
 
-// refreshStale attaches w again if its emulator overflowed.
-func (m *Mux) refreshStale(w *Window) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !w.closed && w.q.isStale() {
+// staleLocked acts on a stale w painted as kind: a window switched to is
+// attached again; a cleared one gets its program to redraw, at most once
+// per refreshEvery.
+func (m *Mux) staleLocked(w *Window, kind paintKind) {
+	switch kind {
+	case paintShow:
 		m.refreshLocked(w)
+	case paintRedraw:
+		c := w.getConn()
+		if c == nil || time.Since(w.lastNudge) < refreshEvery {
+			return
+		}
+		w.lastNudge = time.Now()
+		rows, cols := m.rows, m.cols
+		m.goSafe(func() { m.nudge(c, rows, cols) })
 	}
 }
+
+// nudge asks the program on c to redraw itself: a resize one row smaller
+// and back, which sends it SIGWINCH.
+func (m *Mux) nudge(c *websocket.Conn, rows, cols int) {
+	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+	defer cancel()
+	_ = wsjson.Write(ctx, c, api.StreamData{Rows: max(rows-1, 1), Cols: cols})
+	_ = wsjson.Write(ctx, c, api.StreamData{Rows: rows, Cols: cols})
+}
+
+// refreshEvery is the least time between two refreshes of one window: a
+// window whose output outpaces its emulator goes stale again soon after
+// each, and each costs lux a restore snapshot of up to 4 MiB.
+const refreshEvery = 2 * time.Second
 
 // refreshLocked closes w's stream so its supervisor attaches again with
-// restore, rebuilding the emulator from the snapshot.
+// restore, rebuilding the emulator from the snapshot; within refreshEvery
+// of the last one it is put off until then.
 func (m *Mux) refreshLocked(w *Window) {
-	if w.refreshing || w.closed {
+	if w.refreshing || w.closed || w.refreshDue {
 		return
 	}
-	if c := w.getConn(); c != nil {
-		w.refreshing = true
-		c.CloseNow()
+	c := w.getConn()
+	if c == nil {
+		return
 	}
+	if wait := refreshEvery - time.Since(w.lastRefresh); wait > 0 {
+		w.refreshDue = true
+		time.AfterFunc(wait, func() {
+			defer m.recoverPanic()
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			w.refreshDue = false
+			// Only for the window still shown: a chooser preview asks
+			// again on its next tick.
+			if !w.closed && w.q.isStale() && m.activeLocked() == w {
+				m.refreshLocked(w)
+			}
+		})
+		return
+	}
+	w.lastRefresh = time.Now()
+	w.refreshing = true
+	c.CloseNow()
 }
 
 // selectLocked makes window i the active one and repaints.
@@ -537,9 +652,15 @@ func (m *Mux) Preview(i, rows, cols int) []string {
 		return s
 	}
 	if w.q.isStale() {
-		m.refreshLocked(w)
+		// The window the terminal shows is redrawn from its own output
+		// when the chooser closes; any other is attached again.
+		if w != m.shown {
+			m.refreshLocked(w)
+			m.mu.Unlock()
+			return []string{"  refreshing its screen from lux…"}
+		}
 		m.mu.Unlock()
-		return []string{"  refreshing its screen from lux…"}
+		return []string{"  (out of date here; shown as it is when the chooser closes)"}
 	}
 	m.mu.Unlock()
 	w.prevMu.Lock()
@@ -643,9 +764,12 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 // terminated (nothing would claim them) and its file removed.
 func (m *Mux) endSession() {
 	m.mu.Lock()
+	m.ending = true
 	spares := make([]string, 0, len(m.sess.Spares))
 	for _, id := range m.sess.Spares {
-		spares = append(spares, id)
+		if id != "" {
+			spares = append(spares, id)
+		}
 	}
 	m.sess.Spares = nil
 	m.mu.Unlock()

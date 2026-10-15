@@ -141,6 +141,7 @@ func (m *Mux) relaunch(w *Window) {
 	w.attachedOnce = false
 	w.epoch = 0
 	w.keyModes.Reset()
+	w.dropInput()
 	w.steps = progress{}
 	w.steps.note("relaunching")
 	w.q.restart()
@@ -204,12 +205,17 @@ func (m *Mux) claimSpare(w *Window) string {
 
 // replaceSpare submits a new spare for spec key when a configured profile
 // with warm_spare has it: spares are kept for profiles only, not for a
-// dialog's unsaved spec.
+// dialog's unsaved spec. It is called from goroutines in m.wg, so the
+// session's shutdown waits for the submit too.
 func (m *Mux) replaceSpare(key string) {
 	cfg := m.config()
 	for _, n := range cfg.ProfileNames() {
 		if p := cfg.Profiles[n]; p.WarmSpare && config.SpecKey(p) == key {
-			m.goSafe(func() { m.ensureSpare(n, p) })
+			m.wg.Add(1)
+			m.goSafe(func() {
+				defer m.wg.Done()
+				m.ensureSpare(n, p)
+			})
 			return
 		}
 	}
@@ -233,17 +239,23 @@ func (m *Mux) keepSpares() {
 }
 
 // ensureSpare submits a spare of profile name, keyed by its spec, unless
-// there is one.
+// there is one. A submit in flight when the session detaches is waited
+// for (shutdown waits on m.wg) and its Run recorded; one in flight when
+// the session ends is terminated.
 func (m *Mux) ensureSpare(name string, p config.Profile) {
 	key := config.SpecKey(p)
 	if key == "" {
 		return
 	}
 	m.mu.Lock()
+	if m.ending || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return
+	}
 	if m.sess.Spares == nil {
 		m.sess.Spares = map[string]string{}
 	}
-	if _, ok := m.sess.Spares[key]; ok || m.ctx.Err() != nil {
+	if _, ok := m.sess.Spares[key]; ok {
 		m.mu.Unlock()
 		return
 	}
@@ -255,12 +267,21 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		var sp api.RunSpec
 		sp, err = config.RunSpec(p, config.Target{Session: m.opt.Session, Profile: name, Spare: true}, secrets)
 		if err == nil {
-			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+			// Not cancelled by a detach: lux may make the Run anyway,
+			// and luxmux must learn its id to record it.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(m.ctx), 30*time.Second)
 			run, err = m.lux.Submit(ctx, sp)
 			cancel()
 		}
 	}
 	m.mu.Lock()
+	if m.ending {
+		m.mu.Unlock()
+		if err == nil {
+			m.terminate(run.ID)
+		}
+		return
+	}
 	defer m.mu.Unlock()
 	if err != nil {
 		delete(m.sess.Spares, key)

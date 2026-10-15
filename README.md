@@ -59,7 +59,7 @@ The prefix is `C-b` (configurable). Press it twice to send it to the shell.
 | `w` | window chooser |
 | `,` | rename window |
 | `&` | kill window (asks y/N; terminates its Run) |
-| `r` | relaunch an ended window |
+| `r` | resume a stopped Run / relaunch an ended one |
 | `d` | detach |
 | `?` | key help |
 
@@ -171,10 +171,16 @@ your terminal (or the link to it) is busy, and `C-b d` detaches even when
 it takes nothing. Each window's emulator may lag its stream by up to
 8 MiB. Past that (a flood of CJK, combining marks or truecolour can be
 parsed slower than it arrives), luxmux drops that window's queued output,
-resets its emulator and marks it stale; the next time the window is shown,
-previewed or has an overlay taken down, luxmux attaches it again with
-restore and lux's snapshot rebuilds its screen. Your terminal itself has
-received all of the shown window's output either way.
+resets its emulator and marks it stale. The next time a stale window is
+switched to or previewed, luxmux attaches it again with restore (at most
+once every 2 s per window) and lux's snapshot rebuilds its screen. For the
+window you are looking at, your terminal has received all of its output
+anyway: a notice or prompt over it is drawn and erased on the bottom row
+only, and after help or a dialog over it luxmux clears the screen and asks
+the program to redraw (as a resize does). Keys typed while a window's
+stream is down (a refresh, a reconnect) are kept, up to 64 KiB per window,
+and sent in order once it is up again; past that the oldest are dropped,
+with a notice.
 
 If your terminal (or the link to it) cannot keep up, up to 4 MiB of the
 shown window's output waits for it; past that, luxmux drops what waits

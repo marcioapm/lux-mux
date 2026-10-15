@@ -106,6 +106,21 @@ func (m *Mux) plainOverlay(b []byte, line string) []byte {
 	return append(b, "\x1b[m"...)
 }
 
+// bottomRow draws line on the bottom row over a screen luxmux has no copy
+// of (a stale window's), or erases that row when line is empty, putting
+// the cursor, pen and origin mode back as the program had them (DECSC and
+// DECRC save and restore all three).
+func (m *Mux) bottomRow(b []byte, line string) []byte {
+	b = append(b, "\x1b7\x1b[?6l"...)
+	if line == "" {
+		b = screen.CUP(b, m.rows-1, 0)
+		b = append(b, "\x1b[m\x1b[2K"...)
+	} else {
+		b = m.plainOverlay(b, line)
+	}
+	return append(b, "\x1b8"...)
+}
+
 // setNoticeLocked shows a transient notice on the bottom row; after
 // NoticeFor the window is repainted without it.
 func (m *Mux) setNoticeLocked(text string) {
@@ -119,7 +134,7 @@ func (m *Mux) setNoticeLocked(text string) {
 		defer m.mu.Unlock()
 		if m.noticeGen == gen {
 			m.notice = ""
-			m.repaintLocked()
+			m.overlayGoneLocked()
 		}
 	})
 }
@@ -134,7 +149,11 @@ func (m *Mux) Notice(text string) {
 // drawOverlayLocked draws the active window's bottom-row line (the
 // prompt, the notice, or its own) over its screen. Taking an overlay down
 // repaints the whole window: live output may have scrolled the overlay up
-// on the terminal since it was drawn.
+// on the terminal since it was drawn. A stale window (see feedLimit) has
+// no screen to repaint from: there the bottom row is drawn or erased in
+// place, and the rest of the terminal, which has all of the window's
+// output, is left as it is; a ghost of an overlay that output scrolled up
+// stays until the window is next switched to.
 func (m *Mux) drawOverlayLocked() {
 	w := m.activeLocked()
 	if w == nil || m.suspended || m.help {
@@ -142,7 +161,7 @@ func (m *Mux) drawOverlayLocked() {
 	}
 	line := m.overlayLineLocked(w)
 	if line == "" {
-		m.repaintLocked()
+		m.overlayGoneLocked()
 		return
 	}
 	if !w.hasScreen {
@@ -150,7 +169,7 @@ func (m *Mux) drawOverlayLocked() {
 		return
 	}
 	pend := w.tail.Pending()
-	m.paintLocked(w, func(b []byte, t *vtermT) []byte {
+	m.paintLocked(w, paintOverlay, line, func(b []byte, t *vtermT) []byte {
 		rows, _ := t.Size()
 		b = screen.Overlay(b, t, rows-1, line)
 		return append(b, pend...)
@@ -171,7 +190,7 @@ func (m *Mux) helpLines() []string {
 		"  w      window chooser",
 		"  ,      rename window",
 		"  &      kill window",
-		"  r      relaunch an ended window",
+		"  r      resume a stopped Run / relaunch an ended one",
 		"  d      detach (the Runs keep running)",
 		"  ?      this help",
 		"  " + p + "    send " + p + " to the shell",
@@ -248,7 +267,7 @@ func (m *Mux) promptKeysLocked(b []byte) []byte {
 	return nil
 }
 
-func (m *Mux) clearPromptLocked() { m.repaintLocked() }
+func (m *Mux) clearPromptLocked() { m.overlayGoneLocked() }
 
 func decodeRune(b []byte) (rune, int) {
 	s := string(b)

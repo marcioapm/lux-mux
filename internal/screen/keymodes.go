@@ -131,6 +131,42 @@ func (k *KeyTracker) Modes() KeyModes {
 // Reset forgets every mode: a new program.
 func (k *KeyTracker) Reset() { *k = KeyTracker{} }
 
+// AltScreen reports whether the program is on its alternate screen, as
+// the 1049, 1047 and 47 modes it set say.
+func (k *KeyTracker) AltScreen() bool { return k.alt }
+
+// Blank appends what leaves a terminal cleared for a program whose screen
+// luxmux does not have, to redraw itself: on the screen it is on (alt),
+// the pen and the settings Paint resets at their defaults, the cursor
+// shown at the top left, the keyboard modes km set.
+func Blank(b []byte, km KeyModes, alt bool) []byte {
+	b = append(b, "\x1b[?1049l\x1b[?6l\x1b[r\x1b[4l\x1b[m\x1b(B\x1b)B\x0f\x1b[?7h"...)
+	b = ResetKeys(b)
+	if !alt && !km.Alt.zero() {
+		b = append(b, "\x1b[?1049h"...)
+		b = appendKitty(b, km.Alt)
+		b = append(b, "\x1b[?1049l"...)
+	}
+	b = appendKitty(b, km.Main)
+	b = append(b, "\x1b[H\x1b[2J"...)
+	if alt {
+		b = append(b, "\x1b[?1049h"...)
+		b = appendKitty(b, km.Alt)
+		b = append(b, "\x1b[H\x1b[2J"...)
+	}
+	b = appendModifyOtherKeys(b, km)
+	return append(b, "\x1b[?25h"...)
+}
+
+func appendModifyOtherKeys(b []byte, km KeyModes) []byte {
+	if km.ModifyOtherKeys > 0 {
+		b = append(b, "\x1b[>4;"...)
+		b = strconv.AppendInt(b, int64(km.ModifyOtherKeys), 10)
+		b = append(b, 'm')
+	}
+	return b
+}
+
 // Write takes the program's output.
 func (k *KeyTracker) Write(p []byte) {
 	for i := 0; i < len(p); i++ {

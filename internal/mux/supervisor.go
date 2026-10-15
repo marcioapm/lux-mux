@@ -115,7 +115,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			case endDropped:
 				// Attached and then lost: try again at once, then back off.
 				bo = m.opt.Backoff
-				if m.refreshing(w) {
+				if m.takeRefreshing(w) {
 					continue
 				}
 				m.setWaiting(w, why)
@@ -217,6 +217,7 @@ func (m *Mux) markStopped(w *Window, why string) {
 	w.phase = phaseDead
 	w.resumable = true
 	w.reason = why
+	m.forgetStaleScreenLocked(w)
 	if m.activeLocked() == w {
 		m.repaintLocked()
 	} else {
@@ -242,11 +243,15 @@ func (m *Mux) resume(w *Window) {
 	w.poke()
 }
 
-// refreshing reports whether w's stream was closed to rebuild its screen.
-func (m *Mux) refreshing(w *Window) bool {
+// takeRefreshing reports (and forgets) that w's stream was closed to
+// rebuild its screen: that stream's end is no news, a failure to attach
+// again is.
+func (m *Mux) takeRefreshing(w *Window) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return w.refreshing
+	r := w.refreshing
+	w.refreshing = false
+	return r
 }
 
 // waitClosed parks a dead window's supervisor until the window closes or
@@ -298,11 +303,16 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		return endNotAttached, "attach: " + luxapi.Describe(err)
 	}
 	conn.SetReadLimit(8 << 20)
-	w.setConn(conn)
 	defer func() {
 		w.setConn(nil)
 		conn.CloseNow()
 	}()
+	if err := m.goLive(ctx, w, conn); err != nil {
+		if ctx.Err() != nil {
+			return endStopped, ""
+		}
+		return endDropped, "stream lost"
+	}
 	frames := make(chan api.StreamData, 64)
 	readErr := make(chan error, 1)
 	m.goSafe(func() {
@@ -444,6 +454,9 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 	w.hasScreen = true
 	active := m.showingLocked(w)
 	raw := restoring && firstHere && active
+	if raw {
+		m.shown = w
+	}
 	if !restoring && active {
 		m.repaintLocked()
 	}
@@ -476,15 +489,104 @@ func (m *Mux) restored(w *Window) {
 	}
 }
 
-// send writes keystrokes to w's stream.
+// pendingInLimit bounds the keystrokes kept for a window without a
+// stream; past it the oldest are dropped, with a notice.
+const pendingInLimit = 64 << 10
+
+// send writes keystrokes to w's stream. While w has none (it starts,
+// reconnects or is being refreshed) they are kept and sent, in order,
+// once its next stream is up (goLive); a write that fails because the
+// stream just closed is kept the same way.
 func (m *Mux) send(w *Window, b []byte) {
-	c := w.getConn()
-	if c == nil {
+	w.connMu.Lock()
+	c := w.conn
+	if c == nil || len(w.pendingIn) > 0 {
+		dropped := w.keepInputLocked(b)
+		w.connMu.Unlock()
+		m.inputDropped(w, dropped)
 		return
 	}
+	w.connMu.Unlock()
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
-	_ = wsjson.Write(ctx, c, api.StreamData{Data: b})
+	err := wsjson.Write(ctx, c, api.StreamData{Data: b})
 	cancel()
+	if err != nil && m.ctx.Err() == nil {
+		w.connMu.Lock()
+		// Ahead of anything kept meanwhile: typed before it.
+		w.pendingIn = append(append([]byte{}, b...), w.pendingIn...)
+		dropped := w.trimInputLocked()
+		// A stream that came up meanwhile has sent what was kept; it
+		// sends this too before it takes more (goLive).
+		next := w.conn
+		if next == c {
+			next = nil
+		}
+		w.conn = nil
+		w.connMu.Unlock()
+		m.inputDropped(w, dropped)
+		if next != nil {
+			_ = m.goLive(m.ctx, w, next)
+		}
+	}
+}
+
+// keepInputLocked keeps b for the next stream; it returns how many of
+// the oldest bytes kept were dropped for room.
+func (w *Window) keepInputLocked(b []byte) int {
+	w.pendingIn = append(w.pendingIn, b...)
+	return w.trimInputLocked()
+}
+
+func (w *Window) trimInputLocked() int {
+	n := len(w.pendingIn) - pendingInLimit
+	if n <= 0 {
+		return 0
+	}
+	w.pendingIn = append(w.pendingIn[:0], w.pendingIn[n:]...)
+	return n
+}
+
+func (m *Mux) inputDropped(w *Window, n int) {
+	if n == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setNoticeLocked(fmt.Sprintf("window %d: %d typed bytes dropped while it had no stream", m.indexLocked(w), n))
+}
+
+// goLive makes c w's stream: the keystrokes kept for it are sent first,
+// in order, and c takes new ones only once none are left.
+func (m *Mux) goLive(ctx context.Context, w *Window, c *websocket.Conn) error {
+	for {
+		w.connMu.Lock()
+		b := w.pendingIn
+		if len(b) == 0 {
+			w.conn = c
+			w.connMu.Unlock()
+			return nil
+		}
+		w.pendingIn = nil
+		w.connMu.Unlock()
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := wsjson.Write(wctx, c, api.StreamData{Data: b})
+		cancel()
+		if err != nil {
+			w.connMu.Lock()
+			w.pendingIn = append(b, w.pendingIn...)
+			dropped := w.trimInputLocked()
+			w.connMu.Unlock()
+			m.inputDropped(w, dropped)
+			return err
+		}
+	}
+}
+
+// dropInput forgets keystrokes kept for w's Run: it is replaced.
+func (w *Window) dropInput() {
+	w.connMu.Lock()
+	w.pendingIn = nil
+	w.connMu.Unlock()
 }
 
 // noteRun records what a Run read says about it.
@@ -516,10 +618,6 @@ func (m *Mux) setWaiting(w *Window, why string) {
 	if w.closed {
 		return
 	}
-	if w.refreshing {
-		// The stream was closed to rebuild a stale screen: no news.
-		return
-	}
 	if w.phase == phaseLive {
 		w.phase = phaseReconnecting
 	}
@@ -542,10 +640,22 @@ func (m *Mux) markDead(w *Window, why string) {
 	w.phase = phaseDead
 	w.resumable = false
 	w.reason = why
+	w.dropInput()
+	m.forgetStaleScreenLocked(w)
 	if m.activeLocked() == w {
 		m.repaintLocked()
 	} else {
 		m.setNoticeLocked(fmt.Sprintf("window %d ended: %s", m.indexLocked(w), why))
+	}
+}
+
+// forgetStaleScreenLocked drops the screen of a window that will not be
+// attached again until r: a stale emulator (see feedLimit) could only be
+// rebuilt by an attach, so the window shows its status screen instead,
+// with the r/& offer, prompts and notices. The attach after r restores it.
+func (m *Mux) forgetStaleScreenLocked(w *Window) {
+	if w.q.isStale() {
+		w.hasScreen = false
 	}
 }
 

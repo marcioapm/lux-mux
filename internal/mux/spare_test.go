@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,6 +239,94 @@ func TestClaimedSpareForgottenWhenItsWindowCloses(t *testing.T) {
 	if c := h.claimed(); len(c) != 0 {
 		t.Fatalf("claimed %v", c)
 	}
+	h.detach()
+}
+
+// spareSubmitHeld makes a session whose next spare submit (the
+// replacement after C-b c claims the spare) is held until release is
+// closed; it returns once that submit reached lux, with the claimed spare.
+func spareSubmitHeld(t *testing.T) (h *harness, first, claimed string, release chan struct{}) {
+	h = newHarness(t, cfgSpare, nil)
+	first = h.live(0)
+	h.waitFor("spare", func() bool { return spareOf(h) != "" })
+	claimed = spareOf(h)
+	release = make(chan struct{})
+	var held atomic.Bool
+	h.lux.SubmitHook = func() {
+		held.Store(true)
+		<-release
+	}
+	h.type_("\x02c")
+	h.waitFor("window 1 on the spare", func() bool { return h.window(1) == claimed })
+	h.live(1)
+	h.waitFor("replacement submit held", held.Load)
+	return h, first, claimed, release
+}
+
+// TestSpareSubmitWhenSessionEnds: a spare whose submit is in flight when
+// the last window closes does not crash luxmux, and its Run is
+// terminated, not left running.
+func TestSpareSubmitWhenSessionEnds(t *testing.T) {
+	h, first, claimed, release := spareSubmitHeld(t)
+	h.lux.Term(claimed).Exit()
+	h.waitFor("one window", func() bool { return h.nwindows() == 1 })
+	h.lux.Term(first).Exit()
+	h.waitFor("ending", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.ending })
+	close(release)
+	select {
+	case r := <-h.done:
+		if r != "exited" {
+			t.Fatalf("Run returned %q", r)
+		}
+	case msg := <-h.crashed:
+		t.Fatalf("crashed: %s", msg)
+	case <-timeout():
+		t.Fatal("session did not end")
+	}
+	ids := h.lux.RunIDs()
+	spare := ids[len(ids)-1]
+	if spare == claimed || spare == first {
+		t.Fatalf("no replacement submitted: %v", ids)
+	}
+	if st := h.lux.Run(spare).State; st != "terminated" {
+		t.Fatalf("the spare submitted while the session ended is %s", st)
+	}
+}
+
+// TestSpareSubmitWhenDetached: a detach waits for a spare submit in
+// flight and records its Run in the session file, so it is not orphaned
+// and the next attach claims it instead of submitting another.
+func TestSpareSubmitWhenDetached(t *testing.T) {
+	h, _, _, release := spareSubmitHeld(t)
+	h.type_("\x02d")
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	select {
+	case r := <-h.done:
+		if r != "detached" {
+			t.Fatalf("Run returned %q", r)
+		}
+	case <-timeout():
+		t.Fatal("detach did not return")
+	}
+	ids := h.lux.RunIDs()
+	spare := ids[len(ids)-1]
+	s, _, err := state.Load(h.dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Spares[config.SpecKey(h.cfg.Profiles["dev"])]; got != spare {
+		t.Fatalf("session file spare %q, submitted %q", got, spare)
+	}
+	if st := h.lux.Run(spare).State; st != "running" {
+		t.Fatalf("spare %s", st)
+	}
+	submits := len(h.lux.Submits())
+	h.start(nil)
+	h.live(0)
+	h.type_("\x02c")
+	h.waitFor("the recorded spare claimed", func() bool { return h.window(2) == spare })
+	h.waitFor("its replacement", func() bool { return len(h.lux.Submits()) == submits+1 })
 	h.detach()
 }
 

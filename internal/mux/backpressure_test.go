@@ -85,12 +85,25 @@ func TestSlowTerminalCatchesUp(t *testing.T) {
 		h.waitFor("stream read", func() bool { return term.Queued() < 2<<20 })
 	}
 	h.waitFor("behind", h.m.tw.isBehind)
+	// Live output while behind is not queued for the terminal: the
+	// repaint after it catches up shows it.
+	term.Output([]byte("AFTER-DROP"))
+	h.waitFor("emulator has it", func() bool { return strings.Contains(h.emuScreen(0), "AFTER-DROP") })
 	term.Output([]byte("\x1b[2J\x1b[HFINAL-SCREEN"))
 	h.waitFor("emulator", func() bool { return strings.Contains(h.emuScreen(0), "FINAL-SCREEN") })
+	before := len(h.term.rawBytes())
 	h.term.setStall(false)
 	h.waitScreen("final screen", func(s string) bool { return s == h.emuScreen(0) })
 	if !strings.Contains(h.term.screen(), "FINAL-SCREEN") {
 		t.Fatal("final screen missing")
+	}
+	got := h.term.rawBytes()[before:]
+	rp := bytes.Index(got, []byte("\x18\x1b[?1049l"))
+	if rp < 0 {
+		t.Fatal("no repaint")
+	}
+	if bytes.Contains(got[:rp], []byte("AFTER-DROP")) || bytes.Contains(got[:rp], []byte("FINAL-SCREEN")) {
+		t.Fatal("live output queued while behind reached the terminal before the repaint")
 	}
 	h.type_("after\r\n")
 	h.waitScreen("live again", h.contains("after"))
@@ -168,6 +181,84 @@ func TestOverflowShownWindowKeepsRawOutput(t *testing.T) {
 	if n := bytes.Count(got, []byte("OVERFLOW-FILL-0123456789\r\n")); n < feedLimit/26 {
 		t.Fatalf("only %d lines reached the terminal", n)
 	}
+	h.detach()
+}
+
+// TestOverflowWhilePainting: a window switched to whose emulator overflows
+// before the paint was drawn shows the placeholder, and is attached again
+// so lux's snapshot replaces it; the stale queue holds none of the output
+// that arrives meanwhile.
+func TestOverflowWhilePainting(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.lux.Term(a).Output([]byte("BEFORE-OVERFLOW"))
+	h.type_("\x02c")
+	h.live(1)
+	h.waitFor("window 1 shown", func() bool { return h.title() == "luxmux:s [1] default" })
+	w := h.win(0)
+	w.emuMu.Lock()
+	// The feeder takes this and waits for the emulator, so what follows
+	// stays queued.
+	w.q.push(feedItem{data: []byte(" ")})
+	h.waitFor("feeder busy", func() bool { w.q.mu.Lock(); defer w.q.mu.Unlock(); return len(w.q.items) == 0 })
+	before := len(attachesOf(h.lux, a))
+	h.type_("\x020")
+	// The paint is queued behind the held emulator.
+	h.waitFor("paint queued", func() bool {
+		w.q.mu.Lock()
+		defer w.q.mu.Unlock()
+		for _, it := range w.q.items {
+			if it.paint != nil {
+				return true
+			}
+		}
+		return false
+	})
+	chunk := bytes.Repeat([]byte("OVERFLOW-FILL-0123456789\r\n"), 1<<14)
+	term := h.lux.Term(a)
+	for sent := 0; sent <= feedLimit+len(chunk) && !w.q.isStale(); sent += len(chunk) {
+		term.Output(chunk)
+		h.waitFor("stream drained", func() bool { return term.Queued() < 2<<20 && h.termQueued() < liveLimit/2 })
+	}
+	h.waitFor("stale", w.q.isStale)
+	// More output while stale: dropped, not queued for the emulator.
+	term.Output(chunk)
+	h.waitFor("stream drained", func() bool { return term.Queued() == 0 })
+	w.q.mu.Lock()
+	queued := w.q.bytes
+	w.q.mu.Unlock()
+	if queued != 0 {
+		t.Errorf("a stale queue holds %d bytes", queued)
+	}
+	w.emuMu.Unlock()
+	h.waitFor("reattached with restore", func() bool {
+		as := attachesOf(h.lux, a)
+		return len(as) > before && as[len(as)-1].Restore
+	})
+	term.Output([]byte("\x1b[2J\x1b[HFROM-THE-SNAPSHOT"))
+	h.waitScreen("window 0 from lux", h.contains("FROM-THE-SNAPSHOT"))
+	if strings.Contains(h.term.screen(), "refreshing") {
+		t.Fatalf("placeholder left:\n%s", h.term.screen())
+	}
+	h.detach()
+}
+
+// TestPreviewOfStaleWindowRefreshes: the chooser's preview of a stale
+// window that is not shown attaches it again.
+func TestPreviewOfStaleWindowRefreshes(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.type_("\x02c")
+	h.live(1)
+	h.overflow(0, a)
+	before := len(attachesOf(h.lux, a))
+	if p := h.m.Preview(0, 5, 40); !strings.Contains(strings.Join(p, ""), "refreshing") {
+		t.Fatalf("preview %q", p)
+	}
+	h.waitFor("reattached with restore", func() bool {
+		as := attachesOf(h.lux, a)
+		return len(as) > before && as[len(as)-1].Restore
+	})
 	h.detach()
 }
 
