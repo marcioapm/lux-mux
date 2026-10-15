@@ -70,6 +70,16 @@ type Server struct {
 	// AttachHook, if set, runs before each attach to a running Run is
 	// accepted: a slow attach.
 	AttachHook func(runID string)
+	// GetHook, if set (SetGetHook), runs before each GET of a Run is
+	// answered.
+	GetHook func(runID string)
+}
+
+// SetGetHook sets GetHook while the server is serving.
+func (s *Server) SetGetHook(f func(runID string)) {
+	s.mu.Lock()
+	s.GetHook = f
+	s.mu.Unlock()
 }
 
 type fakeRun struct {
@@ -77,6 +87,20 @@ type fakeRun struct {
 	term    *Terminal
 	conns   map[*websocket.Conn]bool
 	secrets map[string]string
+	// snapshotRefused: the current placement's snapshot report was refused
+	// and the Run has no snapshot (see RefuseSnapshot).
+	snapshotRefused bool
+}
+
+// resumable is lux's Run.resumable: an end other than terminated, unless
+// the spec's resumePolicy is never or the Run is left with only a refused
+// snapshot report.
+func resumable(r *fakeRun) bool {
+	switch r.run.State {
+	case "stopped", "lost", "failed", "succeeded":
+		return r.run.Spec.ResumePolicy != "never" && !r.snapshotRefused
+	}
+	return false
 }
 
 // New starts a fake luxd.
@@ -146,7 +170,7 @@ func (s *Server) event(r *api.Run, typ string, data map[string]any) {
 
 func (s *Server) setState(r *fakeRun, state, reason string) {
 	r.run.State, r.run.StateReason = state, reason
-	r.run.Resumable = state == "stopped" || state == "lost" || state == "failed" || state == "succeeded"
+	r.run.Resumable = resumable(r)
 	d := map[string]any{"state": state}
 	if reason != "" {
 		d["reason"] = reason
@@ -278,6 +302,12 @@ func (s *Server) list(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *Server) get(w http.ResponseWriter, req *http.Request) {
+	s.mu.Lock()
+	hook := s.GetHook
+	s.mu.Unlock()
+	if hook != nil {
+		hook(req.PathValue("id"))
+	}
 	s.mu.Lock()
 	r := s.runs[req.PathValue("id")]
 	var c api.Run

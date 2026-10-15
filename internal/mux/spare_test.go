@@ -349,6 +349,29 @@ func TestWindowClosedDuringSubmitTerminatesRun(t *testing.T) {
 	h.detach()
 }
 
+// TestWindowClosedDuringClaimTerminatesSpare: a window closed while its
+// spare was being claimed does not keep the spare: it is terminated.
+func TestWindowClosedDuringClaimTerminatesSpare(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare submitted", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	release := make(chan struct{})
+	var held atomic.Bool
+	h.lux.SetGetHook(func(id string) {
+		if id == spare && held.CompareAndSwap(false, true) {
+			<-release
+		}
+	})
+	h.type_("\x02c")
+	h.waitFor("claim checking the spare", held.Load)
+	h.m.Kill(1)
+	h.waitFor("window 1 closed", func() bool { return h.nwindows() == 1 })
+	close(release)
+	h.waitFor("spare terminated", func() bool { return h.lux.Run(spare).State == "terminated" })
+	h.detach()
+}
+
 // TestRelaunchTerminatesOldRun: r on an ended window terminates the old
 // Run (a failed one is still resumable and billed for its volume).
 func TestRelaunchTerminatesOldRun(t *testing.T) {

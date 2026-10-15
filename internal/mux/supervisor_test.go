@@ -408,6 +408,33 @@ func TestLostResumes(t *testing.T) {
 	h.detach()
 }
 
+// TestNotResumableIsEnded: a stopped or lost Run lux will not resume (its
+// only snapshot report was refused) is shown ended with the relaunch
+// offer; luxmux never asks lux to resume it.
+func TestNotResumableIsEnded(t *testing.T) {
+	for _, tc := range []struct{ state, reason string }{
+		{"lost", "host lost: missed heartbeats"},
+		{"stopped", "stop"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			h := newHarness(t, cfgDefault, nil)
+			id := h.live(0)
+			h.lux.RefuseSnapshot(id)
+			h.lux.End(id, tc.state, tc.reason)
+			h.waitScreen("ended with the relaunch offer", h.contains("r relaunch"))
+			if h.lux.Run(id).Resumable {
+				t.Fatal("the fake still marks it resumable")
+			}
+			// The supervisor decides before it shows the offer, and then
+			// parks: a resume would already have been asked.
+			if n := len(h.lux.Resumes()); n != 0 {
+				t.Fatalf("%d resume requests for a Run lux will not resume", n)
+			}
+			h.detach()
+		})
+	}
+}
+
 // TestResumeResolvesOnlyTheRunsSecrets: a resume needs values only for
 // the secrets lux lists for the Run, not every one the profile names now.
 func TestResumeResolvesOnlyTheRunsSecrets(t *testing.T) {

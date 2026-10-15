@@ -106,6 +106,17 @@ func (s *Server) End(id, state, reason string) {
 	s.setStage(r, state)
 }
 
+// RefuseSnapshot marks the Run's snapshot report refused with no snapshot
+// to fall back on, as luxd does when a host's report fails its checks: it
+// is no longer resumable.
+func (s *Server) RefuseSnapshot(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.runs[id]
+	r.snapshotRefused = true
+	r.run.Resumable = resumable(r)
+}
+
 // SetState changes the Run's state and reason and nothing else (no
 // stream, no terminal is touched).
 func (s *Server) SetState(id, state, reason string) {
