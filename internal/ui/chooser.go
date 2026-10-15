@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/marcioapm/lux-mux/internal/mux"
 )
@@ -228,7 +229,7 @@ func (c *Chooser) View() string {
 	vis := c.Visible()
 	listRows := min(max(len(vis), 1), max(c.rows/3, 3))
 	header := fmt.Sprintf("  %-3s %-14s %-12s %-22s %-10s %-18s %s", "#", "NAME", "STATE", "IMAGE", "SIZE", "REPO", "AGE")
-	b.WriteString(fit(header, c.cols) + "\n")
+	b.WriteString(palette.section.Render(fit(header, c.cols)) + "\n")
 	start := max(0, c.cursor-listRows+1)
 	for i := start; i < start+listRows; i++ {
 		if i >= len(vis) {
@@ -238,21 +239,22 @@ func (c *Chooser) View() string {
 		w := vis[i]
 		mark := "  "
 		if i == c.cursor {
-			mark = "> "
+			mark = "▸ "
 		}
 		act := " "
 		if w.Active {
 			act = "*"
 		}
-		line := fmt.Sprintf("%s%-3s %-14s %-12s %-22s %-10s %-18s %s", mark, fmt.Sprintf("%d%s", w.Index, act),
-			fit(w.Name, 14), fit(w.State, 12), fit(w.Image, 22), fit(w.Size, 10), fit(w.Repo, 18), age(c.now().Sub(w.Created)))
-		line = fit(line, c.cols)
+		state := stateStyle(w.State).Render(fit(w.State, 12))
+		line := fmt.Sprintf("%s%-3s %-14s %s %-22s %-10s %-18s %s", mark, fmt.Sprintf("%d%s", w.Index, act),
+			fit(w.Name, 14), state, fit(w.Image, 22), fit(w.Size, 10), fit(w.Repo, 18), age(c.now().Sub(w.Created)))
+		line = fitLine(line, c.cols)
 		if i == c.cursor {
-			line = "\x1b[7m" + line + "\x1b[m"
+			line = palette.focus.Render(fitLine(ansi.Strip(line), c.cols))
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString(strings.Repeat("─", max(c.cols, 1)) + "\n")
+	b.WriteString(palette.border.Render(strings.Repeat("─", max(c.cols, 1))) + "\n")
 	prevRows := c.rows - listRows - 3
 	var prev []string
 	if w, ok := c.Selected(); ok && prevRows > 0 {
@@ -279,7 +281,16 @@ func (c *Chooser) View() string {
 			status = "[" + c.filter + "] " + status
 		}
 	}
-	b.WriteString(fit(status, c.cols))
+	status = fit(status, c.cols)
+	switch c.mode {
+	case modeFilter, modeRename:
+		status = palette.focus.Render(status)
+	case modeConfirmKill:
+		status = palette.warning.Render(status)
+	default:
+		status = keyHints(status)
+	}
+	b.WriteString(status)
 	return b.String()
 }
 

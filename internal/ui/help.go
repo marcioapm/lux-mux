@@ -147,20 +147,20 @@ func (h *Help) lines() []string {
 					break
 				}
 				if f == "" || strings.Contains(strings.ToLower(x.key+" "+x.words+" "+x.section), f) {
-					kept = append(kept, fmt.Sprintf("  %-18s %s", x.key, x.words))
+					kept = append(kept, fmt.Sprintf("  %s %s", palette.accent.Render(fmt.Sprintf("%-18s", x.key)), x.words))
 				}
 			}
 			if len(kept) > 0 {
 				if len(out) > 0 {
 					out = append(out, "")
 				}
-				out = append(out, styleSection.Render(e.section))
+				out = append(out, palette.section.Render(e.section))
 				out = append(out, kept...)
 			}
 		}
 	}
 	if len(out) == 0 {
-		out = []string{styleDim.Render("  no key matches “" + h.filter + "”")}
+		out = []string{palette.dim.Render("  no key matches “" + h.filter + "”")}
 	}
 	return out
 }
@@ -253,8 +253,10 @@ func (h *Help) View() string {
 		foot = "↑↓ pgup/pgdn scroll · / filter · esc, q or ? close"
 	}
 	foot = ansi.Truncate(foot+more, innerWidth(h.cols), "…")
-	if !h.filtering {
-		foot = styleDim.Render(foot)
+	if h.filtering {
+		foot = palette.focus.Render(fitLine(foot, innerWidth(h.cols)))
+	} else {
+		foot = keyHints(foot)
 	}
 	return frame(h.rows, h.cols, h.bg, "Keys", append(lines, "", foot))
 }

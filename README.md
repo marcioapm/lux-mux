@@ -89,6 +89,13 @@ closes. The lower part previews the highlighted window's screen.
 "alt-p" = "prev"
 ```
 
+## Appearance
+
+The dialog, key help and chooser use a calm slate/steel-blue palette that
+adapts to light and dark terminals. Focus has a muted blue band; status
+colours distinguish running, starting and stopped windows. Set `NO_COLOR`
+to any non-empty value for monochrome, with reverse focus and bold headings.
+
 ## Profiles
 
 `$XDG_CONFIG_HOME/luxmux/config.toml` (usually `~/.config/luxmux/config.toml`):
