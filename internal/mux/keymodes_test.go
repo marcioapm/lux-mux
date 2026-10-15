@@ -85,6 +85,34 @@ func TestKeyModesResetOnNewShell(t *testing.T) {
 	h.detach()
 }
 
+// TestKeyModesBackAfterPromptOverStaleWindow: a prompt closed over the
+// shown window whose emulator is stale (only the bottom row is redrawn)
+// turns the window's keyboard modes back on, once: a notice after it
+// leaves them as they are.
+func TestKeyModesBackAfterPromptOverStaleWindow(t *testing.T) {
+	h := newHarness(t, cfgDefault, nil)
+	a := h.live(0)
+	h.lux.Term(a).Output([]byte(kittyNvim))
+	h.waitFor("modes on the terminal", func() bool { return wantKeys(h.term.keyModes(), 1, 2) })
+	h.overflow(0, a)
+	n := len(attachesOf(h.lux, a))
+	h.type_("\x1b[98;5u,")
+	h.waitScreen("rename prompt", h.contains("rename window:"))
+	h.waitFor("modes off in the prompt", func() bool { return h.term.keyModes().Zero() })
+	h.type_("\x1b")
+	h.waitFor("prompt closed", func() bool { return !strings.Contains(h.term.screen(), "rename window:") })
+	h.waitFor("modes back", func() bool { return wantKeys(h.term.keyModes(), 1, 2) })
+	h.m.Notice("a notice")
+	h.noticeShown("a notice")
+	if km := h.term.keyModes(); !wantKeys(km, 1, 2) || len(km.Alt.Saved) != 1 {
+		t.Fatalf("after a notice: %+v", km)
+	}
+	if !h.win(0).q.isStale() || len(attachesOf(h.lux, a)) != n {
+		t.Fatal("the window was refreshed: the stale path was not tested")
+	}
+	h.detach()
+}
+
 // TestKeyModesOffInPrompts: a prompt, help and a dialog read keys as plain
 // bytes, so the window's keyboard modes are off while one is open, and
 // back after.

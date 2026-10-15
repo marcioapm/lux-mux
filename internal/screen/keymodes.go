@@ -98,6 +98,20 @@ func ResetKeys(b []byte) []byte {
 // shown as it is: modifyOtherKeys and the current screen's kitty flags.
 func ResetKeysHere(b []byte) []byte { return append(b, "\x1b[>4m"+kittyReset...) }
 
+// KeysHere sets the keyboard modes km holds for the screen shown (alt: the
+// alternate one), leaving the screen as it is: the inverse of
+// ResetKeysHere, which it starts with so the kitty stack is rebuilt, not
+// pushed onto.
+func KeysHere(b []byte, km KeyModes, alt bool) []byte {
+	b = ResetKeysHere(b)
+	if alt {
+		b = appendKitty(b, km.Alt)
+	} else {
+		b = appendKitty(b, km.Main)
+	}
+	return appendModifyOtherKeys(b, km)
+}
+
 // KeyTracker follows a program's output for the sequences that set
 // KeyModes, across writes cut anywhere. Its zero value is a program that
 // set none.

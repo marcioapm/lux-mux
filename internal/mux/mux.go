@@ -455,6 +455,10 @@ func (m *Mux) staleScreenLocked(w *Window, kind paintKind, line string) []byte {
 		b = append(b, w.tail.Pending()...)
 	case paintOverlay:
 		b = m.bottomRow(b, line)
+		if km := m.keyModesLocked(w); m.promptState == nil && !km.Zero() {
+			// A prompt that closed turned the modes off (askLocked).
+			b = screen.KeysHere(b, km, w.keyModes.AltScreen())
+		}
 		b = append(b, w.tail.Pending()...)
 	}
 	if kind == paintShow {
