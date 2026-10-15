@@ -115,9 +115,7 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 	if sp.Workload.Workdir == "" {
 		sp.Workload.Workdir = Workspace
 	}
-	if p.Size != "" {
-		sp.Resources.Size = p.Size
-	}
+	sp.Resources.Size = p.Size
 	sp.Resources.CPUs = p.CPUs
 	if p.Memory != "" {
 		b, err := api.ParseBytes(p.Memory)
