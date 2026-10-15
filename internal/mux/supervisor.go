@@ -142,12 +142,14 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 			return
 		default:
 			// submitted, provisioning, scheduled, starting, resuming,
-			// stopping: wait for the next event, or poll.
+			// stopping: wait for the next event, or poll, often at first
+			// (the feed misses what happened before it connected).
 			select {
 			case <-ctx.Done():
 			case <-w.notify:
-			case <-time.After(m.opt.Poll):
+			case <-time.After(min(bo, m.opt.Poll)):
 			}
+			grow()
 		}
 	}
 }

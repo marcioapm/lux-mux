@@ -24,13 +24,32 @@ func New() mux.UI { return dialogs{} }
 
 type dialogs struct{}
 
+// finisher is a model that knows it is done.
+type finisher interface{ finished() bool }
+
+// releasing hands the keyboard back as soon as the model is done, so the
+// program's read loop ends at once instead of after bubbletea's timeout.
+type releasing struct {
+	tea.Model
+	release func()
+}
+
+func (r releasing) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m, cmd := r.Model.Update(msg)
+	r.Model = m
+	if f, ok := m.(finisher); ok && f.finished() {
+		r.release()
+	}
+	return r, cmd
+}
+
 // run runs model on the session's terminal with the keyboard, in the
 // alternate screen, until it quits.
 func run(m *mux.Mux, model tea.Model) (tea.Model, error) {
 	out, _, _ := m.Terminal()
 	kb := m.KeyboardReader()
 	defer kb.Close()
-	p := tea.NewProgram(model, tea.WithInput(kb), tea.WithOutput(out), tea.WithAltScreen(),
+	p := tea.NewProgram(releasing{model, func() { kb.Close() }}, tea.WithInput(kb), tea.WithOutput(out), tea.WithAltScreen(),
 		tea.WithContext(m.Context()), tea.WithoutSignalHandler())
 	res, err := p.Run()
 	// The program's last frame is still on the alternate screen: the
@@ -38,6 +57,9 @@ func run(m *mux.Mux, model tea.Model) (tea.Model, error) {
 	_, _ = io.WriteString(out, "\x1b[?1049l")
 	if errors.Is(err, tea.ErrProgramKilled) {
 		err = nil
+	}
+	if r, ok := res.(releasing); ok {
+		res = r.Model
 	}
 	return res, err
 }
@@ -66,6 +88,8 @@ func (fm formModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return fm, cmd
 }
+
+func (fm formModel) finished() bool { return fm.f.State != huh.StateNormal }
 
 func (fm formModel) View() string {
 	if fm.f.State != huh.StateNormal {

@@ -286,7 +286,7 @@ func (c *Chooser) View() string {
 // chooserProgram adapts Chooser to bubbletea.
 type chooserProgram struct{ c *Chooser }
 
-func (p chooserProgram) Init() tea.Cmd { return nil }
+func (p chooserProgram) Init() tea.Cmd { return tick() }
 
 func (p chooserProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
@@ -310,6 +310,8 @@ func (p chooserProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (p chooserProgram) View() string { return p.c.View() }
+
+func (p chooserProgram) finished() bool { return p.c.Done }
 
 type tickMsg struct{}
 
