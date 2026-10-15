@@ -10,7 +10,11 @@ on:
   pull_request:
     paths: ['images/**', '.github/workflows/image.yml']
   workflow_dispatch:
-
+    inputs:
+      latest:
+        description: On a release tag, also move :latest (only if it is the highest release tag)
+        type: boolean
+        default: false
 permissions:
   contents: read
 
@@ -103,6 +107,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      # All tags, to tell whether this one is the highest release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: digest-*
@@ -114,17 +122,30 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # :latest moves only to a release tag (vX.Y.Z, no pre-release suffix)
+      # that is the highest release tag, so it never lands on an rc or moves
+      # backwards; a workflow_dispatch moves it only with latest=true.
       - name: Merge manifests
         env:
-          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          LATEST_INPUT: ${{ inputs.latest }}
         run: |
-          tags=(-t ghcr.io/marcioapm/luxmux:latest)
-          if [[ "$REF_TYPE" == tag && "$REF_NAME" == v* ]]; then
-            tags+=(-t "ghcr.io/marcioapm/luxmux:${REF_NAME#v}")
-          else
-            echo "publishing needs a v* tag ref" >&2
+          release='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "publishing needs a vX.Y.Z or vX.Y.Z-pre tag, not $REF_NAME" >&2
             exit 1
+          fi
+          tags=(-t "ghcr.io/marcioapm/luxmux:${REF_NAME#v}")
+          highest=$(git tag --list 'v*' --sort=-v:refname | grep -E "$release" | head -n 1 || true)
+          if [[ ! "$REF_NAME" =~ $release ]]; then
+            echo ":latest not moved: $REF_NAME is a pre-release"
+          elif [[ "$REF_NAME" != "$highest" ]]; then
+            echo ":latest not moved: $REF_NAME is not the highest release tag ($highest)"
+          elif [[ "$EVENT" == workflow_dispatch && "$LATEST_INPUT" != true ]]; then
+            echo ":latest not moved: workflow_dispatch without latest=true"
+          else
+            tags+=(-t ghcr.io/marcioapm/luxmux:latest)
           fi
           digests=()
           for digest in digests/*; do

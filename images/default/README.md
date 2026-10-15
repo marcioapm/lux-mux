@@ -79,9 +79,13 @@ and a profile's `env` can override any of them:
 `.github/workflows/image.yml` builds each architecture on a native runner and
 merges them into one manifest with provenance and SBOM attestations:
 
-- a `v*` tag pushes `:<tag without v>` (`v0.2.0` → `:0.2.0`) and `:latest`;
-- `workflow_dispatch` on a tag rebuilds those tags (on a branch it builds
-  and smoke-tests without pushing);
+- a `vX.Y.Z` tag pushes `:X.Y.Z` (`v0.2.0` → `:0.2.0`), and moves `:latest`
+  only if it is the highest `vX.Y.Z` tag in the repository, so `:latest`
+  never moves backwards;
+- a pre-release tag (`v0.3.0-rc.1`) pushes `:0.3.0-rc.1` and leaves `:latest`;
+- `workflow_dispatch` on a tag rebuilds that tag's image, and moves `:latest`
+  only when run with `latest = true` (and the tag is the highest release); on
+  a branch it builds and smoke-tests without pushing;
 - every push to `main`, and every pull request touching `images/**` or the
   workflow, builds and smoke-tests both architectures without pushing, so a
   broken image shows up before a release is tagged.
