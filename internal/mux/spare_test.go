@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcioapm/lux/api"
+
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
@@ -357,6 +359,34 @@ func TestRelaunchTerminatesOldRun(t *testing.T) {
 	h.type_("r")
 	h.waitFor("relaunched", func() bool { return h.window(0) != "" && h.window(0) != id })
 	h.waitFor("old Run terminated", func() bool { return h.lux.Run(id).State == "terminated" })
+	h.detach()
+}
+
+// TestRebuiltSessionClaimsSpareBySpec: a session rebuilt from its Runs'
+// labels (its file lost) knows its waiting spare by spec: a new window
+// claims it, and no second spare is submitted next to it.
+func TestRebuiltSessionClaimsSpareBySpec(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare submitted", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	h.detach()
+	var runs []*api.Run
+	for _, id := range h.lux.RunIDs() {
+		r := h.lux.Run(id)
+		runs = append(runs, &r)
+	}
+	sess := state.Rebuild("s", runs)
+	submits := len(h.lux.Submits())
+	h.start(sess)
+	h.live(0)
+	h.type_("\x02c")
+	h.waitFor("window 1 on the spare", func() bool { return h.window(1) == spare })
+	h.live(1)
+	h.waitFor("its replacement", func() bool { s := spareOf(h); return s != "" && s != spare })
+	if n := len(h.lux.Submits()) - submits; n != 1 {
+		t.Fatalf("%d submits after the rebuild, want only the replacement", n)
+	}
 	h.detach()
 }
 

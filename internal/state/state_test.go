@@ -84,9 +84,32 @@ func TestRebuild(t *testing.T) {
 	}
 }
 
+// TestRebuildBySpec: spares are keyed by their luxmux-spec label, so two
+// profiles' spares stay apart and a spare is claimed by spec, not name; a
+// spare from before the label is keyed by its profile.
+func TestRebuildBySpec(t *testing.T) {
+	spec := func(r *api.Run, key string) *api.Run { r.Labels[config.LabelSpec] = key; return r }
+	runs := []*api.Run{
+		spec(run("run_a", "work", "app", "running", 10, true), "k1"),
+		spec(run("run_b", "work", "app", "running", 20, true), "k2"),     // same profile, other spec
+		spec(run("run_c", "work", "other", "running", 30, true), "k3"),   // older spare of k3: claimed
+		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
+		run("run_e", "work", "legacy", "running", 50, true),
+	}
+	s := Rebuild("work", runs)
+	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
+	if !reflect.DeepEqual(s.Spares, want) {
+		t.Fatalf("spares %v, want %v", s.Spares, want)
+	}
+	if !reflect.DeepEqual(s.Claimed, []string{"run_c"}) || len(s.Windows) != 1 || s.Windows[0].RunID != "run_c" {
+		t.Fatalf("claimed %v windows %+v", s.Claimed, s.Windows)
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	s := &Session{Windows: []Window{{RunID: "a"}, {RunID: "b"}, {RunID: "c"}}, Active: 2, Last: 1,
-		Spares: map[string]string{"p": "s1", "q": "s2"}}
+		Spares:  map[string]string{"p": "s1", "q": "s2"},
+		Claimed: []string{"a", "b", "gone"}}
 	s.Reconcile(map[string]string{"a": "running", "b": "terminated", "c": "stopped", "s1": "running"})
 	if len(s.Windows) != 2 || s.Windows[0].RunID != "a" || s.Windows[1].RunID != "c" {
 		t.Fatalf("%+v", s.Windows)
@@ -96,6 +119,9 @@ func TestReconcile(t *testing.T) {
 	}
 	if !reflect.DeepEqual(s.Spares, map[string]string{"p": "s1"}) {
 		t.Fatalf("spares %v", s.Spares)
+	}
+	if !reflect.DeepEqual(s.Claimed, []string{"a"}) {
+		t.Fatalf("claimed %v", s.Claimed)
 	}
 }
 
