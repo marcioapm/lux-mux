@@ -185,3 +185,25 @@ make lint    # gofmt and go vet
 The tests run against a fake luxd (`internal/fakelux`) whose attach
 streams are backed by in-process terminals; the end-to-end test drives
 `luxmux` in a pty with local shells behind it.
+
+## License
+
+lux-mux is source-available under the [Elastic License 2.0](LICENSE) (ELv2).
+Copyright 2026 The lux-mux authors. It is not an OSI-approved open-source license.
+
+Personal use, internal business use, modification, and redistribution are
+permitted subject to the license. For example, using lux-mux as internal
+infrastructure for a noncompeting commercial application is permitted. Providing
+lux-mux to third parties as a hosted or managed service that gives users access
+to a substantial set of its features or functionality is not permitted. For
+example, hosting lux-mux and giving customers access to a substantial set of its
+features as a hosted or managed terminal service falls within this restriction.
+
+ELv2 also prohibits circumventing license-key functionality or removing or
+obscuring licensing, copyright, or other notices. It does not impose a general
+ban on commercial redistribution or selling self-hosted derivatives.
+
+This summary does not change the terms; the full [license](LICENSE) governs.
+Third-party components retain their own licenses. For separate permission to
+provide a hosted or managed service covered by the restriction, contact the
+maintainer.
