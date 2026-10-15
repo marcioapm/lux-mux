@@ -184,7 +184,10 @@ func TestStalePreviewOfShownWindowDoesNotReattach(t *testing.T) {
 // TestStaleShownWindowUnderFloodRefreshBounded: a shown window kept stale
 // by a flood, with notices coming and going and help opened and closed
 // over and over, is attached again at most once per refreshEvery, and
-// every key typed meanwhile reaches its shell, in order.
+// every key typed meanwhile reaches its shell, in order. The flood is
+// paced under lux's restore budget, so every attach here is a refresh:
+// the limit holds from attach to attach, however long a closed stream
+// takes to end.
 func TestStaleShownWindowUnderFloodRefreshBounded(t *testing.T) {
 	var keys inputLog
 	var mu sync.Mutex
@@ -279,6 +282,90 @@ func TestStaleShownWindowUnderFloodRefreshBounded(t *testing.T) {
 		t.Fatalf("keys:\n got %q\nwant %q", k, want.Bytes())
 	}
 	t.Logf("%d reattaches in %v", len(got), elapsed.Round(time.Millisecond))
+	h.detach()
+}
+
+// attachTimes records when each attach to a Run reached lux.
+type attachTimes struct {
+	mu sync.Mutex
+	at map[string][]time.Time
+}
+
+func (a *attachTimes) hook(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.at == nil {
+		a.at = map[string][]time.Time{}
+	}
+	a.at[id] = append(a.at[id], time.Now())
+}
+
+func (a *attachTimes) of(id string) []time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]time.Time{}, a.at[id]...)
+}
+
+// TestRefreshLimitCountsAttachesByLux: a window lux attached again (its
+// stream fell behind) is not refreshed within refreshEvery of that attach,
+// even if it was never refreshed before.
+func TestRefreshLimitCountsAttachesByLux(t *testing.T) {
+	var at attachTimes
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.AttachHook = at.hook })
+	a := h.live(0)
+	h.type_("\x02c")
+	h.live(1)
+	h.lux.FellBehind(a)
+	h.waitFor("attached again", func() bool { return len(at.of(a)) == 2 && h.lux.Streams(a) > 0 })
+	h.overflow(0, a)
+	h.type_("\x020")
+	h.waitFor("refreshed", func() bool { return len(at.of(a)) == 3 })
+	got := at.of(a)
+	if d := got[2].Sub(got[1]); d < refreshEvery {
+		t.Fatalf("refreshed %v after lux's attach", d)
+	}
+	h.detach()
+}
+
+// TestBackToBackDropsBackOff: when lux ends every restore attach at once,
+// luxmux attaches again after Backoff, doubling up to refreshEvery, not
+// every Backoff; once a stream stays up streamStable, the next drop is
+// attached again after Backoff.
+func TestBackToBackDropsBackOff(t *testing.T) {
+	const backoff = 20 * time.Millisecond
+	var at attachTimes
+	h := newHarnessOpts(t, cfgDefault, func(l *fakelux.Server) { l.AttachHook = at.hook }, func(o *Options) {
+		o.Backoff, o.MaxBackoff = backoff, time.Minute
+		o.streamStable = 500 * time.Millisecond
+	})
+	a := h.live(0)
+	n := len(at.of(a))
+	h.lux.FailAttaches(a, fakelux.ErrAttachFellBehind)
+	h.lux.FellBehind(a)
+	time.Sleep(6 * time.Second)
+	got := at.of(a)[n:]
+	// Waits 20, 40, ... 1280 ms, then 2 s: 7 attaches in the first 2.54 s,
+	// one more per 2 s after.
+	if len(got) < 7 || len(got) > 10 {
+		t.Fatalf("%d attaches in 6s, want 7 to 10", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		want := min(backoff<<(i-1), refreshEvery)
+		if d := got[i].Sub(got[i-1]); d < want {
+			t.Fatalf("attach %d came %v after the one before, want at least %v", i, d, want)
+		}
+	}
+	h.lux.FailAttaches(a, "")
+	h.live(0)
+	time.Sleep(600 * time.Millisecond)
+	n = len(at.of(a))
+	dropped := time.Now()
+	h.lux.FellBehind(a)
+	h.waitFor("attached again", func() bool { return len(at.of(a)) > n })
+	if d := at.of(a)[n].Sub(dropped); d > refreshEvery/2 {
+		t.Fatalf("attached again %v after a drop that followed a stable stream", d)
+	}
+	h.live(0)
 	h.detach()
 }
 

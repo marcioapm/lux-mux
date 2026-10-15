@@ -144,16 +144,29 @@ type harness struct {
 	cfg     *config.Config
 	rows    int
 	cols    int
+	// opts changes the Options start gives New.
+	opts func(*Options)
 }
 
 func newHarness(t *testing.T, cfgSrc string, setup func(*fakelux.Server)) *harness {
 	return newHarnessEnv(t, cfgSrc, nil, setup)
 }
 
+// newHarnessOpts is newHarness with opts applied to the Mux's Options.
+func newHarnessOpts(t *testing.T, cfgSrc string, setup func(*fakelux.Server), opts func(*Options)) *harness {
+	t.Helper()
+	return newHarnessFull(t, cfgSrc, nil, setup, opts)
+}
+
 // newHarnessEnv is newHarness with variables Lookup finds from the start.
 func newHarnessEnv(t *testing.T, cfgSrc string, env map[string]string, setup func(*fakelux.Server)) *harness {
 	t.Helper()
-	h := &harness{t: t, lux: fakelux.New(), rows: 24, cols: 80, dir: t.TempDir(), env: map[string]string{}, crashed: make(chan string, 1)}
+	return newHarnessFull(t, cfgSrc, env, setup, nil)
+}
+
+func newHarnessFull(t *testing.T, cfgSrc string, env map[string]string, setup func(*fakelux.Server), opts func(*Options)) *harness {
+	t.Helper()
+	h := &harness{t: t, lux: fakelux.New(), rows: 24, cols: 80, dir: t.TempDir(), env: map[string]string{}, crashed: make(chan string, 1), opts: opts}
 	for k, v := range env {
 		h.env[k] = v
 	}
@@ -187,7 +200,7 @@ func (h *harness) start(sess *state.Session) {
 	pr, pw := io.Pipe()
 	h.keys = pw
 	h.term = newClientTerm(h.rows, h.cols)
-	m, err := New(Options{
+	opt := Options{
 		Session: "s", Config: h.cfg, Lux: cl, StateDir: h.dir,
 		In: pr, Out: h.term, Size: func() (int, int) { return h.rows, h.cols },
 		Lookup: func(k string) (string, bool) {
@@ -206,7 +219,11 @@ func (h *harness) start(sess *state.Session) {
 		},
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond,
 		NoticeFor: 50 * time.Millisecond, RestoreWait: 300 * time.Millisecond, Poll: 50 * time.Millisecond,
-	}, sess)
+	}
+	if h.opts != nil {
+		h.opts(&opt)
+	}
+	m, err := New(opt, sess)
 	if err != nil {
 		h.t.Fatal(err)
 	}

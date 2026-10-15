@@ -427,8 +427,9 @@ func (s *Server) resume(w http.ResponseWriter, req *http.Request) {
 	}
 	s.resumes = append(s.resumes, ResumeReq{RunID: id, Secrets: vals})
 	if !r.run.Resumable {
+		state := r.run.State
 		s.mu.Unlock()
-		writeErr(w, 409, "not_resumable", "run is "+r.run.State)
+		writeErr(w, 409, "not_resumable", "run is "+state)
 		return
 	}
 	var missing []string

@@ -194,11 +194,11 @@ type Window struct {
 	// terminal, or it was not shown then).
 	attachedOnce bool
 	// refreshing: the stream was closed so a new attach with restore
-	// rebuilds a stale emulator. lastRefresh: when that was last done;
-	// refreshDue: one is put off until refreshEvery after it.
-	refreshing  bool
-	refreshDue  bool
-	lastRefresh time.Time
+	// rebuilds a stale emulator. lastAttach: when the stream was last
+	// opened; refreshDue: a refresh is put off until refreshEvery after it.
+	refreshing bool
+	refreshDue bool
+	lastAttach time.Time
 	// resumable: the Run is stopped and r resumes it; resumeAsked: r
 	// was pressed, for the supervisor.
 	resumable   bool

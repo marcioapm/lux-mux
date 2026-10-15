@@ -58,6 +58,10 @@ type Options struct {
 	// Crash reports a panic after the terminal was restored and does not
 	// return (default: print it and exit with status 2).
 	Crash func(msg string)
+	// streamStable: how long a stream must stay up for the backoff after
+	// lux or the network ends one to start again from Backoff (default
+	// 10s). Unexported: only tests change it.
+	streamStable time.Duration
 }
 
 // Mux is one attached session.
@@ -127,6 +131,9 @@ func (o *Options) defaults() {
 	}
 	if o.Crash == nil {
 		o.Crash = defaultCrash
+	}
+	if o.streamStable == 0 {
+		o.streamStable = 10 * time.Second
 	}
 }
 
@@ -484,14 +491,16 @@ func (m *Mux) staleLocked(w *Window, kind paintKind) {
 	}
 }
 
-// refreshEvery is the least time between two refreshes of one window: a
-// window whose output outpaces its emulator goes stale again soon after
-// each, and each costs lux a restore snapshot of up to 4 MiB.
+// refreshEvery is the least time from any attach of a window to a refresh
+// of it: a window whose output outpaces its emulator goes stale again
+// soon after each, and each attach costs lux a restore snapshot of up to
+// 4 MiB.
 const refreshEvery = 2 * time.Second
 
 // refreshLocked closes w's stream so its supervisor attaches again with
 // restore, rebuilding the emulator from the snapshot; within refreshEvery
-// of the last one it is put off until then.
+// of w's last attach it is put off until then. The limit runs from the
+// attach, not from the close: the stream can take a while to end.
 func (m *Mux) refreshLocked(w *Window) {
 	if w.refreshing || w.closed || w.refreshDue {
 		return
@@ -500,7 +509,7 @@ func (m *Mux) refreshLocked(w *Window) {
 	if c == nil {
 		return
 	}
-	if wait := refreshEvery - time.Since(w.lastRefresh); wait > 0 {
+	if wait := refreshEvery - time.Since(w.lastAttach); wait > 0 {
 		w.refreshDue = true
 		time.AfterFunc(wait, func() {
 			defer m.recoverPanic()
@@ -515,7 +524,6 @@ func (m *Mux) refreshLocked(w *Window) {
 		})
 		return
 	}
-	w.lastRefresh = time.Now()
 	w.refreshing = true
 	c.CloseNow()
 }

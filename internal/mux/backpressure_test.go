@@ -279,7 +279,8 @@ func TestStaleFeedQueueDropsData(t *testing.T) {
 }
 
 // TestPreviewOfStaleWindowRefreshes: the chooser's preview of a stale
-// window that is not shown attaches it again.
+// window that is not shown attaches it again; within refreshEvery of the
+// window's last attach, on a tick of the chooser after that.
 func TestPreviewOfStaleWindowRefreshes(t *testing.T) {
 	h := newHarness(t, cfgDefault, nil)
 	a := h.live(0)
@@ -291,6 +292,8 @@ func TestPreviewOfStaleWindowRefreshes(t *testing.T) {
 		t.Fatalf("preview %q", p)
 	}
 	h.waitFor("reattached with restore", func() bool {
+		// The chooser's tick.
+		h.m.Preview(0, 5, 40)
 		as := attachesOf(h.lux, a)
 		return len(as) > before && as[len(as)-1].Restore
 	})

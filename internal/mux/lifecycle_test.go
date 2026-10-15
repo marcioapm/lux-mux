@@ -275,7 +275,7 @@ func TestDeferredRefreshOnlyForTheShownWindow(t *testing.T) {
 	n := len(attachesOf(h.lux, a))
 	due := func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.windows[0].refreshDue }
 	h.m.mu.Lock()
-	h.m.windows[0].lastRefresh = time.Now()
+	h.m.windows[0].lastAttach = time.Now()
 	h.m.mu.Unlock()
 	h.type_("\x020")
 	h.waitScreen("placeholder", h.contains("refreshing its screen"))
@@ -311,7 +311,7 @@ func TestStaleOverlayKeepsPendingSequence(t *testing.T) {
 				// Help closed: the screen is cleared until the refresh.
 				want = "RED"
 				h.m.mu.Lock()
-				h.m.windows[0].lastRefresh = time.Now()
+				h.m.windows[0].lastAttach = time.Now()
 				h.m.mu.Unlock()
 				h.type_("\x02?")
 				h.waitScreen("help", h.contains("luxmux keys"))

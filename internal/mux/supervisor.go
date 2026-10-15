@@ -69,6 +69,9 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 	// and lux's exit-code reason for the same epoch, is the shell's exit:
 	// the shim sends it for any stop of the workload (a move, a timeout).
 	exitedEpoch := 0
+	// dropWait: the wait before attaching again after lux or the network
+	// ended a stream.
+	dropWait := m.opt.Backoff
 	for ctx.Err() == nil {
 		gctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		run, err := m.lux.Get(gctx, w.RunID)
@@ -100,6 +103,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				grow()
 				continue
 			}
+			start := time.Now()
 			end, why := m.attachOnce(ctx, w, run)
 			switch end {
 			case endStopped:
@@ -110,13 +114,22 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				m.setWaiting(w, "shell exited")
 				wait(bo)
 			case endDropped:
-				// Attached and then lost: try again at once, then back off.
 				bo = m.opt.Backoff
 				if m.takeRefreshing(w) {
+					// Closed by refreshLocked, which keeps to refreshEvery.
 					continue
 				}
+				// Ended by lux or the network: attach again after Backoff,
+				// doubling up to refreshEvery (or MaxBackoff if less)
+				// while streams keep ending soon after attaching: a host
+				// that ends every restore attach would otherwise cost it
+				// a snapshot each Backoff.
+				if time.Since(start) >= m.opt.streamStable {
+					dropWait = m.opt.Backoff
+				}
 				m.setWaiting(w, why)
-				wait(bo)
+				wait(dropWait)
+				dropWait = min(2*dropWait, refreshEvery, m.opt.MaxBackoff)
 			default:
 				m.setWaiting(w, why)
 				wait(bo)
@@ -240,6 +253,14 @@ func (m *Mux) resume(w *Window) {
 	w.poke()
 }
 
+// noteAttach records that w's stream was just opened, for refreshLocked's
+// limit.
+func (m *Mux) noteAttach(w *Window) {
+	m.mu.Lock()
+	w.lastAttach = time.Now()
+	m.mu.Unlock()
+}
+
 // takeRefreshing reports (and forgets) that w's stream was closed to
 // rebuild its screen: that stream's end is no news, a failure to attach
 // again is.
@@ -299,6 +320,7 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 		}
 		return endNotAttached, "attach: " + luxapi.Describe(err)
 	}
+	m.noteAttach(w)
 	conn.SetReadLimit(8 << 20)
 	defer func() {
 		w.setConn(nil)
