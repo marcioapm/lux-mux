@@ -33,6 +33,14 @@ are installed with `npm install --global`, as each vendor documents, into
   workload user.
 - **The CLIs are outside the home.** `/opt/npm` belongs to the image, so an
   empty or restored home never loses or shadows them.
+- **Caches are outside the home.** `XDG_CACHE_HOME=/tmp/agent-cache`,
+  `NPM_CONFIG_CACHE=/tmp/agent-cache/npm` and
+  `UV_CACHE_DIR=/tmp/agent-cache/uv` keep npm, uv, pip and other XDG caches
+  in the container's writable layer, which is discarded on stop, instead of
+  in `~/.cache` and `~/.npm`, which the home volume would export and upload
+  on every stop. Agent configuration and sessions (`~/.claude`, `~/.codex`,
+  `~/.local/share/opencode`, `~/.config`) stay in the home. A profile's
+  `env` can point any of these back into the home.
 - **`/.lux`** is lux's and not in the image: the shim at `/.lux/bin/lux-shim`,
   its runtime volume at `/.lux/run`, file secrets on a tmpfs at
   `/.lux/secrets` and service sockets at `/.lux/services`.

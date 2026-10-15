@@ -38,4 +38,15 @@ run bash -lc true
 for a in claude opencode codex; do
 	bash -lc "command -v $a" >/dev/null 2>&1 || fail "$a is not on the login shell's PATH"
 done
+
+# Package-manager caches must stay out of the persisted home, login shell included.
+# shellcheck disable=SC2016 # expanded by the login shell, not here
+for c in 'npm config get cache' 'uv cache dir' 'echo $XDG_CACHE_HOME'; do
+	d=$(bash -lc "$c" 2>/dev/null) || fail "'$c' exited non-zero"
+	case "$d" in
+	"$HOME" | "$HOME"/* | '') fail "'$c' is '$d', want a path outside $HOME" ;;
+	esac
+done
+npm cache verify >/dev/null 2>&1 || fail "npm cache $(npm config get cache) is not usable by $(id -un)"
+[ ! -e "$HOME/.npm" ] && [ ! -e "$HOME/.cache" ] || fail "a cache directory was created under $HOME"
 echo "smoke: PASS"

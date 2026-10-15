@@ -82,6 +82,14 @@ ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_ERROR_REPORTING=1 \
     OPENCODE_DISABLE_AUTOUPDATE=true
 
+# The workload's package-manager caches go outside the home: luxmux snapshots
+# /home/agent on every stop, and wheels or tarballs there would be exported and
+# uploaded each time. Set after the build steps, so /tmp/agent-cache is created
+# by the workload user at run time, not left root-owned by the build.
+ENV XDG_CACHE_HOME=/tmp/agent-cache \
+    NPM_CONFIG_CACHE=/tmp/agent-cache/npm \
+    UV_CACHE_DIR=/tmp/agent-cache/uv
+
 # The release version only labels the image; declared last so it invalidates nothing.
 ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
