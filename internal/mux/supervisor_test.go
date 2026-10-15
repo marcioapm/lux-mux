@@ -547,7 +547,7 @@ func TestRestoreBudgetReattaches(t *testing.T) {
 	h.m.mu.Lock()
 	term := h.lux.Term(id)
 	chunk := bytes.Repeat([]byte("x"), 64<<10)
-	for range fakelux.SnapshotLimit/len(chunk) + 64 {
+	for range fakelux.RestoreBudget/len(chunk) + 64 {
 		term.Output(chunk)
 	}
 	h.m.mu.Unlock()

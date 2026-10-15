@@ -32,11 +32,14 @@ func newTerminal(rows, cols int) *Terminal {
 
 // As lux-shim: a snapshot is at most SnapshotLimit bytes (history lines
 // dropped first; a screen bigger than that alone gets no snapshot); a
-// plain attach misses output past PlainQueue reads queued; a restore
-// attach with more than SnapshotLimit bytes queued is ended (Behind).
+// plain attach misses output past PlainQueue reads queued; every restore
+// attach, with a snapshot or not, is ended (Behind) once its queue would
+// pass RestoreBudget, each read counted as EntryCost more than its length.
 const (
 	SnapshotLimit = 128 * 32 << 10
 	PlainQueue    = 256
+	RestoreBudget = 4 << 20
+	EntryCost     = 64
 )
 
 // Sub is one attach's copy of the terminal's output.
@@ -50,8 +53,11 @@ type Sub struct {
 
 // taken records that the stream sent b.
 func (s *Sub) taken(t *Terminal, b []byte) {
+	if !s.strict {
+		return
+	}
 	t.mu.Lock()
-	s.queued -= len(b)
+	s.queued -= len(b) + EntryCost
 	t.mu.Unlock()
 }
 
@@ -71,7 +77,7 @@ func (t *Terminal) Join(restore bool, rows, cols int) ([]byte, *Sub) {
 			snap = nil
 		}
 	}
-	sub := &Sub{strict: snap != nil, Behind: make(chan struct{})}
+	sub := &Sub{strict: restore, Behind: make(chan struct{})}
 	if sub.strict {
 		sub.C = make(chan []byte, 1<<16)
 	} else {
@@ -98,7 +104,7 @@ func (t *Terminal) Output(p []byte) {
 	t.screen.Write(p)
 	b := append([]byte{}, p...)
 	for sub := range t.subs {
-		if sub.strict && sub.queued+len(b) > SnapshotLimit {
+		if sub.strict && sub.queued+len(b)+EntryCost > RestoreBudget {
 			delete(t.subs, sub)
 			close(sub.Behind)
 			continue
@@ -106,7 +112,7 @@ func (t *Terminal) Output(p []byte) {
 		select {
 		case sub.C <- b:
 			if sub.strict {
-				sub.queued += len(b)
+				sub.queued += len(b) + EntryCost
 			}
 		default:
 			// A plain attach that cannot keep up misses output.
