@@ -442,7 +442,7 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 		// A new placement runs a new shell, which set no keyboard modes.
 		// On the same one the program keeps those it set: the snapshot
 		// does not carry them.
-		w.keyModes.Reset()
+		w.resetKeysLocked()
 	}
 	firstHere := !w.attachedOnce
 	w.attachedOnce = true
@@ -472,13 +472,16 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 
 // outputQuiet feeds w's emulator only: a snapshot being restored off screen.
 func (m *Mux) outputQuiet(w *Window, data []byte) {
+	changed := w.trackKeys(data)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if w.closed {
 		return
 	}
 	w.tail.Add(data)
-	w.keyModes.Write(data)
+	if changed {
+		w.publishKeysLocked()
+	}
 	w.q.push(feedItem{data: data})
 }
 

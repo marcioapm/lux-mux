@@ -205,11 +205,16 @@ type Window struct {
 	resumeAsked bool
 	tail        screen.Tail
 	// keyModes follows the keyboard modes the program set (vterm keeps
-	// none of them), fed the same output as tail.
-	keyModes screen.KeyTracker
-	epoch    int
-	cancel   context.CancelFunc
-	closed   bool
+	// none of them), fed the same output as tail by the stream's reader
+	// under kmMu, off m.mu. keys and altScreen are its state as of the
+	// output queued so far, published under m.mu with that output.
+	kmMu      sync.Mutex
+	keyModes  screen.KeyTracker
+	keys      screen.KeyModes
+	altScreen bool
+	epoch     int
+	cancel    context.CancelFunc
+	closed    bool
 
 	// connMu guards conn and pendingIn: keystrokes typed while the window
 	// has no stream (starting, reconnecting, refreshing), sent in order
@@ -288,6 +293,31 @@ func (w *Window) poke() {
 	case w.notify <- struct{}{}:
 	default:
 	}
+}
+
+// trackKeys feeds output to the key-mode tracker; it reports whether the
+// modes or the screen may have changed (publishKeysLocked is then due).
+// Only the window's stream reader calls it, in stream order.
+func (w *Window) trackKeys(data []byte) bool {
+	w.kmMu.Lock()
+	defer w.kmMu.Unlock()
+	return w.keyModes.Write(data)
+}
+
+// publishKeysLocked makes the tracker's state the one paints use.
+func (w *Window) publishKeysLocked() {
+	w.kmMu.Lock()
+	defer w.kmMu.Unlock()
+	w.keys = w.keyModes.Modes()
+	w.altScreen = w.keyModes.AltScreen()
+}
+
+// resetKeysLocked forgets every key mode: a new program.
+func (w *Window) resetKeysLocked() {
+	w.kmMu.Lock()
+	w.keyModes.Reset()
+	w.kmMu.Unlock()
+	w.keys, w.altScreen = screen.KeyModes{}, false
 }
 
 func (w *Window) setConn(c *websocket.Conn) {

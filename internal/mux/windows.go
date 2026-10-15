@@ -140,7 +140,7 @@ func (m *Mux) relaunch(w *Window) {
 	w.hasScreen = false
 	w.attachedOnce = false
 	w.epoch = 0
-	w.keyModes.Reset()
+	w.resetKeysLocked()
 	w.dropInput()
 	w.steps = progress{}
 	w.steps.note("relaunching")

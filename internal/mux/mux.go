@@ -277,8 +277,11 @@ func (m *Mux) closeFeedLocked(w *Window) {
 
 // output takes a chunk of w's stream: queued for the terminal at once if
 // w is shown, and for its emulator. Neither waits: both queues are bounded
-// by dropping (liveLimit, feedLimit), so the stream is always read.
+// by dropping (liveLimit, feedLimit), so the stream is always read. The
+// key-mode tracker reads the chunk first, under w's own lock; what it
+// found is published with the chunk, so a paint queued after it sees it.
 func (m *Mux) output(w *Window, data []byte) {
+	changed := w.trackKeys(data)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if w.closed {
@@ -288,7 +291,9 @@ func (m *Mux) output(w *Window, data []byte) {
 		m.tw.enqueueLive(data)
 	}
 	w.tail.Add(data)
-	w.keyModes.Write(data)
+	if changed {
+		w.publishKeysLocked()
+	}
 	w.q.push(feedItem{data: data})
 }
 
@@ -401,7 +406,7 @@ func (m *Mux) keyModesLocked(w *Window) screen.KeyModes {
 	if w.phase == phaseDead {
 		return screen.KeyModes{}
 	}
-	return w.keyModes.Modes()
+	return w.keys
 }
 
 // paintLocked queues for the terminal what draw makes from w's emulator,
@@ -448,7 +453,7 @@ func (m *Mux) staleScreenLocked(w *Window, kind paintKind, line string) []byte {
 			b = m.plainOverlay(b, line)
 		}
 	case paintRedraw:
-		b = screen.Blank(b, m.keyModesLocked(w), w.keyModes.AltScreen())
+		b = screen.Blank(b, m.keyModesLocked(w), w.altScreen)
 		if line != "" {
 			b = m.bottomRow(b, line)
 		}
@@ -457,7 +462,7 @@ func (m *Mux) staleScreenLocked(w *Window, kind paintKind, line string) []byte {
 		b = m.bottomRow(b, line)
 		if km := m.keyModesLocked(w); m.promptState == nil && !km.Zero() {
 			// A prompt that closed turned the modes off (askLocked).
-			b = screen.KeysHere(b, km, w.keyModes.AltScreen())
+			b = screen.KeysHere(b, km, w.altScreen)
 		}
 		b = append(b, w.tail.Pending()...)
 	}

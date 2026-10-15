@@ -127,3 +127,60 @@ func TestResetKeyModes(t *testing.T) {
 		t.Errorf("ResetKeysHere left %+v", got)
 	}
 }
+
+// TestKeyTrackerChanged: Write reports a write that set a mode or switched
+// the screen, wherever it was cut, and not one of plain output, SGR or
+// other CSIs; non-private CSIs (skipped fast) hide nothing after them.
+func TestKeyTrackerChanged(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{"plain \x1b[1;31mred\x1b[m \x1b[2J\x1b[10;20H\x1b[?25l\x1b[>c\x1b[?u", false},
+		{"\x1b[38;2;1;2;3m\x1b[>1u", true},
+		{"\x1b[1;31m\x1b[>4;2m", true},
+		{"\x1b[4;2m\x1b[ q", false},
+		{"\x1b[?1049h", true},
+		{"\x1b[<u", true},
+		{"\x1b[=1;2u", true},
+		{"\x1b[>4n", true},
+		{"\x1bc", true},
+	} {
+		for _, n := range []int{1, 3, 1000} {
+			var k KeyTracker
+			got := false
+			for i := 0; i < len(tc.out); i += n {
+				got = k.Write([]byte(tc.out[i:min(i+n, len(tc.out))])) || got
+			}
+			if got != tc.want {
+				t.Errorf("%q in %d-byte writes: changed %v", tc.out, n, got)
+			}
+			if k.Write([]byte("after")) {
+				t.Errorf("%q: changed reported again", tc.out)
+			}
+		}
+	}
+	if got := track("\x1b[1;31m\x1b[>4;2m\x1b[0m\x1b[38;5;1m\x1b[>1u", 1); !sameModes(got, KeyModes{ModifyOtherKeys: 2, Main: Kitty{Flags: 1, Saved: []int{0}}}) {
+		t.Errorf("after SGRs: %+v", got)
+	}
+}
+
+// TestKeysHere: KeysHere leaves the terminal with the window's modes on
+// the screen shown, whatever that screen held.
+func TestKeysHere(t *testing.T) {
+	km := KeyModes{Main: Kitty{Flags: 3, Saved: []int{0, 1}}, Alt: Kitty{Flags: 5, Saved: []int{0}}, ModifyOtherKeys: 2}
+	for _, alt := range []bool{false, true} {
+		pre := "\x1b[>9u\x1b[>9u"
+		if alt {
+			pre = "\x1b[?1049h" + pre
+		}
+		got := keysAfter(pre, KeysHere(nil, km, alt))
+		want, have := km.Main, got.Main
+		if alt {
+			want, have = km.Alt, got.Alt
+		}
+		if !sameModes(KeyModes{Main: have, ModifyOtherKeys: got.ModifyOtherKeys}, KeyModes{Main: want, ModifyOtherKeys: 2}) {
+			t.Errorf("alt %v: %+v", alt, got)
+		}
+	}
+}

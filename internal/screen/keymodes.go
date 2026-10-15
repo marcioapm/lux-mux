@@ -119,6 +119,9 @@ type KeyTracker struct {
 	km  KeyModes
 	alt bool
 	st  int
+	// changed: a sequence that sets a mode or the screen was read since
+	// the last Write returned.
+	changed bool
 	// The CSI being read: its private prefix, intermediate, parameters.
 	prefix byte
 	inter  byte
@@ -181,8 +184,11 @@ func appendModifyOtherKeys(b []byte, km KeyModes) []byte {
 	return b
 }
 
-// Write takes the program's output.
-func (k *KeyTracker) Write(p []byte) {
+// Write takes the program's output. It reports whether p held a sequence
+// that sets a keyboard mode or switches the screen (Modes or AltScreen
+// may differ from before).
+func (k *KeyTracker) Write(p []byte) (changed bool) {
+	defer func() { changed, k.changed = k.changed, false }()
 	for i := 0; i < len(p); i++ {
 		if k.st == kGround {
 			j := bytes.IndexByte(p[i:], 0x1b)
@@ -209,7 +215,7 @@ func (k *KeyTracker) Write(p []byte) {
 				k.st, k.prefix, k.inter, k.params, k.cur, k.seen = kCSI, 0, 0, k.params[:0], 0, false
 			case 'c':
 				// RIS resets the kitty stacks and modifyOtherKeys too.
-				*k = KeyTracker{params: k.params[:0]}
+				*k = KeyTracker{params: k.params[:0], changed: true}
 			default:
 				k.st = kGround
 			}
@@ -217,9 +223,17 @@ func (k *KeyTracker) Write(p []byte) {
 			k.csiByte(c)
 		}
 	}
+	return
 }
 
 func (k *KeyTracker) csiByte(c byte) {
+	if k.prefix == 0 && !k.seen && k.inter == 0 && c >= 0x20 && (c < '<' || c > '?') {
+		// Every sequence tracked starts with a private prefix: the rest
+		// of this CSI (an SGR, a cursor move) holds no ESC and is skipped
+		// in ground state.
+		k.st = kGround
+		return
+	}
 	switch {
 	case c < 0x20:
 		// A C0 control inside a CSI is executed; the CSI goes on.
@@ -279,25 +293,31 @@ func (k *KeyTracker) dispatch(final byte) {
 	switch {
 	case k.prefix == '>' && final == 'u':
 		k.kitty().push(k.arg(0, 0))
+		k.changed = true
 	case k.prefix == '<' && final == 'u':
 		k.kitty().pop(max(k.arg(0, 1), 1))
+		k.changed = true
 	case k.prefix == '=' && final == 'u':
 		k.kitty().set(k.arg(0, 0), k.arg(1, 1))
+		k.changed = true
 	case k.prefix == '>' && final == 'm':
 		// CSI > m resets every modify* resource, CSI > 4 m and
 		// CSI > 4 ; n m modifyOtherKeys.
 		if len(k.params) == 0 || k.params[0] == 4 {
 			k.km.ModifyOtherKeys = k.arg(1, 0)
+			k.changed = true
 		}
 	case k.prefix == '>' && final == 'n':
 		// CSI > 4 n disables modifyOtherKeys.
 		if k.arg(0, -1) == 4 {
 			k.km.ModifyOtherKeys = 0
+			k.changed = true
 		}
 	case k.prefix == '?' && (final == 'h' || final == 'l'):
 		for _, n := range k.params {
 			if n == 1049 || n == 1047 || n == 47 {
 				k.alt = final == 'h'
+				k.changed = true
 			}
 		}
 	}
