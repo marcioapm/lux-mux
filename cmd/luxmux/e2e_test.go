@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,15 +32,32 @@ func TestMain(m *testing.M) {
 			// A fault inside luxmux: looking this secret up panics.
 			lookup = func(k string) (string, bool) {
 				if k == name {
+					if mark := os.Getenv("LUXMUX_E2E_PANIC_MARK"); mark != "" {
+						_ = os.WriteFile(mark, nil, 0o600)
+					}
 					panic("injected: lookup " + k)
 				}
 				return os.LookupEnv(k)
 			}
+			// The exit after the panic report is held back, so anything
+			// still written to the terminal after its Reset shows.
+			stderr = lingerOnPanic{os.Stderr}
 		}
 		main()
 		return
 	}
 	os.Exit(m.Run())
+}
+
+// lingerOnPanic waits a second after writing a panic report.
+type lingerOnPanic struct{ w io.Writer }
+
+func (l lingerOnPanic) Write(p []byte) (int, error) {
+	n, err := l.w.Write(p)
+	if strings.Contains(string(p), "luxmux: panic:") {
+		time.Sleep(time.Second)
+	}
+	return n, err
 }
 
 // screenTerm is the person's terminal: luxmux's output read from the pty
@@ -79,6 +97,9 @@ type proc struct {
 	// raw is everything luxmux wrote.
 	rawMu sync.Mutex
 	raw   []byte
+	// hold, while locked, stops the pty being read: a terminal that takes
+	// nothing.
+	hold sync.Mutex
 }
 
 // queries are what luxmux's UI library asks the terminal at start, and a
@@ -131,6 +152,8 @@ func startLuxmux(t *testing.T, env []string, args string) *proc {
 		var ans answerer
 		buf := make([]byte, 32<<10)
 		for {
+			p.hold.Lock()
+			p.hold.Unlock()
 			n, err := f.Read(buf)
 			if n > 0 {
 				for _, a := range ans.feed(buf[:n]) {
@@ -371,6 +394,8 @@ func TestPanicGivesTerminalBack(t *testing.T) {
 	lux := fakelux.New()
 	defer lux.Close()
 	dir := t.TempDir()
+	// The injected fault creates mark just before it panics.
+	mark := filepath.Join(dir, "panicked")
 	cfgDir := filepath.Join(dir, "config", "luxmux")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -382,6 +407,7 @@ func TestPanicGivesTerminalBack(t *testing.T) {
 		"PATH=" + os.Getenv("PATH"), "TERM=xterm-256color", "HOME=" + dir,
 		"XDG_CONFIG_HOME=" + filepath.Join(dir, "config"), "XDG_STATE_HOME=" + filepath.Join(dir, "state"),
 		"LUX_URL=" + lux.URL, "LUX_API_KEY=lux_test", "TOKEN=v", "LUXMUX_E2E_PANIC_ON=TOKEN",
+		"LUXMUX_E2E_PANIC_MARK=" + mark,
 	}
 	// The submit resolves TOKEN too: the first window's Run is made
 	// before luxmux starts.
@@ -399,12 +425,38 @@ func TestPanicGivesTerminalBack(t *testing.T) {
 	p.wait("attached", func(string) bool { return lux.Streams(run.ID) > 0 })
 	lux.Term(run.ID).Output([]byte("\x1b[?1049h\x1b[?1000h\x1b[?2004hFULL"))
 	p.wait("program on screen", has("FULL"))
+	// The terminal stops reading. Output past what the pty buffers blocks
+	// luxmux's writer, so the program's modes set again, and the repaint
+	// "resuming" queues (which sets them too), are still queued at the
+	// panic; none of it may reach the terminal after its Reset.
+	p.hold.Lock()
+	held := true
+	defer func() {
+		if held {
+			p.hold.Unlock()
+		}
+	}()
+	term := lux.Term(run.ID)
+	line := []byte(strings.Repeat(".", 79) + "\r\n")
+	for range 256 << 10 / len(line) {
+		term.Output(line)
+	}
+	term.Output([]byte("\x1b[?1049h\x1b[?1000h\x1b[?2004hFULL-AGAIN"))
 	lux.LoseSecrets(run.ID)
+	if !fakelux.WaitFor(context.Background(), 15*time.Second, func() bool { _, err := os.Stat(mark); return err == nil }) {
+		t.Fatal("no panic")
+	}
+	p.hold.Unlock()
+	held = false
 	if code := p.exitCode(); code == 0 {
 		t.Fatal("luxmux exited 0 after a panic")
 	}
 	p.restored()
-	if out := p.rawSince(0); !strings.Contains(out, "panic: injected: lookup TOKEN") {
+	out := p.rawSince(0)
+	if !strings.Contains(out, "panic: injected: lookup TOKEN") {
 		t.Fatalf("panic not printed:\n%s", p.scr.text())
+	}
+	if i := strings.LastIndex(out, "\x1b[?1049l"); i < 0 || strings.Contains(out[i:], "\x1b[?1049h") {
+		t.Fatalf("the alternate screen set again after the Reset: %q", out[i:])
 	}
 }

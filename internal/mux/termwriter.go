@@ -34,7 +34,18 @@ type termWriter struct {
 	wake    chan struct{}
 	closed  bool
 	exited  chan struct{}
+
+	// wtok is held (a token in a 1-slot channel) around every write to out,
+	// so kill can wait for a write in flight with a deadline.
+	wtok chan struct{}
+	// dead is closed by kill: nothing more is written.
+	dead     chan struct{}
+	killOnce sync.Once
 }
+
+// writeChunk bounds one write to out: a killed writer stops within one
+// chunk of a write that a slow terminal holds up.
+const writeChunk = 32 << 10
 
 type termItem struct {
 	b    []byte
@@ -59,7 +70,8 @@ const liveLimit = 4 << 20
 
 // newTermWriter makes the writer; the caller runs its run goroutine.
 func newTermWriter(out io.Writer) *termWriter {
-	return &termWriter{out: out, drained: make(chan struct{}), wake: make(chan struct{}, 1), exited: make(chan struct{})}
+	return &termWriter{out: out, drained: make(chan struct{}), wake: make(chan struct{}, 1), exited: make(chan struct{}),
+		wtok: make(chan struct{}, 1), dead: make(chan struct{})}
 }
 
 // enqueue queues b, which the caller no longer changes. It never blocks.
@@ -179,11 +191,15 @@ func (t *termWriter) run() {
 		t.mu.Unlock()
 		b := it.b
 		if it.s != nil {
-			<-it.s.done
-			b = it.s.b
+			select {
+			case <-it.s.done:
+				b = it.s.b
+			case <-t.dead:
+				return
+			}
 		}
-		if len(b) > 0 {
-			_, _ = t.out.Write(b)
+		if !t.write(b) {
+			return
 		}
 		t.mu.Lock()
 		if it.s == nil {
@@ -196,6 +212,56 @@ func (t *termWriter) run() {
 		}
 		t.mu.Unlock()
 	}
+}
+
+// write writes b to out in chunks of writeChunk, each under wtok; it stops,
+// returning false, once kill has run.
+func (t *termWriter) write(b []byte) bool {
+	for len(b) > 0 {
+		n := min(len(b), writeChunk)
+		select {
+		case t.wtok <- struct{}{}:
+		case <-t.dead:
+			return false
+		}
+		select {
+		case <-t.dead:
+			<-t.wtok
+			return false
+		default:
+		}
+		_, _ = t.out.Write(b[:n])
+		<-t.wtok
+		b = b[n:]
+	}
+	select {
+	case <-t.dead:
+		return false
+	default:
+		return true
+	}
+}
+
+// kill stops the writer for good: whatever is queued, and every slot not
+// yet written, is discarded. It waits at most d for a write already in
+// flight, then calls last with out, which nothing else writes to again.
+func (t *termWriter) kill(d time.Duration, last func(io.Writer)) {
+	t.killOnce.Do(func() {
+		t.mu.Lock()
+		close(t.dead)
+		t.closed = true
+		clear(t.q)
+		t.q, t.n, t.live, t.behind = nil, 0, 0, false
+		close(t.drained)
+		t.drained = make(chan struct{})
+		t.mu.Unlock()
+		t.signal()
+		select {
+		case t.wtok <- struct{}{}:
+		case <-time.After(d):
+		}
+		last(t.out)
+	})
 }
 
 // close writes what is queued, waiting at most d for the terminal, and

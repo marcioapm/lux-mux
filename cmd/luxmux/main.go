@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/marcioapm/lux/api"
@@ -14,8 +15,12 @@ import (
 	"github.com/marcioapm/lux-mux/internal/ui"
 )
 
-// lookup finds secret values; the end-to-end test replaces it.
-var lookup = os.LookupEnv
+// lookup finds secret values and stderr takes luxmux's messages; the
+// end-to-end test replaces both.
+var (
+	lookup           = os.LookupEnv
+	stderr io.Writer = os.Stderr
+)
 
 func main() {
 	cfgPath, err := config.Path()
@@ -29,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 	os.Exit(cli.Main(cli.Env{
-		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: stderr,
 		Lux:        api.LoadConfig,
 		ConfigPath: cfgPath, StateDir: stateDir,
 		Lookup: lookup,

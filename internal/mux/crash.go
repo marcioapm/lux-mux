@@ -2,8 +2,10 @@ package mux
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/marcioapm/lux-mux/internal/screen"
 )
@@ -32,20 +34,18 @@ func (m *Mux) recoverPanic() {
 	}
 }
 
-// crash is the single way out after a panic: the terminal is given back
-// as it was found (main screen, the modes a program set off, the cursor
-// shown in its default shape), written past the queue in case the
-// queue's writer is what failed, then Options.Crash reports the panic and
-// exits non-zero.
+// crash is the single way out after a panic. The writer is stopped and its
+// queue and pending slots discarded first, so nothing queued before the
+// panic reaches the terminal after the Reset; then the terminal is given
+// back as it was found (main screen, the modes a program set off, the
+// cursor shown in its default shape), and Options.Crash reports the panic
+// and exits non-zero.
 func (m *Mux) crash(v any, stack []byte) {
 	m.crashOnce.Do(func() {
-		m.tw.mu.Lock()
-		m.tw.closed = true
-		m.tw.mu.Unlock()
-		func() {
+		m.tw.kill(time.Second, func(out io.Writer) {
 			defer func() { _ = recover() }()
-			_, _ = m.opt.Out.Write(screen.Reset([]byte{0x18}))
-		}()
+			_, _ = out.Write(screen.Reset([]byte{0x18}))
+		})
 		m.opt.Crash(fmt.Sprintf("luxmux: panic: %v\n\n%s", v, stack))
 	})
 }

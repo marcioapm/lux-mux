@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/screen"
 )
 
 // attachesOf are the attach requests for one Run.
@@ -433,6 +434,18 @@ func TestPanicRestoresTerminal(t *testing.T) {
 	id := h.live(0)
 	h.lux.Term(id).Output([]byte("\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?25l\x1b=\x1b[5 q"))
 	h.waitFor("program's modes on", func() bool { return h.term.altScreen() && h.term.mode(1000) && h.term.mode(2004) })
+	h.m.mu.Lock()
+	w := h.m.windows[0]
+	h.m.mu.Unlock()
+	// The emulator held: the repaint "resuming" queues waits in its slot
+	// until after the panic, and would put the program's modes back.
+	w.emuMu.Lock()
+	held := true
+	defer func() {
+		if held {
+			w.emuMu.Unlock()
+		}
+	}()
 	h.envMu.Lock()
 	h.panicOn = "API_TOKEN"
 	h.envMu.Unlock()
@@ -445,6 +458,20 @@ func TestPanicRestoresTerminal(t *testing.T) {
 	}
 	if !strings.Contains(msg, "panic: injected: lookup API_TOKEN") || !strings.Contains(msg, "resumeRun") {
 		t.Fatalf("crash message %q", msg)
+	}
+	w.emuMu.Unlock()
+	held = false
+	// The repaint is made now; give the writer time to (wrongly) write it.
+	w.withEmu(func(*vtermT) {})
+	select {
+	case <-h.m.tw.exited:
+	case <-timeout():
+		t.Fatal("the writer did not stop")
+	}
+	raw := h.term.rawBytes()
+	if reset := screen.Reset([]byte{0x18}); !bytes.HasSuffix(raw, reset) {
+		i := bytes.LastIndex(raw, reset)
+		t.Fatalf("written after the Reset: %q", raw[max(i, 0):])
 	}
 	if h.term.altScreen() || h.term.mode(1000) || h.term.mode(2004) || !h.term.mode(25) {
 		t.Fatalf("terminal not restored: alt %v mouse %v paste %v cursor %v",
