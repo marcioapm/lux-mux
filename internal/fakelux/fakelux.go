@@ -73,6 +73,41 @@ type Server struct {
 	// GetHook, if set (SetGetHook), runs before each GET of a Run is
 	// answered.
 	GetHook func(runID string)
+	// ResumeHook, if set, runs before each resume request is handled.
+	ResumeHook func(runID string)
+	// TerminateHook, if set, runs before each terminate request is
+	// handled.
+	TerminateHook func(runID string)
+
+	// failing: every attach to the Run is ended with this error as its
+	// first frame (FailAttaches).
+	failing map[string]string
+	// reqs are the requests received, "METHOD path" as sent.
+	reqs []string
+}
+
+// FailAttaches makes every attach to Run id end at once, its first frame
+// the error msg, as luxd does for a host that went away between the
+// upgrade and the stream; msg "" lets attaches through again.
+func (s *Server) FailAttaches(id, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failing == nil {
+		s.failing = map[string]string{}
+	}
+	if msg == "" {
+		delete(s.failing, id)
+	} else {
+		s.failing[id] = msg
+	}
+}
+
+// Requests are the requests received, as "METHOD path" with the path as
+// the client sent it.
+func (s *Server) Requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.reqs)
 }
 
 // SetGetHook sets GetHook while the server is serving.
@@ -117,7 +152,12 @@ func New() *Server {
 	mux.HandleFunc("GET /v1/runs/{id}/attach", s.attach)
 	mux.HandleFunc("GET /v1/events", s.feed)
 	mux.HandleFunc("GET /v1/pools", s.listPools)
-	s.Server = httptest.NewServer(mux)
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		s.mu.Lock()
+		s.reqs = append(s.reqs, req.Method+" "+req.URL.EscapedPath())
+		s.mu.Unlock()
+		mux.ServeHTTP(w, req)
+	}))
 	return s
 }
 
@@ -332,6 +372,12 @@ func (s *Server) get(w http.ResponseWriter, req *http.Request) {
 func (s *Server) terminate(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	s.mu.Lock()
+	thook := s.TerminateHook
+	s.mu.Unlock()
+	if thook != nil {
+		thook(id)
+	}
+	s.mu.Lock()
 	r := s.runs[id]
 	if r == nil {
 		s.mu.Unlock()
@@ -365,6 +411,12 @@ func (s *Server) resume(w http.ResponseWriter, req *http.Request) {
 	vals := map[string]string{}
 	for _, sec := range body.Secrets {
 		vals[sec.Name] = sec.Value
+	}
+	s.mu.Lock()
+	hook := s.ResumeHook
+	s.mu.Unlock()
+	if hook != nil {
+		hook(id)
 	}
 	s.mu.Lock()
 	r := s.runs[id]
@@ -437,6 +489,7 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	t := r.term
 	noRestore, noSnapshot := s.NoRestore, s.NoSnapshot
 	hook := s.AttachHook
+	fail, failing := s.failing[id]
 	s.mu.Unlock()
 	if hook != nil {
 		hook(id)
@@ -448,6 +501,11 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 	}
 	ws.SetReadLimit(4 << 20)
 	defer ws.CloseNow()
+	if failing {
+		_ = wsjson.Write(req.Context(), ws, api.StreamData{Error: fail})
+		_ = ws.Close(websocket.StatusNormalClosure, "")
+		return
+	}
 	s.mu.Lock()
 	r.conns[ws] = true
 	s.mu.Unlock()

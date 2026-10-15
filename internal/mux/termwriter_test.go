@@ -117,6 +117,73 @@ func waitUntil(cond func() bool) bool {
 	return false
 }
 
+// written is everything g was given, joined.
+func (g *gateOut) written() []byte {
+	return bytes.Join(g.got(), nil)
+}
+
+// TestLiveOverflowKeepsOtherOutput: live output past liveLimit is dropped,
+// but what else was queued between it (a repaint, a prompt) is written,
+// in order, and caughtUp runs once the terminal took it.
+func TestLiveOverflowKeepsOtherOutput(t *testing.T) {
+	g := &gateOut{entered: make(chan struct{}), open: make(chan struct{})}
+	tw := newTermWriter(g)
+	caught := make(chan struct{}, 1)
+	tw.caughtUp = func() {
+		tw.caughtUpDone()
+		caught <- struct{}{}
+	}
+	go tw.run()
+	tw.enqueue([]byte("first|"))
+	<-g.entered
+	tw.enqueueLive(bytes.Repeat([]byte("L"), 3<<20))
+	tw.enqueue([]byte("PAINT|"))
+	s := tw.slot()
+	tw.enqueueLive(bytes.Repeat([]byte("M"), 2<<20))
+	if !tw.isBehind() {
+		t.Fatal("not behind past liveLimit")
+	}
+	s.fill([]byte("SLOT|"))
+	close(g.open)
+	select {
+	case <-caught:
+	case <-timeout():
+		t.Fatal("caughtUp did not run")
+	}
+	if got := string(g.written()); got != "first|PAINT|SLOT|" {
+		t.Fatalf("written %d bytes: %.40q", len(got), got)
+	}
+	tw.close(time.Second)
+}
+
+// TestDialogWriteWaitsForTerminal: a dialog's Write returns only once no
+// more than liveLimit waits for the terminal.
+func TestDialogWriteWaitsForTerminal(t *testing.T) {
+	g := &gateOut{entered: make(chan struct{}), open: make(chan struct{})}
+	tw := newTermWriter(g)
+	go tw.run()
+	tw.enqueue([]byte("first"))
+	<-g.entered
+	tw.enqueue(bytes.Repeat([]byte("q"), liveLimit+1))
+	done := make(chan struct{})
+	go func() {
+		_, _ = tw.Write([]byte("dialog"))
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Write returned with more than liveLimit queued")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(g.open)
+	select {
+	case <-done:
+	case <-timeout():
+		t.Fatal("Write did not return once the terminal took the queue")
+	}
+	tw.close(time.Second)
+}
+
 // TestKillStopsLongWrite: a large item being written when kill runs stops
 // at the next writeChunk boundary.
 func TestKillStopsLongWrite(t *testing.T) {

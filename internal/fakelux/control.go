@@ -127,6 +127,26 @@ func (s *Server) SetState(id, state, reason string) {
 	s.setStage(r, state)
 }
 
+// Forget removes the Run, as lux does once a Run's record is deleted: its
+// streams end and every request about it is answered 404.
+func (s *Server) Forget(id string) {
+	s.mu.Lock()
+	r := s.runs[id]
+	delete(s.runs, id)
+	s.order = slices.DeleteFunc(s.order, func(x string) bool { return x == id })
+	var t *Terminal
+	if r != nil {
+		for c := range r.conns {
+			c.CloseNow()
+		}
+		t = r.term
+	}
+	s.mu.Unlock()
+	if t != nil {
+		t.Exit()
+	}
+}
+
 // Term is the Run's current terminal (nil when it has none).
 func (s *Server) Term(id string) *Terminal {
 	s.mu.Lock()

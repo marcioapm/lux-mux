@@ -112,6 +112,17 @@ func TestChooserFilter(t *testing.T) {
 	if v := c.Visible(); len(v) != 1 || v[0].Name != "build" {
 		t.Fatalf("state filter: %+v", v)
 	}
+	// Case-insensitive, and the repository is searched too.
+	c = NewChooser(host(), 24, 100)
+	keys(c, "/", "E", "D", "I", "T")
+	if v := c.Visible(); len(v) != 1 || v[0].Name != "editor" {
+		t.Fatalf("filter EDIT: %+v", v)
+	}
+	c = NewChooser(host(), 24, 100)
+	keys(c, "/", "l", "i", "b")
+	if v := c.Visible(); len(v) != 1 || v[0].Name != "build" {
+		t.Fatalf("filter by repository: %+v", v)
+	}
 }
 
 func TestChooserRenameKillClose(t *testing.T) {
@@ -177,6 +188,19 @@ func TestDialogValuesProfile(t *testing.T) {
 	v.CPUs = "lots"
 	if _, err := v.Profile(base, false); err == nil {
 		t.Fatal("bad cpus accepted")
+	}
+	for _, c := range []string{"0", "-2"} {
+		v.CPUs = c
+		if _, err := v.Profile(base, false); err == nil {
+			t.Fatalf("cpus %s accepted", c)
+		}
+	}
+	v.CPUs, v.Disk = "2", " 20Gi "
+	if p, err := v.Profile(base, false); err != nil || p.Disk != "20Gi" {
+		t.Fatalf("disk %q, %v", p.Disk, err)
+	}
+	if p, err := v.Profile(base, true); err != nil || p.Disk != "" {
+		t.Fatalf("disk on a shaped pool %q, %v", p.Disk, err)
 	}
 	v.CPUs, v.Image = "", ""
 	if _, err := v.Profile(base, false); err == nil {

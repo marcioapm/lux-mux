@@ -46,6 +46,8 @@ func TestPrefixEncoded(t *testing.T) {
 		{"unbound after prefix dropped", pfx, []string{"\x1b[98;5u\x1b[122u", "q"}, []any{"q"}},
 		{"Alt-b is not C-b", pfx, []string{"\x1b[98;3u"}, []any{"\x1b[98;3u"}},
 		{"Super-b is not C-b", pfx, []string{"\x1b[98;9u"}, []any{"\x1b[98;9u"}},
+		// CSI n ; mods ; code ~ is modifyOtherKeys only with n = 27.
+		{"other ~ key is not modifyOtherKeys", pfx, []string{"\x1b[28;5;98~"}, []any{"\x1b[28;5;98~"}},
 		{"a repeat after the prefix waits", pfx, []string{"\x1b[98;5:1u\x1b[98;5:2u\x1b[100u"}, []any{cmd(config.OpDetach)}},
 	}
 	for _, c := range cases {

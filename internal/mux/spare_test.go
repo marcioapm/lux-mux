@@ -298,6 +298,12 @@ func TestSpareSubmitWhenSessionEnds(t *testing.T) {
 	if st := h.lux.Run(spare).State; st != "terminated" {
 		t.Fatalf("the spare submitted while the session ended is %s", st)
 	}
+	// The slot reserved while it was submitted names no Run to terminate.
+	for _, r := range h.lux.Requests() {
+		if strings.HasPrefix(r, "POST /v1/runs//") {
+			t.Fatalf("request %q", r)
+		}
+	}
 }
 
 // TestSpareSubmitWhenDetached: a detach waits for a spare submit in

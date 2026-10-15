@@ -24,6 +24,8 @@ func TestTailPending(t *testing.T) {
 		{"csi substituted", []string{"\x1b[3\x1a"}, ""},
 		{"mid osc", []string{"\x1b]0;t"}, "\x1b]0;t"},
 		{"osc bel", []string{"\x1b]0;t\x07"}, ""},
+		{"osc cancelled", []string{"\x1b]0;t\x18"}, ""},
+		{"osc substituted", []string{"\x1b]0;t\x1a"}, ""},
 		{"osc st", []string{"\x1b]0;t\x1b\\"}, ""},
 		{"mid dcs", []string{"\x1bPq#0"}, "\x1bPq#0"},
 		{"charset", []string{"\x1b("}, "\x1b("},
