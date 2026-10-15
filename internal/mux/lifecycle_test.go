@@ -224,11 +224,12 @@ func TestEndedWindowReadsKeysPlain(t *testing.T) {
 }
 
 // TestReleasesDoNotCloseHelp: the releases of C-b and ? (kitty's report
-// event types), read after help opened, do not close it.
+// event types), read after help opened, go to the help and do not close
+// it.
 func TestReleasesDoNotCloseHelp(t *testing.T) {
 	h := newHarness(t, cfgDefault, nil)
 	h.live(0)
-	helpOn := func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.help }
+	helpOn := h.helpOn
 	h.type_("\x1b[98;5:1u\x1b[63;2:1u")
 	h.waitFor("help", helpOn)
 	h.type_("\x1b[63;2:3u")

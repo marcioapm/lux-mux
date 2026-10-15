@@ -128,6 +128,26 @@ func TestKeysAfterDialogKeyGoToDialog(t *testing.T) {
 	h.detach()
 }
 
+// TestKeysAfterHelpKeyGoToHelp: bytes typed in the same read after C-b ?
+// are the help's, and keys after it closes are the shell's again.
+func TestKeysAfterHelpKeyGoToHelp(t *testing.T) {
+	var keys inputLog
+	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook })
+	ui := h.m.opt.UI.(*fakeUI)
+	a := h.live(0)
+	h.type_("\x02?/detx")
+	h.waitScreen("help closed", func(s string) bool { return !strings.Contains(s, "HELP-OPEN") })
+	h.type_("after\r")
+	h.waitFor("after reached the shell", func() bool { return bytes.Contains(keys.of(a), []byte("after")) })
+	if _, got := ui.helpState(); string(got) != "/detx" {
+		t.Fatalf("help read %q", got)
+	}
+	if got := keys.of(a); bytes.Contains(got, []byte("det")) {
+		t.Fatalf("shell got %q", got)
+	}
+	h.detach()
+}
+
 // TestLiveOutputExact: the shown window's output reaches the terminal as
 // the exact bytes of its frames, nothing added before, between or after.
 func TestLiveOutputExact(t *testing.T) {

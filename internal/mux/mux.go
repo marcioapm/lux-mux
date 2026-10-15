@@ -22,12 +22,13 @@ import (
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
-// UI runs the full-screen dialogs (the chooser and the new-window
-// dialog). They own the terminal while open. Nil: those keys show a
+// UI runs the full-screen dialogs (the chooser, the new-window dialog and
+// the key help). They own the terminal while open. Nil: those keys show a
 // notice instead.
 type UI interface {
 	Choose(m *Mux) (ChooseResult, error)
 	NewDialog(m *Mux) (*NewWindowRequest, error)
+	Help(m *Mux) error
 }
 
 // Options configure a Mux.
@@ -87,13 +88,12 @@ type Mux struct {
 	notice    string
 	noticeGen int
 	byRun     map[string]*Window
-	// promptState is the open prompt; help: the key help is shown.
+	// promptState is the open prompt.
 	promptState *prompt
-	help        bool
 	// shown is the window whose screen the terminal shows, painted and
 	// followed by its live output since (nil: luxmux's own screen, or a
-	// window with none). Help and dialogs drawn over it leave it set:
-	// closing them redraws it.
+	// window with none). Dialogs drawn over it leave it set: closing them
+	// redraws it.
 	shown *Window
 	// ending: the last window closed; spares submitted from now on are
 	// terminated, not recorded.
@@ -308,9 +308,9 @@ func (m *Mux) terminalCaughtUp() {
 }
 
 // showingLocked reports whether w's output goes to the terminal now: it is
-// the active window and no dialog or help owns the terminal.
+// the active window and no dialog owns the terminal.
 func (m *Mux) showingLocked(w *Window) bool {
-	return !m.suspended && !m.help && m.activeLocked() == w
+	return !m.suspended && m.activeLocked() == w
 }
 
 func (m *Mux) activeLocked() *Window {
@@ -344,7 +344,7 @@ const (
 	// with restore (refreshLocked).
 	paintShow paintKind = iota
 	// paintRedraw: the shown window is drawn again after the terminal
-	// missed some of its output (help or a dialog drew over it, the
+	// missed some of its output (a dialog drew over it, the
 	// terminal fell behind) or resized. A stale window is cleared and
 	// attached again with restore, which repaints it from the snapshot.
 	paintRedraw
@@ -367,7 +367,7 @@ func (m *Mux) overlayGoneLocked() { m.paintActiveLocked(paintOverlay) }
 // painted as paintShow whatever kind says.
 func (m *Mux) paintActiveLocked(kind paintKind) {
 	w := m.activeLocked()
-	if w == nil || m.suspended || m.help {
+	if w == nil || m.suspended {
 		return
 	}
 	line := m.overlayLineLocked(w)

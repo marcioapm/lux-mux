@@ -189,7 +189,7 @@ func (h *harness) start(sess *state.Session) {
 	h.term = newClientTerm(h.rows, h.cols)
 	m, err := New(Options{
 		Session: "s", Config: h.cfg, Lux: cl, StateDir: h.dir,
-		In: pr, Out: h.term, Size: func() (int, int) { return h.rows, h.cols },
+		In: pr, Out: h.term, Size: func() (int, int) { return h.rows, h.cols }, UI: &fakeUI{choose: -1},
 		Lookup: func(k string) (string, bool) {
 			h.envMu.Lock()
 			defer h.envMu.Unlock()

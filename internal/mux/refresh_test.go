@@ -247,9 +247,9 @@ func TestStaleShownWindowUnderFloodRefreshBounded(t *testing.T) {
 	for i := 0; time.Since(start) < 5*time.Second; i++ {
 		if i%10 == 0 {
 			h.type_("\x02?")
-			h.waitFor("help", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return h.m.help })
+			h.waitFor("help", h.helpOn)
 			h.type_("x")
-			h.waitFor("help closed", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return !h.m.help })
+			h.waitFor("help closed", func() bool { return !h.helpOn() })
 		}
 		s := fmt.Sprintf("k%03d,", i)
 		want.WriteString(s)
