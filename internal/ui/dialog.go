@@ -650,7 +650,7 @@ func (d *Dialog) helpLine() string {
 	if innerWidth(d.cols) < 72 {
 		return "tab/↑↓ move · enter open · ctrl-s create · esc cancel"
 	}
-	return "tab/↓ next · ⇧tab/↑ prev · enter open · space toggle · ctrl-s create · esc cancel"
+	return "tab/↓ ⇧tab/↑ move · enter open · space toggle · ctrl-s create · esc cancel"
 }
 
 // fieldLines are the form's lines, and for each stop the range of lines
