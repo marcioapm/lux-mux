@@ -179,12 +179,16 @@ and lux's snapshot rebuilds its screen. A stream that lux or the network
 ends is attached again after 250 ms; while streams keep ending within 10 s
 of attaching, that wait doubles, up to 2 s. A notice or prompt over the
 window you are looking at is drawn and erased on the bottom row only: your
-terminal has received all of its output anyway. Keys typed while a window's
-stream is down (a refresh, a reconnect) are kept, up to 64 KiB per window,
-and sent in order once it is up again; past that the oldest are dropped,
-with a notice. Keys kept while the Run moves to a new placement were meant
-for the old shell: they are discarded, with a notice, not typed into the
-fresh one.
+terminal has received all of its output anyway. Each window has one writer
+of keys, so they reach the shell in the order typed. Keys typed while a
+window's stream is down (a refresh, a reconnect) are kept, up to 64 KiB per
+window, and sent in order once it is up again; past that the oldest are
+dropped, with a notice. A refresh closes the stream with the websocket close
+handshake, so keys sent before it arrive exactly once. When lux or the
+network ends a stream, keys already sent on it but not yet read by lux can
+be lost: the stream has no acknowledgement. Keys kept while the Run moves to
+a new placement were meant for the old shell: they are discarded, with a
+notice, not typed into the fresh one.
 
 If your terminal (or the link to it) cannot keep up, up to 4 MiB of the
 shown window's output waits for it; past that, luxmux drops what waits

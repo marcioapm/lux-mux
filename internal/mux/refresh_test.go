@@ -517,7 +517,7 @@ func TestKeysTypedDuringReconnectBounded(t *testing.T) {
 		h.m.mu.Unlock()
 		w.connMu.Lock()
 		defer w.connMu.Unlock()
-		return bytes.Equal(w.pendingIn, want)
+		return bytes.Equal(w.in, want)
 	})
 	h.waitScreen("dropped notice", h.contains("typed bytes dropped"))
 	gate.release(a)
@@ -528,12 +528,12 @@ func TestKeysTypedDuringReconnectBounded(t *testing.T) {
 	h.detach()
 }
 
-// pending is what is kept for window i's next stream.
+// pending is what is queued for window i's stream and not yet written.
 func (h *harness) pending(i int) []byte {
 	w := h.win(i)
 	w.connMu.Lock()
 	defer w.connMu.Unlock()
-	return append([]byte{}, w.pendingIn...)
+	return append([]byte{}, w.in...)
 }
 
 // TestKeysTypedBeforeAMoveAreDiscarded: keys typed while the Run moves

@@ -96,7 +96,7 @@ func TestRelaunchSendsNoKeysOfTheOldRun(t *testing.T) {
 	h.waitScreen("ended", h.contains("r relaunch"))
 	w := h.win(0)
 	w.connMu.Lock()
-	w.pendingIn = []byte("old-run-keys")
+	w.in = []byte("old-run-keys")
 	w.connMu.Unlock()
 	h.type_("r")
 	h.waitFor("relaunched", func() bool { return h.window(0) != "" && h.window(0) != a })
@@ -134,9 +134,9 @@ func TestKeysOnAFailedWriteAreKept(t *testing.T) {
 	h.detach()
 }
 
-// TestKeysKeptWhenGoLiveFails: a new stream whose first write fails keeps
-// the keys it was to send, in order, for the stream after it.
-func TestKeysKeptWhenGoLiveFails(t *testing.T) {
+// TestKeysKeptWhenFirstWriteFails: a new stream whose first write fails
+// keeps the queued keys, in order, for the stream after it.
+func TestKeysKeptWhenFirstWriteFails(t *testing.T) {
 	var keys inputLog
 	var gate attachGate
 	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook; l.AttachHook = gate.hook })
@@ -151,8 +151,8 @@ func TestKeysKeptWhenGoLiveFails(t *testing.T) {
 	h.m.mu.Lock()
 	ep := w.epoch
 	h.m.mu.Unlock()
-	if _, err := h.m.goLive(h.m.ctx, w, closedConn(t), ep); err == nil {
-		t.Fatal("a write on a closed stream succeeded")
+	if n := w.setStream(closedConn(t), ep); n != 0 {
+		t.Fatalf("%d bytes discarded on the same epoch", n)
 	}
 	h.type_(",k3")
 	h.waitFor("all kept", func() bool { return string(h.pending(0)) == "k1,k2,k3" })

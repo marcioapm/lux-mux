@@ -216,16 +216,23 @@ type Window struct {
 	cancel    context.CancelFunc
 	closed    bool
 
-	// connMu guards conn and pendingIn: keystrokes typed while the window
-	// has no stream (starting, reconnecting, refreshing), sent in order
-	// once one is up (see send). inEpoch is the Run epoch of the last
-	// stream made live; pendingEpoch the one pendingIn was typed for (0:
+	// connMu guards the stream and the window's input queue. in holds the
+	// keystrokes typed for the window and not yet written, in order: the
+	// input loop appends (send); the window's key writer alone writes
+	// them and removes bytes only once their write succeeded. inFlight is
+	// how many bytes at its head are being written (trimming spares
+	// them); inGen changes whenever the queue is discarded, so a write in
+	// flight then removes nothing. inEpoch is the Run epoch of the last
+	// stream made live, the shell every queued key was typed for (0:
 	// before any stream in this process).
-	connMu       sync.Mutex
-	conn         *websocket.Conn
-	pendingIn    []byte
-	inEpoch      int
-	pendingEpoch int
+	connMu   sync.Mutex
+	conn     *websocket.Conn
+	in       []byte
+	inFlight int
+	inGen    int
+	inEpoch  int
+	inWake   chan struct{}
+	inStop   chan struct{}
 
 	// The emulator is written by its feeder goroutine and read by
 	// previews, both under emuMu.
@@ -246,8 +253,11 @@ func (m *Mux) newWindow(name, profile string, spec config.Profile) *Window {
 	w := &Window{m: m, Name: name, Profile: profile, Spec: spec, created: time.Now(),
 		emu:    newEmulator(m.rows, m.cols),
 		q:      &feedQueue{wake: make(chan struct{}, 1)},
-		notify: make(chan struct{}, 1)}
+		notify: make(chan struct{}, 1),
+		inWake: make(chan struct{}, 1),
+		inStop: make(chan struct{})}
 	m.goSafe(w.feeder)
+	m.goSafe(func() { m.keyWriter(w) })
 	return w
 }
 
@@ -318,12 +328,6 @@ func (w *Window) resetKeysLocked() {
 	w.keyModes.Reset()
 	w.kmMu.Unlock()
 	w.keys, w.altScreen = screen.KeyModes{}, false
-}
-
-func (w *Window) setConn(c *websocket.Conn) {
-	w.connMu.Lock()
-	w.conn = c
-	w.connMu.Unlock()
 }
 
 func (w *Window) getConn() *websocket.Conn {

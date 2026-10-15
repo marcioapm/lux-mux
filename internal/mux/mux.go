@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/marcioapm/lux/api"
 	"github.com/marcioapm/lux/vterm"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -63,6 +66,9 @@ type Options struct {
 	// lux or the network ends one to start again from Backoff (default
 	// 10s). Unexported: only tests change it.
 	streamStable time.Duration
+	// writeKeys writes one message of keystrokes to a stream (default
+	// wsjson.Write). Unexported: only tests change it.
+	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
 }
 
 // Mux is one attached session.
@@ -134,6 +140,11 @@ func (o *Options) defaults() {
 	}
 	if o.streamStable == 0 {
 		o.streamStable = 10 * time.Second
+	}
+	if o.writeKeys == nil {
+		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
+			return wsjson.Write(ctx, c, d)
+		}
 	}
 }
 
@@ -279,6 +290,7 @@ func (m *Mux) closeFeedLocked(w *Window) {
 	if !w.closed {
 		w.closed = true
 		w.q.close()
+		close(w.inStop)
 	}
 }
 
@@ -525,7 +537,24 @@ func (m *Mux) refreshLocked(w *Window) {
 		return
 	}
 	w.refreshing = true
-	c.CloseNow()
+	m.refreshStream(c)
+}
+
+// closeGrace bounds refreshStream's handshake.
+const closeGrace = time.Second
+
+// refreshStream ends a stream that is still up with the websocket close
+// handshake, not CloseNow: CloseNow resets the connection, and lux then
+// loses keystrokes it received but had not read yet. With the handshake
+// lux reads every message written before the close frame, and a key write
+// after it fails, so the keys stay queued for the next stream. A peer
+// that does not answer within closeGrace is cut off. It does not wait.
+func (m *Mux) refreshStream(c *websocket.Conn) {
+	t := time.AfterFunc(closeGrace, func() { c.CloseNow() })
+	m.goSafe(func() {
+		_ = c.Close(websocket.StatusNormalClosure, "")
+		t.Stop()
+	})
 }
 
 // selectLocked makes window i the active one and repaints.

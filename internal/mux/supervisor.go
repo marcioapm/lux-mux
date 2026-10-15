@@ -323,17 +323,10 @@ func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEn
 	m.noteAttach(w)
 	conn.SetReadLimit(8 << 20)
 	defer func() {
-		w.setConn(nil)
+		w.endStream(conn)
 		conn.CloseNow()
 	}()
-	discarded, err := m.goLive(ctx, w, conn, run.Epoch)
-	if err != nil {
-		m.inputDiscarded(w, discarded)
-		if ctx.Err() != nil {
-			return endStopped, ""
-		}
-		return endDropped, "stream lost"
-	}
+	discarded := w.setStream(conn, run.Epoch)
 	frames := make(chan api.StreamData, 64)
 	readErr := make(chan error, 1)
 	m.goSafe(func() {
@@ -516,65 +509,135 @@ func (m *Mux) restored(w *Window) {
 	}
 }
 
-// pendingInLimit bounds the keystrokes kept for a window without a
-// stream; past it the oldest are dropped, with a notice.
+// pendingInLimit bounds the keystrokes waiting in a window's input queue
+// (those of a write in flight aside); past it the oldest are dropped,
+// with a notice.
 const pendingInLimit = 64 << 10
 
-// send writes keystrokes to w's stream. While w has none (it starts,
-// reconnects or is being refreshed) they are kept and sent, in order,
-// once its next stream is up (goLive); a write that fails because the
-// stream just closed is kept the same way.
+// send queues keystrokes for w's key writer. It never writes to a stream:
+// the writer alone does, so keys reach the shell in the order typed.
 func (m *Mux) send(w *Window, b []byte) {
 	w.connMu.Lock()
-	c, ep := w.conn, w.inEpoch
-	if c == nil || len(w.pendingIn) > 0 {
-		dropped := w.keepInputLocked(b)
-		w.connMu.Unlock()
-		m.inputDropped(w, dropped)
-		return
-	}
+	w.in = append(w.in, b...)
+	dropped := w.trimInputLocked()
 	w.connMu.Unlock()
-	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
-	err := wsjson.Write(ctx, c, api.StreamData{Data: b})
-	cancel()
-	if err != nil && m.ctx.Err() == nil {
-		w.connMu.Lock()
-		// Ahead of anything kept meanwhile: typed before it, for c's shell.
-		w.pendingIn = append(append([]byte{}, b...), w.pendingIn...)
-		w.pendingEpoch = ep
-		dropped := w.trimInputLocked()
-		// A stream that came up meanwhile has sent what was kept; it
-		// sends this too before it takes more (goLive).
-		next, nextEp := w.conn, w.inEpoch
-		if next == c {
-			next = nil
-		}
-		w.conn = nil
-		w.connMu.Unlock()
-		m.inputDropped(w, dropped)
-		if next != nil {
-			n, _ := m.goLive(m.ctx, w, next, nextEp)
-			m.inputDiscarded(w, n)
-		}
-	}
+	w.wakeWriter()
+	m.inputDropped(w, dropped)
 }
 
-// keepInputLocked keeps b for the next stream; it returns how many of
-// the oldest bytes kept were dropped for room.
-func (w *Window) keepInputLocked(b []byte) int {
-	if len(w.pendingIn) == 0 {
-		w.pendingEpoch = w.inEpoch
-	}
-	w.pendingIn = append(w.pendingIn, b...)
-	return w.trimInputLocked()
-}
-
+// trimInputLocked drops the oldest queued bytes past pendingInLimit,
+// sparing those being written; it returns how many it dropped.
 func (w *Window) trimInputLocked() int {
-	n := len(w.pendingIn) - pendingInLimit
+	n := len(w.in) - w.inFlight - pendingInLimit
 	if n <= 0 {
 		return 0
 	}
-	w.pendingIn = append(w.pendingIn[:0], w.pendingIn[n:]...)
+	w.in = append(w.in[:w.inFlight], w.in[w.inFlight+n:]...)
+	return n
+}
+
+func (w *Window) wakeWriter() {
+	select {
+	case w.inWake <- struct{}{}:
+	default:
+	}
+}
+
+// keyWriter is w's only writer of keystrokes. It writes the head of the
+// queue (up to pendingInLimit bytes) as one message to the current stream
+// and removes those bytes only once the write succeeded. A failed write
+// leaves them at the head; it waits for the next stream (setStream) and
+// writes them again, whole, before anything typed after them.
+//
+// Delivery: the websocket library reports a write as failed when the
+// frame was not completely handed to the socket, so lux cannot have
+// decoded that message; resending it whole adds no duplicate. A
+// duplicate is possible only if the socket took the whole frame and the
+// close raced the write's return so that it reported an error anyway.
+// Streams luxmux closes (refreshStream) end with the close handshake, so
+// lux reads every message written before it: keys survive a refresh
+// exactly once. A write that succeeded is final: when lux or the network
+// ends a stream, bytes the socket took but lux never read are lost, not
+// resent (the protocol has no acknowledgement), and what follows them
+// still arrives in order.
+func (m *Mux) keyWriter(w *Window) {
+	// failed: the stream a write failed on; never written to again.
+	var failed *websocket.Conn
+	for {
+		w.connMu.Lock()
+		c := w.conn
+		if c == nil || c == failed || len(w.in) == 0 {
+			w.connMu.Unlock()
+			select {
+			case <-w.inWake:
+			case <-w.inStop:
+				return
+			case <-m.ctx.Done():
+				return
+			}
+			continue
+		}
+		// send only appends past len(w.in) and trimming keeps the
+		// in-flight head, so b is not changed while written.
+		n := min(len(w.in), pendingInLimit)
+		b := w.in[:n:n]
+		w.inFlight = n
+		gen := w.inGen
+		w.connMu.Unlock()
+		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+		err := m.opt.writeKeys(ctx, c, api.StreamData{Data: b})
+		cancel()
+		w.connMu.Lock()
+		w.inFlight = 0
+		dropped := 0
+		switch {
+		case err != nil:
+			failed = c
+			dropped = w.trimInputLocked()
+		case gen == w.inGen:
+			w.in = w.in[len(b):]
+			if len(w.in) == 0 {
+				w.in = nil
+			}
+		}
+		w.connMu.Unlock()
+		m.inputDropped(w, dropped)
+	}
+}
+
+// setStream makes c, a stream of the Run's epoch, the one w's key writer
+// writes to. Keys queued for another epoch's shell (the Run moved: a new
+// placement, a fresh shell) are discarded; it returns how many.
+func (w *Window) setStream(c *websocket.Conn, epoch int) (discarded int) {
+	w.connMu.Lock()
+	if w.inEpoch != 0 && w.inEpoch != epoch {
+		discarded = w.discardInputLocked()
+	}
+	w.inEpoch = epoch
+	w.conn = c
+	w.connMu.Unlock()
+	w.wakeWriter()
+	return discarded
+}
+
+// endStream forgets c as w's stream; keys typed from now on wait for the
+// next one.
+func (w *Window) endStream(c *websocket.Conn) {
+	w.connMu.Lock()
+	if w.conn == c {
+		w.conn = nil
+	}
+	w.connMu.Unlock()
+}
+
+// discardInputLocked empties w's input queue; a write in flight then
+// removes nothing when it completes. It returns how many bytes it
+// discarded.
+func (w *Window) discardInputLocked() int {
+	n := len(w.in)
+	w.in = nil
+	w.inFlight = 0
+	w.inGen++
 	return n
 }
 
@@ -598,49 +661,12 @@ func (m *Mux) inputDiscarded(w *Window, n int) {
 	m.setNoticeLocked(fmt.Sprintf("window %d: %d typed bytes discarded — it moved to a new shell", m.indexLocked(w), n))
 }
 
-// goLive makes c, a stream of the Run's epoch, w's stream: the keystrokes
-// kept for it are sent first, in order, and c takes new ones only once
-// none are left. Keystrokes typed for another epoch's shell (the Run
-// moved: a new placement, a fresh shell) are discarded instead; it
-// returns how many.
-func (m *Mux) goLive(ctx context.Context, w *Window, c *websocket.Conn, epoch int) (discarded int, err error) {
-	w.connMu.Lock()
-	w.inEpoch = epoch
-	if len(w.pendingIn) > 0 && w.pendingEpoch != 0 && w.pendingEpoch != epoch {
-		discarded = len(w.pendingIn)
-		w.pendingIn = nil
-	}
-	w.connMu.Unlock()
-	for {
-		w.connMu.Lock()
-		b := w.pendingIn
-		if len(b) == 0 {
-			w.conn = c
-			w.connMu.Unlock()
-			return discarded, nil
-		}
-		w.pendingIn = nil
-		w.connMu.Unlock()
-		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = wsjson.Write(wctx, c, api.StreamData{Data: b})
-		cancel()
-		if err != nil {
-			w.connMu.Lock()
-			w.pendingIn = append(b, w.pendingIn...)
-			w.pendingEpoch = epoch
-			dropped := w.trimInputLocked()
-			w.connMu.Unlock()
-			m.inputDropped(w, dropped)
-			return discarded, err
-		}
-	}
-}
-
-// dropInput forgets keystrokes kept for w's Run: it is replaced.
+// dropInput forgets keystrokes queued for w's Run: it ended, or is
+// replaced.
 func (w *Window) dropInput() {
 	w.connMu.Lock()
-	w.pendingIn = nil
-	w.inEpoch, w.pendingEpoch = 0, 0
+	w.discardInputLocked()
+	w.inEpoch = 0
 	w.connMu.Unlock()
 }
 
