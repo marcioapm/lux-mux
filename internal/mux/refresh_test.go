@@ -176,10 +176,10 @@ func TestStaleRefreshAtMostEvery2s(t *testing.T) {
 // stopped one resumes it and its screen comes back from lux.
 func TestStaleWindowThatEndedShowsItsEnd(t *testing.T) {
 	for _, tc := range []struct {
-		name, state, reason, want string
+		name, state, reason, want, offer string
 	}{
-		{"failed", "failed", "timeout", "ended: failed: timeout"},
-		{"stopped", "stopped", "stop", "stopped by lux stop"},
+		{"failed", "failed", "timeout", "ended: failed: timeout", "r  relaunch a fresh Run"},
+		{"stopped", "stopped", "stop", "stopped by lux stop", "r  resume the Run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, cfgDefault, nil)
@@ -190,7 +190,9 @@ func TestStaleWindowThatEndedShowsItsEnd(t *testing.T) {
 			h.lux.End(a, tc.state, tc.reason)
 			h.waitFor("window 0 ended", func() bool { return h.phase(0) == phaseDead })
 			h.type_("\x020")
-			h.waitScreen("its end", h.contains(tc.want))
+			// The offer is on the status screen only (the notice of the
+			// end, on window 1, says less).
+			h.waitScreen("its end", func(s string) bool { return strings.Contains(s, tc.want) && strings.Contains(s, tc.offer) })
 			if strings.Contains(h.term.screen(), "refreshing") {
 				t.Fatalf("placeholder:\n%s", h.term.screen())
 			}
@@ -223,6 +225,7 @@ func TestKeysTypedDuringRefreshArrive(t *testing.T) {
 	h.live(1)
 	h.overflow(0, a)
 	gate.hold(a)
+	t.Cleanup(func() { gate.release(a) })
 	h.type_("\x020")
 	h.waitFor("attach held", func() bool { return gate.held_() == 1 })
 	var want bytes.Buffer
@@ -252,6 +255,7 @@ func TestKeysTypedDuringReconnectBounded(t *testing.T) {
 	h := newHarness(t, cfgDefault, func(l *fakelux.Server) { l.InputHook = keys.hook; l.AttachHook = gate.hook })
 	a := h.live(0)
 	gate.hold(a)
+	t.Cleanup(func() { gate.release(a) })
 	h.lux.Blip(a)
 	h.waitFor("attach held", func() bool { return gate.held_() == 1 })
 	chunk := bytes.Repeat([]byte("0123456789abcdef"), 256) // 4 KiB
