@@ -251,6 +251,20 @@ func (p *proc) exitCode() int {
 	return -1
 }
 
+// waitModes waits until mouse tracking (1000) and bracketed paste (2004)
+// are both on in the terminal.
+func (p *proc) waitModes(what string) {
+	p.t.Helper()
+	ok := fakelux.WaitFor(context.Background(), 15*time.Second, func() bool {
+		p.scr.mu.Lock()
+		defer p.scr.mu.Unlock()
+		return p.scr.vt.Mode(1000) && p.scr.vt.Mode(2004)
+	})
+	if !ok {
+		p.t.Fatalf("waiting for %s; screen:\n%s", what, p.scr.text())
+	}
+}
+
 // restored checks the terminal is as luxmux found it: main screen, the
 // modes a program set off, the cursor shown, and the pty out of raw mode.
 func (p *proc) restored() {
@@ -350,7 +364,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// SIGTERM gives the terminal back and leaves the Runs running.
 	q.typ("printf '\\033[?1000h\\033[?2004h'\r")
-	time.Sleep(300 * time.Millisecond)
+	q.waitModes("the program's modes on the terminal")
 	if err := q.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
