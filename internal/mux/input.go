@@ -64,6 +64,16 @@ func (in *input) unread(b []byte) {
 	in.mu.Unlock()
 }
 
+// unreadFirst puts b back to be read before anything else.
+func (in *input) unreadFirst(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	in.mu.Lock()
+	in.back = append([][]byte{b}, in.back...)
+	in.mu.Unlock()
+}
+
 // Reader is the keyboard for a dialog, until Close; what it read and
 // did not hand out by then goes back to the input loop.
 type Reader struct {
@@ -172,9 +182,16 @@ func (m *Mux) handleInput(b []byte) {
 		acts, rest := m.keys.Feed(b)
 		m.mu.Unlock()
 		for _, a := range acts {
-			if a.IsCmd() {
+			switch {
+			case a.IsCmd() && (a.Cmd.Op == config.OpChoose || a.Cmd.Op == config.OpNewDialog):
+				// What was typed after the key is the dialog's: Feed
+				// stops at a command, so this is the last action.
+				m.in.unreadFirst(rest)
 				m.command(a.Cmd)
-			} else if w != nil {
+				return
+			case a.IsCmd():
+				m.command(a.Cmd)
+			case w != nil:
 				m.send(w, a.Send)
 			}
 		}
