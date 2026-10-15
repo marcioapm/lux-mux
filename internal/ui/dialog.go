@@ -606,6 +606,9 @@ func (d *Dialog) View() string {
 	if tooSmall(d.rows, d.cols) {
 		return tooSmallView(d.rows, d.cols)
 	}
+	for _, t := range d.in {
+		styleInput(t)
+	}
 	inner := innerWidth(d.cols)
 	lines, at := d.fieldLines()
 	footer := []string{""}
@@ -620,12 +623,16 @@ func (d *Dialog) View() string {
 		}
 		for _, l := range wrapped {
 			if d.statusErr {
-				l = styleErr.Render(l)
+				l = palette.err.Render(l)
+			} else if d.confirm != nil || d.poolsState == poolsLoading {
+				l = palette.warning.Render(l)
+			} else {
+				l = palette.dim.Render(l)
 			}
 			footer = append(footer, l)
 		}
 	}
-	footer = append(footer, styleDim.Render(d.helpLine()))
+	footer = append(footer, keyHints(d.helpLine()))
 	avail := max(1, maxBody(d.rows)-len(footer))
 	if len(lines) <= avail {
 		d.scroll = 0
@@ -666,14 +673,18 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 		mark := "  "
 		switch {
 		case focused:
-			mark = styleFocus.Render("▸ ")
-			lab = styleFocus.Render(fitLine(lab, labelWidth-2))
-		case d.errs[s] != "":
-			lab = styleErr.Render(fitLine(lab, labelWidth-2))
-		default:
+			mark = "▸ "
 			lab = fitLine(lab, labelWidth-2)
+		case d.errs[s] != "":
+			lab = palette.err.Render(fitLine(lab, labelWidth-2))
+		default:
+			lab = palette.accent.Render(fitLine(lab, labelWidth-2))
 		}
-		out = append(out, mark+lab+value)
+		line := mark + lab + value
+		if focused {
+			line = focusBand(line, innerWidth(d.cols))
+		}
+		out = append(out, line)
 		for _, e := range extra {
 			out = append(out, pad+e)
 		}
@@ -681,7 +692,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	}
 	errLine := func(s stop) []string {
 		if e := d.errs[s]; e != "" {
-			return []string{styleErr.Render("✗ " + e)}
+			return []string{palette.err.Render("✗ " + e)}
 		}
 		return nil
 	}
@@ -701,7 +712,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	textRow(stImage)
 	switch d.poolsState {
 	case poolsLoading:
-		row(stPool, d.focus == stPool, styleDim.Render("loading…"), errLine(stPool)...)
+		row(stPool, d.focus == stPool, palette.dim.Render("loading…"), errLine(stPool)...)
 	case poolsFailed:
 		textRow(stPool)
 	default:
@@ -709,15 +720,15 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	}
 	switch {
 	case d.poolsState == poolsLoading:
-		row(stSize, d.focus == stSize, styleDim.Render("loading…"), errLine(stSize)...)
+		row(stSize, d.focus == stSize, palette.dim.Render("loading…"), errLine(stSize)...)
 	case d.shaped():
 		ddRow(stSize, d.size)
 	default:
 		part := func(s stop, name string) string {
 			if d.focus == s {
-				name = styleFocus.Render(name)
+				name = palette.accent.Render(name)
 			} else if d.errs[s] != "" {
-				name = styleErr.Render(name)
+				name = palette.err.Render(name)
 			}
 			return name + " " + d.in[s].View()
 		}
@@ -737,21 +748,24 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	if n := d.secretNames(); len(n) > 0 {
 		secrets = strings.Join(n, ", ")
 	}
-	out = append(out, "  "+fitLine("Secrets", labelWidth-2)+styleDim.Render(ansi.Truncate(secrets, vw, "…")))
+	out = append(out, "  "+fitLine("Secrets", labelWidth-2)+palette.dim.Render(ansi.Truncate(secrets, vw, "…")))
 	box := "[ ]"
 	if d.spare {
 		box = "[x]"
 	}
 	if d.focus == stSpare {
-		box = styleReverse.Render(box)
+		box = palette.focus.Render(box)
 	}
-	row(stSpare, d.focus == stSpare, box+styleDim.Render("  billed while it waits"))
+	row(stSpare, d.focus == stSpare, box+palette.dim.Render("  billed while it waits"))
 	textRow(stSaveAs)
 	out = append(out, "")
 	btn := func(s stop, name string) string {
 		b := "[ " + name + " ]"
 		if d.focus == s {
-			return styleReverse.Render(b)
+			return palette.focus.Render(b)
+		}
+		if s == stCreate {
+			return palette.accent.Render(b)
 		}
 		return b
 	}
@@ -854,26 +868,23 @@ func (dd *dropdown) key(m tea.KeyMsg) (picked bool) {
 }
 
 func (dd *dropdown) view(w int, focused bool) string {
-	s := "[ " + fitLine(dd.label(), max(1, min(w, 48)-6)) + " ▾ ]"
-	if focused {
-		return styleFocus.Render(s)
-	}
+	s := "[ " + fitLine(dd.label(), max(1, min(w, 48)-6)) + " " + palette.accent.Render("▾") + " ]"
 	return s
 }
 
 // listLines are the open list's lines: the filter, then up to
 // dropdownRows options around the cursor.
 func (dd *dropdown) listLines(w int) []string {
-	out := []string{styleDim.Render("filter: ") + dd.filter + "_"}
+	out := []string{palette.dim.Render("filter: ") + dd.filter + "_"}
 	v := dd.visible()
 	if len(v) == 0 {
-		return append(out, styleDim.Render("  (no match)"))
+		return append(out, palette.dim.Render("  (no match)"))
 	}
 	start := min(max(0, dd.cursor-dropdownRows/2), max(0, len(v)-dropdownRows))
 	for i := start; i < min(len(v), start+dropdownRows); i++ {
 		l := "  " + v[i].label
 		if i == dd.cursor {
-			l = styleReverse.Render(fitLine("› "+v[i].label, max(1, w-1)))
+			l = palette.focus.Render(fitLine("› "+v[i].label, max(1, w-1)))
 		}
 		out = append(out, l)
 	}
