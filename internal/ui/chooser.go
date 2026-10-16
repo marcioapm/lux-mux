@@ -71,7 +71,7 @@ func (c *Chooser) Visible() []mux.WindowInfo {
 	f := strings.ToLower(c.filter)
 	var out []mux.WindowInfo
 	for _, w := range c.all {
-		hay := strings.ToLower(fmt.Sprintf("%d %s %s %s %s", w.Index, w.Name, w.State, w.Image, w.Repo))
+		hay := strings.ToLower(fmt.Sprintf("%d %s %s %s %s %s", w.Index, w.Name, w.State, w.Image, w.Repo, w.Endpoint))
 		if strings.Contains(hay, f) {
 			out = append(out, w)
 		}
@@ -241,9 +241,12 @@ func (c *Chooser) View() string {
 		if i == c.cursor {
 			mark = "▸ "
 		}
-		act := " "
+		act := ""
 		if w.Active {
 			act = "*"
+		}
+		if w.OtherEndpoint {
+			act += "@"
 		}
 		state := stateStyle(w.State).Render(fit(w.State, 12))
 		line := fmt.Sprintf("%s%-3s %-14s %s %-22s %-10s %-18s %s", mark, fmt.Sprintf("%d%s", w.Index, act),
@@ -258,7 +261,11 @@ func (c *Chooser) View() string {
 	prevRows := c.rows - listRows - 3
 	var prev []string
 	if w, ok := c.Selected(); ok && prevRows > 0 {
-		prev = c.host.Preview(w.Index, prevRows, c.cols)
+		if w.OtherEndpoint {
+			// The window marked @ lives on another lux than the lux CLI's.
+			prev = []string{"  @ lux: " + w.Endpoint}
+		}
+		prev = append(prev, c.host.Preview(w.Index, prevRows-len(prev), c.cols)...)
 	}
 	for i := 0; i < prevRows; i++ {
 		if i < len(prev) {
