@@ -3,8 +3,11 @@ package sessions
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
@@ -271,4 +274,47 @@ func TestRecoverMoveKeepsMappedFile(t *testing.T) {
 func checkFree(ctx context.Context, x Luxes, dir, name, own string, locked bool) error {
 	_, err := CheckFree(ctx, x, dir, name, own, locked)
 	return err
+}
+
+// withHungLux adds a profile on a lux that takes every request and never
+// answers it, and shortens ListTimeout to d.
+func (f *fixture) withHungLux(d time.Duration) {
+	f.t.Helper()
+	prev := ListTimeout
+	ListTimeout = d
+	f.t.Cleanup(func() { ListTimeout = prev })
+	h := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	f.t.Cleanup(func() { h.CloseClientConnections(); h.Close() })
+	const keyEnv = "LMX_TEST_HUNG_KEY"
+	cfg, err := config.Parse([]byte("[profiles.hung]\nimage = \"x\"\nlux_url = \"" + h.URL + "\"\napi_key_env = \"" + keyEnv + "\"\n"))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.cfg = cfg
+	f.x = Luxes{Eps: luxapi.NewEndpoints(f.lux.Config(), func(k string) (string, bool) { return "lux_fake_key_hung", k == keyEnv }), Cfg: cfg}
+}
+
+// TestOpenRenamedWithHungLux: a renamed session opens within one
+// ListTimeout while a second lux never answers: each lux is listed once,
+// so the default lux's listing has the whole deadline, and the window is
+// kept.
+func TestOpenRenamedWithHungLux(t *testing.T) {
+	f := newFixture(t)
+	f.withHungLux(400 * time.Millisecond)
+	id := f.renamed(true)
+	// The whole open gets one ListTimeout, as a switch does (switchOpenWait).
+	ctx, cancel := context.WithTimeout(context.Background(), ListTimeout)
+	defer cancel()
+	start := time.Now()
+	sess, label, ok, err := Open(ctx, f.x, f.dir, "b")
+	d := time.Since(start)
+	if err != nil || !ok || label != "a" || len(sess.Windows) != 1 || sess.Windows[0].RunID != id {
+		t.Fatalf("open b after %v: %+v %q %v %v", d, sess, label, ok, err)
+	}
+	if d > ListTimeout*3/2 {
+		t.Fatalf("open b took %v, more than one ListTimeout (%v)", d, ListTimeout)
+	}
+	if r, _ := state.Renames(f.dir); r["b"] != "a" {
+		t.Fatalf("renames %v", r)
+	}
 }

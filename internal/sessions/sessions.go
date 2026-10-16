@@ -61,7 +61,7 @@ func Label(dir, name string) (string, error) {
 // (pruneStale): a renamed session whose Runs all ended frees both names.
 // locked: the caller has just taken name's lock (see pruneStale).
 func LiveLabel(ctx context.Context, x Luxes, dir, name string, locked bool) (string, error) {
-	if err := pruneStale(ctx, x, dir, name, locked); err != nil {
+	if _, err := pruneStale(ctx, x, dir, name, locked); err != nil {
 		return "", err
 	}
 	return Label(dir, name)
@@ -191,18 +191,26 @@ func list(dir string, ls Listings, def config.Endpoint) ([]Info, error) {
 // keeps the file's windows and spares there as they are, or, rebuilding,
 // is recorded in the session's Unlisted. A stale rename entry naming name
 // is dropped first (pruneStale). The caller holds the session's lock,
-// just taken to attach it.
+// just taken to attach it. Each lux is listed once: the prune check's
+// listing of name's entry is the one reconciled.
 func Open(ctx context.Context, x Luxes, dir, name string) (sess *state.Session, label string, existed bool, err error) {
-	if err := pruneStale(ctx, x, dir, name, true); err != nil {
+	own, err := pruneStale(ctx, x, dir, name, true)
+	if err != nil {
 		return nil, "", false, err
 	}
-	return Reopen(ctx, x, dir, name)
+	return reopen(ctx, x, dir, name, own)
 }
 
 // Reopen is Open for a session this process had attached: its rename
 // entry is kept even when none of its Runs is live (its windows show
 // their end).
 func Reopen(ctx context.Context, x Luxes, dir, name string) (sess *state.Session, label string, existed bool, err error) {
+	return reopen(ctx, x, dir, name, nil)
+}
+
+// reopen is Reopen reconciling from ls, pruneStale's listing of name's
+// own rename entry, else (nil) from a listing of its own.
+func reopen(ctx context.Context, x Luxes, dir, name string, ls Listings) (sess *state.Session, label string, existed bool, err error) {
 	if label, err = Label(dir, name); err != nil {
 		return nil, "", false, err
 	}
@@ -210,7 +218,9 @@ func Reopen(ctx context.Context, x Luxes, dir, name string) (sess *state.Session
 	if err != nil {
 		return nil, "", false, err
 	}
-	ls := x.ListSession(ctx, label, file)
+	if ls == nil {
+		ls = x.ListSession(ctx, label, file)
+	}
 	if err := x.report(ls); err != nil {
 		return nil, "", false, err
 	}
@@ -252,7 +262,7 @@ func CheckFree(ctx context.Context, x Luxes, dir, name, own string, locked bool)
 	if err := CheckName(name); err != nil {
 		return nil, err
 	}
-	if err := pruneStale(ctx, x, dir, name, locked); err != nil {
+	if _, err := pruneStale(ctx, x, dir, name, locked); err != nil {
 		return nil, err
 	}
 	if _, ok, err := state.Load(dir, name); err != nil {
@@ -305,12 +315,14 @@ func labels(eps []config.Endpoint) string {
 // this process is the caller's. Any other lock is a session attached
 // somewhere, which ends itself when its windows do (Mux.endSession). A
 // pruned entry's file, whose windows' Runs are then all gone, goes with
-// it.
-func pruneStale(ctx context.Context, x Luxes, dir, name string, locked bool) error {
+// it. The listing of name's own entry (label renames[name], endpoints of
+// name's file), when that entry is kept, is returned; else nil.
+func pruneStale(ctx context.Context, x Luxes, dir, name string, locked bool) (Listings, error) {
 	renames, err := state.Renames(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var own Listings
 	for n, l := range renames {
 		if n != name && l != name {
 			continue
@@ -321,21 +333,22 @@ func pruneStale(ctx context.Context, x Luxes, dir, name string, locked bool) err
 		file, _, _ := state.Load(dir, n)
 		ls := x.ListSession(ctx, l, file)
 		if down := ls.Unlisted(); len(down) == len(ls) && len(ls) > 0 {
-			return ls.Report(io.Discard)
-		} else if len(down) > 0 {
-			continue
+			return nil, ls.Report(io.Discard)
 		}
-		if len(ls.Live(func(*api.Run) bool { return true })) > 0 {
+		if len(ls.Unlisted()) > 0 || len(ls.Live(func(*api.Run) bool { return true })) > 0 {
+			if n == name {
+				own = ls
+			}
 			continue
 		}
 		if err := state.Remove(dir, n); err != nil {
-			return err
+			return nil, err
 		}
 		if err := state.DropRenamed(dir, n); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return own, nil
 }
 
 // Move renames session old to new (label is its Runs' label). The caller

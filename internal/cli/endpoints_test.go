@@ -131,6 +131,36 @@ func TestHungLuxCostsOneListing(t *testing.T) {
 	noKeysIn(t, env.StateDir, out.String(), errb.String())
 }
 
+// TestAttachRenamedHungLuxOneListing: attach -t of a renamed session
+// while a configured lux never answers costs one listing's timeout, not
+// one for the rename entry's check and another for the open, and keeps
+// its window.
+func TestAttachRenamedHungLuxOneListing(t *testing.T) {
+	shortTimeouts(t)
+	a := fakelux.NewWithKey(cliKeyA)
+	t.Cleanup(a.Close)
+	env, _, errb := testEnv(t, a, "")
+	env.Lookup = func(k string) (string, bool) { return cliKeyB, k == cliKeyEnv }
+	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
+	id := submitTo(t, a, "work", "a")
+	if err := state.Save(env.StateDir, &state.Session{Name: "work", Windows: []state.Window{{RunID: id, Profile: "a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Move(env.StateDir, "work", "job", "work"); err != nil {
+		t.Fatal(err)
+	}
+	got := muxSession(t)
+	start := time.Now()
+	code := Main(env, []string{"attach", "-t", "job"})
+	d := time.Since(start)
+	if s := got(); code != 0 || s == nil || len(s.Windows) != 1 || s.Windows[0].RunID != id {
+		t.Fatalf("attach -t job: %d after %v, session %+v: %q", code, d, s, errb.String())
+	}
+	if bound := sessions.ListTimeout * 3 / 2; d > bound {
+		t.Fatalf("attach -t job took %v, more than %v", d, bound)
+	}
+}
+
 // muxSession makes the next runMux record the session it was given and
 // return without a terminal.
 func muxSession(t *testing.T) func() *state.Session {

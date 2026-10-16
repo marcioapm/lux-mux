@@ -458,3 +458,69 @@ func TestSwitchLeavesLeftoverTerminate(t *testing.T) {
 	}
 	h.detach()
 }
+
+// hangB makes lux b take every listing and never answer it.
+func (h *multiTwo) hangB() {
+	h.t.Helper()
+	cb, err := h.eps.Client(h.bEP())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	rt := &hookRT{base: http.DefaultTransport}
+	rt.set(func(req *http.Request) error {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/runs" {
+			return hang(req)
+		}
+		return nil
+	})
+	cb.C.HTTP = &http.Client{Transport: rt}
+}
+
+// TestSwitchWithSecondLuxHung: with lux b never answering a listing and
+// switchOpenWait equal to ListTimeout (as the defaults are), a switch to
+// a session on the default lux lands on it within one listing's wait,
+// renamed or not.
+func TestSwitchWithSecondLuxHung(t *testing.T) {
+	for _, renamed := range []bool{true, false} {
+		target := map[bool]string{true: "alpha", false: "beta"}[renamed]
+		t.Run(target, func(t *testing.T) {
+			prev := sessions.ListTimeout
+			sessions.ListTimeout = time.Second
+			t.Cleanup(func() { sessions.ListTimeout = prev })
+			h := newMultiTwo(t)
+			h.opts = func(o *Options) { o.switchOpenWait = sessions.ListTimeout }
+			if renamed {
+				h.attach("a")
+				h.on("a")
+				if err := h.con.Current().RenameSession("a", "alpha"); err != nil {
+					t.Fatal(err)
+				}
+				h.detach()
+			} else {
+				h.make("beta", "BETA-SCREEN")
+			}
+			h.make("c", "C-SCREEN")
+			h.hangB()
+			h.attach("c")
+			h.on("c")
+			m := h.con.Current()
+			start := time.Now()
+			m.startSwitch(&switchTarget{name: target})
+			h.waitFor("switched or back", func() bool { return h.con.Current() != m })
+			h.waitFor("settled", func() bool {
+				cur := h.con.Current()
+				return cur != nil && cur.ctx.Err() == nil
+			})
+			d := time.Since(start)
+			if got := h.con.Current().Session(); got != target {
+				raw := h.term.rawBytes()
+				t.Fatalf("landed on %s after %v, want %s; screen ends %q", got, d, target, raw[max(0, len(raw)-160):])
+			}
+			if bound := sessions.ListTimeout * 3 / 2; d > bound {
+				t.Fatalf("the switch took %v, more than %v", d, bound)
+			}
+			h.on(target)
+			h.detach()
+		})
+	}
+}
