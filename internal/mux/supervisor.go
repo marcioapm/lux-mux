@@ -100,7 +100,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				m.waitClosed(ctx, w)
 				return
 			}
-			m.setWaiting(w, "endpoint unreachable ("+w.Endpoint.Label()+"): "+luxapi.Describe(err))
+			m.setWaiting(w, failedWord(err)+" ("+w.Endpoint.Label()+"): "+luxapi.Describe(err))
 			wait(bo)
 			grow()
 			continue
@@ -213,6 +213,15 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 // secretsLostReason is luxd's stateReason for a Run it stopped because no
 // luxd held its secret values any more.
 const secretsLostReason = "secrets must be supplied again: resume with them"
+
+// failedWord names why a window's lux did not answer a read: a 401 or 403
+// is the key refused, anything else the lux unreachable.
+func failedWord(err error) string {
+	if luxapi.Refused(err) {
+		return "endpoint refused the key"
+	}
+	return "endpoint unreachable"
+}
 
 // autoResume reports whether lux, not a person, left run stopped or lost
 // in a way luxmux resumes without asking: its secrets must be supplied

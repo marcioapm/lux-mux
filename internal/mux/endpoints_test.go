@@ -3,10 +3,7 @@ package mux
 import (
 	"bytes"
 	"context"
-	"io/fs"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -108,24 +105,8 @@ func submitOn(t *testing.T, l *fakelux.Server, p config.Profile, profile, name s
 // noKeys fails if either fake key is anywhere in dir's files or in out.
 func noKeys(t *testing.T, dir string, out ...[]byte) {
 	t.Helper()
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		b, _ := os.ReadFile(p)
-		for _, k := range []string{keyA, keyB} {
-			if bytes.Contains(b, []byte(k)) {
-				t.Errorf("%s holds a key", p)
-			}
-		}
-		return nil
-	})
-	for i, o := range out {
-		for _, k := range []string{keyA, keyB} {
-			if bytes.Contains(o, []byte(k)) {
-				t.Errorf("output %d holds a key", i)
-			}
-		}
+	for _, l := range fakelux.KeyLeaks([]string{keyA, keyB}, dir, out...) {
+		t.Errorf("%s holds a key", l)
 	}
 }
 
@@ -259,7 +240,14 @@ func TestEndpointDown(t *testing.T) {
 	x.waitScreen("window 0 output", x.contains("a-still-works"))
 	x.type_("\x021")
 	x.waitScreen("window 1 says its lux is unreachable", x.contains("endpoint unreachable"))
+	noKeys(t, x.dir, x.term.rawBytes())
+	// b answers again: the window attaches to its Run there.
+	x.b.SetDown(false)
+	if id := x.liveOnB(1); id != b1 {
+		t.Fatalf("window 1 is %s after b came back, want %s", id, b1)
+	}
 	x.detach()
+	x.b.SetDown(true)
 
 	// The file is gone: rebuilt from a's listing, b's failed.
 	if err := state.Remove(x.dir, "s"); err != nil {
@@ -278,6 +266,8 @@ func TestEndpointDown(t *testing.T) {
 	}
 	x.start(sess)
 	x.live(0)
+	x.waitFor("b's unlisted notice", func() bool { return bytes.Contains(x.term.rawBytes(), []byte("endpoint unreachable; its")) })
+	noKeys(t, x.dir, x.term.rawBytes())
 	time.Sleep(100 * time.Millisecond)
 	if x.nwindows() != 1 {
 		t.Fatalf("%d windows while b is down", x.nwindows())
@@ -451,6 +441,121 @@ api_key_env = "` + remoteEnv + `"
 	if s, _, _ := state.Load(h.dir, "s"); s.Spares[slot] != stray.ID || s.SpareEndpoints[slot].URL != b.URL {
 		t.Fatalf("file spares %v endpoints %v", s.Spares, s.SpareEndpoints)
 	}
+}
+
+// slowPoll leaves only events to tell a supervisor its Run changed: it
+// reads the Run again only after seconds.
+func slowPoll(o *Options) {
+	o.Poll, o.Backoff, o.MaxBackoff = 3*time.Second, 3*time.Second, 3*time.Second
+}
+
+// TestEventWakesWindowOnItsLux: an event of b's feed wakes the window
+// whose Run is on b, at once (polling would take seconds).
+func TestEventWakesWindowOnItsLux(t *testing.T) {
+	x := newTwoLux(t, slowPoll)
+	x.live(0)
+	x.b.SetHold(true)
+	x.newRemote()
+	x.waitFor("submitted on b", func() bool { return len(x.b.RunIDs()) == 1 })
+	id := x.b.RunIDs()[0]
+	x.waitFor("window 1 has its Run", func() bool { return x.window(1) == id })
+	// The supervisor read the held Run and waits for an event or Poll.
+	x.waitFor("b read the Run", func() bool { return slices.Contains(x.b.Requests(), "GET /v1/runs/"+id) })
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	x.b.Start(id)
+	x.liveOnB(1)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("live after %v: not woken by b's event", d)
+	}
+	x.detach()
+}
+
+// TestEventRoutedByEndpoint: two luxes whose Run ids collide: an event of
+// a's feed for an id never reaches the window of that id on b, and b's
+// event reaches it at once. (Windows are indexed by Run id alone, so with
+// colliding ids only the later window is found; real ids do not collide.)
+func TestEventRoutedByEndpoint(t *testing.T) {
+	b := fakelux.NewWithKey(keyB)
+	t.Cleanup(b.Close)
+	h := &harness{t: t, lux: fakelux.NewWithKey(keyA), rows: 24, cols: 80, dir: t.TempDir(),
+		env: map[string]string{remoteEnv: keyB}, crashed: make(chan string, 1), opts: slowPoll}
+	t.Cleanup(h.lux.Close)
+	cfg, err := config.Parse([]byte(cfgRemote(b.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+	// Window 0's Run on a and window 1's on b have the same id.
+	idA := submitOn(t, h.lux, cfg.Profiles["base"], "base", "on-a")
+	idB := submitOn(t, b, cfg.Profiles["remote"], "remote", "on-b")
+	if idA != idB {
+		t.Fatalf("ids %s and %s", idA, idB)
+	}
+	h.lux.SetHold(true)
+	b.SetHold(true)
+	h.lux.SetState(idA, "submitted", "")
+	b.SetState(idB, "submitted", "")
+	def := config.DefaultEndpoint(h.lux.Config())
+	remote := cfg.Profiles["remote"].Endpoint(h.lux.Config())
+	h.start(&state.Session{Name: "s", Windows: []state.Window{
+		{RunID: idA, Name: "on-a", Profile: "base", Endpoint: &def},
+		{RunID: idB, Name: "on-b", Profile: "remote", Endpoint: &remote},
+	}})
+	x := &twoLux{harness: h, b: b}
+	steps := func(i int) []string {
+		x.m.mu.Lock()
+		defer x.m.mu.Unlock()
+		return slices.Clone(x.m.windows[i].steps.steps)
+	}
+	x.waitFor("both feeds open", func() bool { return h.lux.FeedStreams() == 1 && b.FeedStreams() == 1 })
+	x.waitFor("b read the Run", func() bool { return slices.Contains(b.Requests(), "GET /v1/runs/"+idB) })
+	time.Sleep(50 * time.Millisecond)
+	before := steps(1)
+	h.lux.Start(idA)
+	x.waitFor("a's events sent", func() bool { return h.lux.Run(idA).State == "running" })
+	time.Sleep(200 * time.Millisecond)
+	if got := steps(1); !slices.Equal(got, before) {
+		t.Fatalf("a's events reached window 1 on b: %v, was %v", got, before)
+	}
+	start := time.Now()
+	b.Start(idB)
+	x.liveOnB(1)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("window 1 live after %v: not woken by b's event", d)
+	}
+	x.detach()
+}
+
+// TestWrongKeyWindow: a window on a lux that refuses the profile's key
+// says the key was refused, not that its lux is unreachable, and shows
+// no key; nothing is made there.
+func TestWrongKeyWindow(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, keyA, true)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 refused", func() bool { return strings.Contains(x.reason(1), "refused the key") })
+	x.type_("\x021")
+	x.waitScreen("the refusal on screen", x.contains("endpoint refused the key"))
+	if strings.Contains(x.term.screen(), "unreachable") {
+		t.Fatalf("a refused key shown as unreachable:\n%s", x.term.screen())
+	}
+	noKeys(t, x.dir, x.term.rawBytes())
+	x.newRemote()
+	x.waitFor("window 2 ended", func() bool { return x.phase(2) == phaseDead })
+	if r := x.reason(2); !strings.Contains(r, "invalid API key") {
+		t.Fatalf("window 2: %q", r)
+	}
+	if ids := x.b.RunIDs(); !slices.Equal(ids, []string{b1}) || x.b.Run(b1).State != "running" {
+		t.Fatalf("b has %v", ids)
+	}
+	noKeys(t, x.dir, x.term.rawBytes())
+	x.detach()
 }
 
 // TestSparesPerEndpoint: a warm-spare profile on each lux keeps its spare

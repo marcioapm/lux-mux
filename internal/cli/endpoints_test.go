@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,24 +67,12 @@ func submitTo(t *testing.T, l *fakelux.Server, session, profile string) string {
 // noKeysIn fails if either fake key is in dir's files or in outs.
 func noKeysIn(t *testing.T, dir string, outs ...string) {
 	t.Helper()
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		b, _ := os.ReadFile(p)
-		for _, k := range []string{cliKeyA, cliKeyB} {
-			if bytes.Contains(b, []byte(k)) {
-				t.Errorf("%s holds a key", p)
-			}
-		}
-		return nil
-	})
+	bs := make([][]byte, len(outs))
 	for i, o := range outs {
-		for _, k := range []string{cliKeyA, cliKeyB} {
-			if strings.Contains(o, k) {
-				t.Errorf("output %d holds a key", i)
-			}
-		}
+		bs[i] = []byte(o)
+	}
+	for _, l := range fakelux.KeyLeaks([]string{cliKeyA, cliKeyB}, dir, bs...) {
+		t.Errorf("%s holds a key", l)
 	}
 }
 
@@ -140,6 +127,7 @@ func TestHungLuxCostsOneListing(t *testing.T) {
 	if d := time.Since(start); d > bound || code == 0 || !strings.Contains(errb.String(), "session file kept") || !slices.Contains(a.Terminated(), id) {
 		t.Fatalf("kill-session: %d after %v, a terminated %v: %q", code, d, a.Terminated(), errb.String())
 	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
 }
 
 // muxSession makes the next runMux record the session it was given and
@@ -193,6 +181,7 @@ func TestKillSessionNoFileOneDown(t *testing.T) {
 	if code := Main(env, []string{"kill-session", "-t", "work", "-y"}); code == 0 || !strings.Contains(errb.String(), "may still have Runs") {
 		t.Fatalf("second: %d %q", code, errb.String())
 	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
 }
 
 // TestWrongKeyRefused: a lux that refuses the profile's key is reported

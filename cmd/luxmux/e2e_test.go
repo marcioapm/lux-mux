@@ -964,15 +964,7 @@ func TestTwoEndpointsRebuildOneDown(t *testing.T) {
 	if b.Refused() != 0 {
 		t.Fatalf("far lux refused %d requests", b.Refused())
 	}
-	_ = filepath.WalkDir(stateDir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			if data, _ := os.ReadFile(path); strings.Contains(string(data), keyB) || strings.Contains(string(data), "lux_test") {
-				t.Errorf("%s holds a key", path)
-			}
-		}
-		return nil
-	})
-	if raw := p.rawSince(0); strings.Contains(raw, keyB) || strings.Contains(raw, "lux_test") {
-		t.Error("a key on the screen")
+	for _, l := range fakelux.KeyLeaks([]string{keyB, fakelux.DefaultKey}, stateDir, []byte(p.rawSince(0))) {
+		t.Errorf("%s holds a key", l)
 	}
 }
