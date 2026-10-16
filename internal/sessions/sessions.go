@@ -254,10 +254,8 @@ func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string, loc
 	if err != nil {
 		return err
 	}
-	for _, r := range runs {
-		if state.Live(r.State) {
-			return fmt.Errorf("session %s has Runs on lux: %w", name, ErrTaken)
-		}
+	if hasLive(runs) {
+		return fmt.Errorf("session %s has Runs on lux: %w", name, ErrTaken)
 	}
 	return nil
 }
@@ -287,7 +285,7 @@ func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string, locked 
 		if err != nil {
 			return err
 		}
-		if slices.ContainsFunc(runs, func(r *api.Run) bool { return state.Live(r.State) }) {
+		if hasLive(runs) {
 			continue
 		}
 		if err := state.Remove(dir, n); err != nil {
@@ -373,19 +371,12 @@ func recoverMove(dir, name string, runs []*api.Run) error {
 // it; luxmux kill-session takes none, and a luxmux attached to the
 // session ends once its windows do.
 func Kill(ctx context.Context, c *luxapi.Client, dir, name string, done func(id string)) error {
-	label, err := Label(dir, name)
-	if err != nil {
-		return err
-	}
-	runs, err := c.ListSession(ctx, label)
+	live, err := LiveRuns(ctx, c, dir, name)
 	if err != nil {
 		return err
 	}
 	var errs []error
-	for _, r := range runs {
-		if !state.Live(r.State) {
-			continue
-		}
+	for _, r := range live {
 		if err := c.Terminate(ctx, r.ID); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.ID, err))
 		} else if done != nil {
@@ -418,4 +409,8 @@ func LiveRuns(ctx context.Context, c *luxapi.Client, dir, name string) ([]*api.R
 		}
 	}
 	return live, nil
+}
+
+func hasLive(runs []*api.Run) bool {
+	return slices.ContainsFunc(runs, func(r *api.Run) bool { return state.Live(r.State) })
 }
