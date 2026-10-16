@@ -310,6 +310,46 @@ func RecordExternal(sess *Session, label string, runs []*api.Run, profiles map[s
 	}
 }
 
+// RecordSpares puts into sess's empty spare slots the waiting spares lux
+// has of it (label: its Runs' luxmux-session label) that its file does
+// not know: a submit a switch cancelled may still have made its Run. A
+// slot already filled keeps its spare; the newest Run wins an empty one.
+func RecordSpares(sess *Session, label string, runs []*api.Run) {
+	known := map[string]bool{}
+	for _, w := range sess.Windows {
+		known[w.RunID] = true
+	}
+	for _, id := range sess.Claimed {
+		known[id] = true
+	}
+	for _, id := range sess.Spares {
+		known[id] = true
+	}
+	filled := map[string]bool{}
+	for key, id := range sess.Spares {
+		filled[key] = id != ""
+	}
+	byAge := slices.Clone(runs)
+	sort.SliceStable(byAge, func(i, j int) bool { return byAge[i].CreatedAt.After(byAge[j].CreatedAt) })
+	for _, r := range byAge {
+		if r.Labels[config.LabelSession] != label || r.Labels[config.LabelSpare] != "true" || known[r.ID] ||
+			!waitingSpare[r.State] || Terminating(r) {
+			continue
+		}
+		key := r.Labels[config.LabelSpec]
+		if key == "" || filled[key] {
+			continue
+		}
+		if sess.Spares == nil {
+			sess.Spares = map[string]string{}
+		}
+		sess.Spares[key], filled[key] = r.ID, true
+	}
+}
+
+// waitingSpare are the states of a spare that may still be claimed.
+var waitingSpare = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
+
 // Rebuild makes a session from the Runs lux lists for it (those labelled
 // with the session), for when its file is gone: its non-terminated Runs
 // that are not a waiting warm spare, oldest first. Names are lost: each

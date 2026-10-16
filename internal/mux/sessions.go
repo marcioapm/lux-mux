@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,40 +95,66 @@ func (m *Mux) releaseLock() {
 	}
 }
 
+const (
+	// switchOpenWait bounds the lux calls that open a switch's target.
+	switchOpenWait = 10 * time.Second
+	// refreshWait bounds the re-read of the session a failed switch
+	// returns to; its saved state is used when lux does not answer.
+	refreshWait = 10 * time.Second
+	// relockTries×relockEvery is how long a failed switch retries this
+	// session's lock: luxmux new-window -t takes it for a moment.
+	relockTries = 5
+	relockEvery = 50 * time.Millisecond
+)
+
 // switchOver runs once the session was detached for a switch (its streams
 // closed, its goroutines ended, its state saved): it releases this
 // session's lock, takes the target's and opens it as luxmux attach -t
 // does. When the target cannot be locked or opened, this session is
-// locked and opened again instead, with a notice saying why; err is set
-// only when that fails too.
+// locked again and reattached from the state it saved, with a notice
+// saying why: lux is not needed for that. err is set only when this
+// session's lock was taken by another process meanwhile.
 func (m *Mux) switchOver(ctx context.Context) (Options, *state.Session, error) {
 	m.mu.Lock()
-	t, old := m.next, m.name
+	t, old, oldLabel, oldSess := m.next, m.name, m.label, m.sess
+	rows, cols := m.rows, m.cols
+	afterUnlock := m.opt.afterSwitchUnlock
 	m.mu.Unlock()
 	m.releaseLock()
+	if afterUnlock != nil {
+		afterUnlock()
+	}
+	m.tw.enqueue(screen.Text(nil, []string{" luxmux: switching to session " + t.name + "…"}, rows, cols))
 	opt := m.opt
 	opt.Config = m.config()
-	opt.First, opt.Notice, opt.Unlock = nil, "", nil
-	octx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	opt.First, opt.Notice, opt.Unlock, opt.afterSwitchUnlock = nil, "", nil, nil
+	timedOut := false
 	unlock, err := m.lockSession(t.name)
 	if err == nil {
-		var sess *state.Session
-		var label string
-		if sess, label, err = m.openTarget(octx, opt.Config, t); err == nil {
+		octx, cancel := context.WithTimeout(ctx, m.opt.switchOpenWait)
+		sess, label, oerr := m.openTarget(octx, opt.Config, t)
+		timedOut = octx.Err() != nil
+		cancel()
+		if oerr == nil {
 			opt.Session, opt.Label, opt.Unlock, opt.Notice, opt.First = t.name, label, unlock, t.notice, t.first
 			return opt, sess, nil
 		}
 		unlock()
+		err = oerr
 	}
-	unlock, lerr := m.lockSession(old)
+	unlock, lerr := m.relock(old)
 	if lerr != nil {
 		return opt, nil, fmt.Errorf("session %s: %w", old, lerr)
 	}
-	sess, label, _, oerr := sessions.Open(octx, m.lux, m.opt.StateDir, opt.Config, old)
-	if oerr != nil {
-		unlock()
-		return opt, nil, fmt.Errorf("session %s: %w", old, oerr)
+	sess, label := oldSess, oldLabel
+	// A lux that let the target's open time out would let this wait as
+	// long again: the saved state is reconciled by the supervisors.
+	if !timedOut {
+		rctx, cancel := context.WithTimeout(ctx, refreshWait)
+		if s, l, ok, rerr := sessions.Open(rctx, m.lux, m.opt.StateDir, opt.Config, old); rerr == nil && ok {
+			sess, label = s, l
+		}
+		cancel()
 	}
 	opt.Session, opt.Label, opt.Unlock = old, label, unlock
 	opt.Notice = fmt.Sprintf("session %s: %v", t.name, err)
@@ -141,6 +168,18 @@ func (m *Mux) lockSession(name string) (func(), error) {
 		return nil, fmt.Errorf("%w; stayed here", err)
 	}
 	return unlock, err
+}
+
+// relock takes back session name's lock after a failed switch, retrying
+// for relockTries×relockEvery while another process holds it.
+func (m *Mux) relock(name string) (func(), error) {
+	for i := 1; ; i++ {
+		unlock, err := state.Lock(m.opt.StateDir, name)
+		if err == nil || !errors.Is(err, state.ErrLocked) || i == relockTries {
+			return unlock, err
+		}
+		time.Sleep(relockEvery)
+	}
 }
 
 // openTarget reads the session t names, its lock held: a new one is
@@ -253,13 +292,33 @@ func (m *Mux) Sessions() ([]SessionInfo, error) {
 }
 
 // stepSession switches to the next session by name (dir 1) or the
-// previous one (-1), wrapping, past those attached elsewhere.
+// previous one (-1), wrapping, past those attached elsewhere. Listing
+// the sessions asks lux: it runs off the input loop, which keeps taking
+// keys meanwhile; a step already listing makes this one a no-op.
 func (m *Mux) stepSession(dir int) {
-	list, err := m.Sessions()
-	if err != nil {
-		m.Notice("sessions: " + err.Error())
+	if !m.stepping.CompareAndSwap(false, true) {
 		return
 	}
+	// In m.wg: added from the input loop, which shutdown waits for first.
+	m.wg.Add(1)
+	m.goSafe(func() {
+		defer m.wg.Done()
+		defer m.stepping.Store(false)
+		list, err := m.Sessions()
+		if err != nil {
+			if m.ctx.Err() == nil {
+				m.Notice("sessions: " + err.Error())
+			}
+			return
+		}
+		m.stepIn(list, dir)
+	})
+}
+
+// stepIn switches from the current session of list to the next one in
+// direction dir that is not attached elsewhere.
+func (m *Mux) stepIn(list []SessionInfo, dir int) {
+	n := len(list)
 	cur := 0
 	for i, s := range list {
 		if s.Current {
@@ -267,35 +326,25 @@ func (m *Mux) stepSession(dir int) {
 		}
 	}
 	var skipped []string
-	for k := 1; k < len(list); k++ {
-		s := list[(cur+dir*k+len(list)*k)%len(list)]
+	for k := 1; k < n; k++ {
+		// Go's % keeps the dividend's sign: add n to wrap below 0.
+		s := list[((cur+dir*k)%n+n)%n]
 		if s.Elsewhere {
 			skipped = append(skipped, s.Name)
 			continue
 		}
 		notice := "session " + s.Name
 		if len(skipped) > 0 {
-			notice += fmt.Sprintf(" (skipped %s: attached elsewhere)", joinNames(skipped))
+			notice += fmt.Sprintf(" (skipped %s: attached elsewhere)", strings.Join(skipped, ", "))
 		}
 		m.SwitchTo(s.Name, notice)
 		return
 	}
 	if len(skipped) > 0 {
-		m.Notice(fmt.Sprintf("no other session to switch to (%s attached elsewhere)", joinNames(skipped)))
+		m.Notice(fmt.Sprintf("no other session to switch to (%s attached elsewhere)", strings.Join(skipped, ", ")))
 		return
 	}
 	m.Notice("no other session")
-}
-
-func joinNames(n []string) string {
-	s := ""
-	for i, x := range n {
-		if i > 0 {
-			s += ", "
-		}
-		s += x
-	}
-	return s
 }
 
 // ErrKillCurrent is KillSession's refusal of the session attached here.

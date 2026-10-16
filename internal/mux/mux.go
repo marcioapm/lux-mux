@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -87,6 +88,12 @@ type Options struct {
 	// new-window made while the feed was down (default 30s). Unexported:
 	// only tests change it.
 	discoverEvery time.Duration
+	// switchOpenWait bounds opening a switch's target (default
+	// switchOpenWait). Unexported: only tests change it.
+	switchOpenWait time.Duration
+	// afterSwitchUnlock, when set, runs once a switch released this
+	// session's lock and before it takes the target's. Only tests set it.
+	afterSwitchUnlock func()
 	// writeKeys writes one message of keystrokes to a stream (default
 	// wsjson.Write). Unexported: only tests change it.
 	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
@@ -108,6 +115,10 @@ type Mux struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// spareCtx bounds spare submits: a detach does not cancel them (lux
+	// may make the Run, and its id must be recorded); a switch does.
+	spareCtx   context.Context
+	stopSpares context.CancelFunc
 	// inputDone closes when the input loop returned: the next session's
 	// loop must not start while this one can still take a key.
 	inputDone chan struct{}
@@ -151,6 +162,8 @@ type Mux struct {
 	// preview follows another session's shown window for the session
 	// chooser.
 	preview sessionPreview
+	// stepping: a C-b ( or ) is listing the sessions.
+	stepping atomic.Bool
 }
 
 // ErrNoSession is returned by Open for attach to a session lux has no
@@ -185,6 +198,9 @@ func (o *Options) defaults() {
 	if o.discoverEvery == 0 {
 		o.discoverEvery = 30 * time.Second
 	}
+	if o.switchOpenWait == 0 {
+		o.switchOpenWait = switchOpenWait
+	}
 	if o.writeKeys == nil {
 		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
 			return wsjson.Write(ctx, c, d)
@@ -216,6 +232,7 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, done: make(chan string, 1)}
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
 	for _, sw := range sess.Windows {
 		spec := opt.Config.Profiles[sw.Profile]
 		if sw.Spec != nil {
@@ -228,6 +245,13 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	}
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
+	// A slot reserved with no id is a submit a switch cancelled: it is
+	// free (sessions.Open records the Run lux may have made in it).
+	for key, id := range sess.Spares {
+		if id == "" {
+			delete(sess.Spares, key)
+		}
+	}
 	return m, nil
 }
 
@@ -334,7 +358,7 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	})
 	<-m.ctx.Done()
 	reason := <-m.done
-	m.shutdown()
+	m.shutdown(reason == reasonSwitch)
 	if reason == "" && ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -352,16 +376,20 @@ func (m *Mux) finish(reason string) {
 
 // shutdown closes every stream, the event feed and the session preview,
 // and waits for the session's goroutines, the input loop's included; the
-// Runs keep running and the state is saved. A Console the session made
-// is closed; a shared one is left to the next session, its terminal
+// Runs keep running and the state is saved. For a switch, spare submits
+// in flight are cancelled rather than waited for. A Console the session
+// made is closed; a shared one is left to the next session, its terminal
 // reset.
-func (m *Mux) shutdown() {
+func (m *Mux) shutdown(switching bool) {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
 	m.saveLocked()
 	m.suspended = true
 	m.tw.enqueue(screen.Reset(nil))
 	m.mu.Unlock()
+	if switching {
+		m.stopSpares()
+	}
 	for _, w := range ws {
 		if c := w.getConn(); c != nil {
 			c.CloseNow()
@@ -372,6 +400,7 @@ func (m *Mux) shutdown() {
 	<-m.inputDone
 	m.stopSessionPreview()
 	m.wg.Wait()
+	m.stopSpares()
 	m.mu.Lock()
 	for _, w := range ws {
 		m.closeFeedLocked(w)

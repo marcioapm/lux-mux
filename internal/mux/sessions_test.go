@@ -1,11 +1,16 @@
 package mux
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,14 +29,54 @@ type multi struct {
 	t    *testing.T
 	lux  *fakelux.Server
 	cl   *luxapi.Client
+	rt   *hookRT
 	dir  string
 	cfg  *config.Config
 	term *clientTerm
 	keys *io.PipeWriter
 	con  *Console
 	ui   *fakeUI
+	// opts, when set, changes each session's Options.
+	opts func(*Options)
 	// done gets Attach's results.
 	done chan [2]string
+}
+
+// hookRT is the lux client's transport: hook, when set, sees each request
+// first and fails it by returning an error (it may block first).
+type hookRT struct {
+	base http.RoundTripper
+	hook atomic.Pointer[func(*http.Request) error]
+}
+
+func (h *hookRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if f := h.hook.Load(); f != nil {
+		if err := (*f)(req); err != nil {
+			return nil, err
+		}
+	}
+	return h.base.RoundTrip(req)
+}
+
+// set installs f as the hook (nil: none).
+func (h *hookRT) set(f func(*http.Request) error) {
+	if f == nil {
+		h.hook.Store(nil)
+		return
+	}
+	h.hook.Store(&f)
+}
+
+// listing reports a request listing session label's Runs.
+func listing(req *http.Request, label string) bool {
+	return req.Method == http.MethodGet && req.URL.Path == "/v1/runs" &&
+		req.URL.Query().Get("label") == config.LabelSession+"="+label
+}
+
+// hang blocks a request until the caller gives up on it.
+func hang(req *http.Request) error {
+	<-req.Context().Done()
+	return req.Context().Err()
 }
 
 func newMulti(t *testing.T) *multi {
@@ -39,6 +84,8 @@ func newMulti(t *testing.T) *multi {
 	h := &multi{t: t, lux: fakelux.New(), dir: t.TempDir(), term: newClientTerm(24, 80), ui: &fakeUI{choose: -1}}
 	t.Cleanup(h.lux.Close)
 	h.cl, _ = luxapi.New(h.lux.Config())
+	h.rt = &hookRT{base: http.DefaultTransport}
+	h.cl.C.HTTP = &http.Client{Transport: h.rt}
 	cfg, err := config.Parse(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +94,10 @@ func newMulti(t *testing.T) *multi {
 	pr, pw := io.Pipe()
 	h.keys = pw
 	h.con = NewConsole(pr, h.term)
-	t.Cleanup(func() { pw.Close() })
+	t.Cleanup(func() {
+		pw.Close()
+		h.con.Close(time.Second)
+	})
 	return h
 }
 
@@ -68,6 +118,9 @@ func (h *multi) attach(name string) {
 		Crash:   func(msg string) { h.t.Errorf("crash: %s", msg); runtime.Goexit() },
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond, NoticeFor: 300 * time.Millisecond,
 		RestoreWait: 300 * time.Millisecond, Poll: 50 * time.Millisecond}
+	if h.opts != nil {
+		h.opts(&opt)
+	}
 	h.done = make(chan [2]string, 1)
 	go func() {
 		r, n, err := Attach(context.Background(), opt, sess)
@@ -291,6 +344,245 @@ func TestSwitchToLockedSessionStays(t *testing.T) {
 	h.detach()
 }
 
+// stayedOn checks that a failed switch from m left session name shown
+// again, with a notice that drew want since mark, and Attach running.
+func (h *multi) stayedOn(m *Mux, name string, mark int, want string) {
+	h.t.Helper()
+	h.waitFor(name+" again", func() bool { return h.con.Current() != m })
+	h.on(name)
+	h.waitDrawn("switching notice", mark, "switching to session ")
+	h.waitDrawn("failure notice", mark, want)
+	select {
+	case r := <-h.done:
+		h.t.Fatalf("Attach returned %q after a failed switch", r)
+	default:
+	}
+}
+
+// TestSwitchTargetHangsStays: lux hanging on the target's listing ends the
+// switch after its own timeout; the session is reattached from the state
+// it saved, with a notice, and luxmux goes on.
+func TestSwitchTargetHangsStays(t *testing.T) {
+	h := newMulti(t)
+	h.opts = func(o *Options) { o.switchOpenWait = time.Second }
+	h.make("b", "B-SCREEN")
+	h.attach("a")
+	idA := h.on("a")
+	h.lux.Term(idA).Output([]byte("A-SCREEN\r\n"))
+	h.waitScreen("a's text", "A-SCREEN")
+	h.rt.set(func(req *http.Request) error {
+		if listing(req, "b") {
+			return hang(req)
+		}
+		return nil
+	})
+	m := h.con.Current()
+	mark := len(h.term.rawBytes())
+	start := time.Now()
+	m.startSwitch(&switchTarget{name: "b"})
+	h.stayedOn(m, "a", mark, "session b: ")
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("back on a after %v", d)
+	}
+	h.waitScreen("a restored", "A-SCREEN")
+	if _, held := state.Held(h.dir, "b"); held {
+		t.Fatal("b's lock is held after its open timed out")
+	}
+	h.rt.set(nil)
+	h.detach()
+}
+
+// TestSwitchLuxRefusesStays: with lux refusing every listing, a failed
+// switch does not need lux to go back: the session is reattached from
+// the state it saved, with a notice, and luxmux goes on.
+func TestSwitchLuxRefusesStays(t *testing.T) {
+	h := newMulti(t)
+	h.make("b", "B-SCREEN")
+	h.attach("a")
+	idA := h.on("a")
+	h.lux.Term(idA).Output([]byte("A-SCREEN\r\n"))
+	h.waitScreen("a's text", "A-SCREEN")
+	refused := errors.New("lux refused the listing")
+	h.rt.set(func(req *http.Request) error {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/runs" {
+			return refused
+		}
+		return nil
+	})
+	m := h.con.Current()
+	mark := len(h.term.rawBytes())
+	m.startSwitch(&switchTarget{name: "b"})
+	// The notice is cut to the terminal's width before the error's end.
+	h.stayedOn(m, "a", mark, "session b: Get ")
+	h.waitScreen("a restored", "A-SCREEN")
+	if got := h.con.Current().windowRuns(); !slices.Equal(got, []string{idA}) {
+		t.Fatalf("a's windows %v, want [%s]", got, idA)
+	}
+	h.rt.set(nil)
+	h.detach()
+}
+
+// TestStepWhileLuxHangsKeepsKeys: C-b ) and C-b ( with lux hanging on
+// the sessions' listing leave the keyboard to the session: what is typed
+// next reaches its shell, and C-b d detaches at once.
+func TestStepWhileLuxHangsKeepsKeys(t *testing.T) {
+	h := newMulti(t)
+	h.make("b", "B-SCREEN")
+	h.attach("a")
+	idA := h.on("a")
+	var lists atomic.Int32
+	h.rt.set(func(req *http.Request) error {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/runs" && req.URL.Query().Get("label") == config.LabelApp+"="+config.AppName {
+			lists.Add(1)
+			return hang(req)
+		}
+		return nil
+	})
+	h.type_("\x02)")
+	h.waitFor("the listing asked", func() bool { return lists.Load() == 1 })
+	h.type_("\x02(")
+	h.type_("typed-while-listing")
+	h.waitFor("keys in a", func() bool { return strings.Contains(termText(h.lux.Term(idA)), "typed-while-listing") })
+	if lists.Load() != 1 {
+		t.Fatalf("%d listings: a step while one lists starts another", lists.Load())
+	}
+	start := time.Now()
+	h.detach()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("detach took %v with a listing hung", d)
+	}
+}
+
+// TestSwitchToVanishedSessionStays: a target gone between the chooser's
+// listing and Enter (killed elsewhere) leaves this session reattached
+// with a notice, and the target's lock free. GC is off: a leaked lock's
+// descriptor must not be closed by its finalizer.
+func TestSwitchToVanishedSessionStays(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	h := newMulti(t)
+	h.attach("a")
+	idA := h.on("a")
+	h.lux.Term(idA).Output([]byte("A-SCREEN\r\n"))
+	m := h.con.Current()
+	mark := len(h.term.rawBytes())
+	m.startSwitch(&switchTarget{name: "ghost"})
+	h.stayedOn(m, "a", mark, "session ghost: no session ghost")
+	h.waitScreen("a restored", "A-SCREEN")
+	if _, held := state.Held(h.dir, "ghost"); held {
+		t.Fatal("ghost's lock is held after its open failed")
+	}
+	if u, err := state.Lock(h.dir, "ghost"); err != nil {
+		t.Fatalf("ghost's lock after the failed switch: %v", err)
+	} else {
+		u()
+	}
+	h.detach()
+}
+
+// TestSwitchRelocksAfterBriefHold: a failed switch retries this
+// session's lock while another process holds it for a moment (luxmux
+// new-window -t), instead of ending luxmux.
+func TestSwitchRelocksAfterBriefHold(t *testing.T) {
+	h := newMulti(t)
+	h.attach("a")
+	h.on("a")
+	var held atomic.Bool
+	m := h.con.Current()
+	m.mu.Lock()
+	m.opt.afterSwitchUnlock = func() {
+		unlock, err := state.Lock(h.dir, "a")
+		if err != nil {
+			t.Errorf("taking a's lock in the gap: %v", err)
+			return
+		}
+		held.Store(true)
+		time.AfterFunc(60*time.Millisecond, unlock)
+	}
+	m.mu.Unlock()
+	mark := len(h.term.rawBytes())
+	m.startSwitch(&switchTarget{name: "ghost"})
+	h.stayedOn(m, "a", mark, "session ghost: no session ghost")
+	if !held.Load() {
+		t.Fatal("the lock was not taken in the gap")
+	}
+	h.detach()
+}
+
+// TestSwitchDoesNotWaitForSpareSubmit: a switch cancels a spare submit
+// lux has not answered instead of waiting for it; the spare lux made
+// anyway is recorded when the session is attached again, and no second
+// one is submitted.
+func TestSwitchDoesNotWaitForSpareSubmit(t *testing.T) {
+	h := newMulti(t)
+	cfg, err := config.Parse([]byte(cfgSpare))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+	h.make("b", "B-SCREEN")
+	held := make(chan struct{}, 1)
+	h.rt.set(func(req *http.Request) error {
+		if req.Method != http.MethodPost || req.URL.Path != "/v1/runs" || req.URL.RawQuery != "" {
+			return nil
+		}
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		if !bytes.Contains(body, []byte(`"`+config.LabelSpare+`":"true"`)) || !bytes.Contains(body, []byte(`"`+config.LabelSession+`":"a"`)) {
+			return nil
+		}
+		// lux makes the Run; its answer never reaches luxmux.
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		select {
+		case held <- struct{}{}:
+		default:
+		}
+		return hang(req)
+	})
+	h.attach("a")
+	h.on("a")
+	<-held
+	spares := func() []string {
+		var ids []string
+		for _, id := range h.lux.RunIDs() {
+			r := h.lux.Run(id)
+			if r.Labels[config.LabelSpare] == "true" && r.Labels[config.LabelSession] == "a" {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+	late := spares()
+	if len(late) != 1 {
+		t.Fatalf("a's spares %v", late)
+	}
+	h.ui.session = SessionChoice{Switch: "b"}
+	start := time.Now()
+	h.type_("\x02s")
+	h.on("b")
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the switch took %v with a spare submit in flight", d)
+	}
+	h.rt.set(nil)
+	h.ui.session = SessionChoice{Switch: "a"}
+	h.type_("\x02s")
+	h.on("a")
+	key := config.SpecKey(cfg.Profiles["dev"])
+	h.waitFor("the late spare recorded", func() bool {
+		m := h.con.Current()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.sess.Spares[key] == late[0]
+	})
+	time.Sleep(100 * time.Millisecond)
+	if got := spares(); !slices.Equal(got, late) {
+		t.Fatalf("a's spares %v after reattaching, want only %v", got, late)
+	}
+	h.detach()
+}
+
 // TestSessionOrderSkipsLocked: C-b ) and C-b ( step through the sessions
 // by name, wrapping, past one attached elsewhere, with a notice.
 func TestSessionOrderSkipsLocked(t *testing.T) {
@@ -480,6 +772,17 @@ func TestSessionPreview(t *testing.T) {
 		t.Fatal("a session attached elsewhere was attached for its preview")
 	}
 	h.detach()
+}
+
+// windowRuns are m's windows' Runs, in order.
+func (m *Mux) windowRuns() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for _, w := range m.windows {
+		ids = append(ids, w.RunID)
+	}
+	return ids
 }
 
 // termText is a fake Run terminal's screen as text.

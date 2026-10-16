@@ -272,8 +272,10 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
 		if err == nil {
 			// Not cancelled by a detach: lux may make the Run anyway,
-			// and luxmux must learn its id to record it.
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(m.ctx), 30*time.Second)
+			// and luxmux must learn its id to record it. A switch does
+			// cancel it (stopSpares): the next attach's listing records
+			// the Run lux made (sessions.Open).
+			ctx, cancel := context.WithTimeout(m.spareCtx, 30*time.Second)
 			run, err = m.lux.Submit(ctx, sp)
 			cancel()
 		}

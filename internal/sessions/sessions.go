@@ -155,9 +155,9 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 }
 
 // Open reads session name for attaching, as luxmux attach does: its file
-// reconciled with its Runs (and the Runs new-window made that it lacks),
-// else rebuilt from their labels. existed is false when there is neither.
-// The caller holds the session's lock.
+// reconciled with its Runs (and the Runs new-window made, and the waiting
+// spares, that it lacks), else rebuilt from their labels. existed is
+// false when there is neither. The caller holds the session's lock.
 func Open(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
 	if label, err = Label(dir, name); err != nil {
 		return nil, "", false, err
@@ -177,6 +177,7 @@ func Open(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config,
 		}
 		state.RecordExternal(sess, label, runs, cfg.Profiles)
 		sess.Reconcile(known)
+		state.RecordSpares(sess, label, runs)
 		return sess, label, true, nil
 	}
 	sess = state.RebuildLabelled(name, label, runs, cfg.Profiles)
