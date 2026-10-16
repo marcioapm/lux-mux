@@ -97,6 +97,11 @@ type Server struct {
 	// (reason terminate) until FinishTerminate, as luxd does until the
 	// Run's runner has stopped it.
 	HoldTerminate bool
+	// ExecEnv, if set, is the environment (beyond the test process's) a
+	// Run's exec commands get; nil makes every exec answer 409, as a
+	// host whose workload has not started.
+	ExecEnv func(run *api.Run) []string
+	execs   [][]string
 
 	// failing: every attach to the Run is ended with this error as its
 	// first frame (FailAttaches).
@@ -243,6 +248,7 @@ func NewWithKey(key string) *Server {
 	mux.HandleFunc("POST /v1/runs/{id}/terminate", s.terminate)
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resume)
 	mux.HandleFunc("GET /v1/runs/{id}/attach", s.attach)
+	mux.HandleFunc("GET /v1/runs/{id}/exec", s.exec)
 	mux.HandleFunc("GET /v1/events", s.feed)
 	mux.HandleFunc("GET /v1/pools", s.listPools)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
