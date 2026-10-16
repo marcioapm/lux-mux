@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1031,5 +1032,56 @@ func TestAttachRecordsExternalOnItsLux(t *testing.T) {
 	}
 	if slices.Contains(lux.Requests(), "GET /v1/runs/"+far) {
 		t.Fatal("the far Run was looked for on the near lux")
+	}
+}
+
+// TestEndUnterminatedSpareNamed: the last window's shell exits while the
+// far lux refuses the key: the far spare cannot be terminated, and
+// luxmux says the session file is kept and names the spare.
+func TestEndUnterminatedSpareNamed(t *testing.T) {
+	_, env := e2eEnv(t)
+	const keyB = "lux_fake_key_BBBB_e2e_test"
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	var cfgDir, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgDir = filepath.Join(dir, "luxmux")
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile = \"near\"\n[profiles.near]\nimage = \"alpine\"\n[profiles.far]\nimage = \"alpine\"\nwarm_spare = true\n" +
+		"lux_url = \"" + b.URL + "\"\napi_key_env = \"LMX_E2E_FAR_KEY\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, append(env, "LMX_E2E_FAR_KEY="+keyB), "new -s ks")
+	p.wait("prompt", has("$"))
+	if !fakelux.WaitFor(context.Background(), 15*time.Second, func() bool {
+		s, _, _ := state.Load(stateDir, "ks")
+		return s != nil && len(b.RunIDs()) == 1 && slices.Contains(slices.Collect(maps.Values(s.Spares)), b.RunIDs()[0])
+	}) {
+		t.Fatalf("no spare recorded on the far lux: %v", b.RunIDs())
+	}
+	spare := b.RunIDs()[0]
+	p.typ("\x02d")
+	p.exited()
+
+	p = startLuxmux(t, append(env, "LMX_E2E_FAR_KEY=lux_fake_key_AAAA_e2e_test"), "attach -t ks")
+	p.wait("prompt", has("$"))
+	p.typ("exit\r")
+	p.exited()
+	out := p.rawSince(0)
+	if !strings.Contains(out, "session file kept: Runs not terminated:") || !strings.Contains(out, spare+" on ") {
+		t.Fatalf("output %q", out)
+	}
+	if _, ok, _ := state.Load(stateDir, "ks"); !ok || b.Run(spare).State != "running" {
+		t.Fatalf("file kept %v, spare %s", ok, b.Run(spare).State)
 	}
 }
