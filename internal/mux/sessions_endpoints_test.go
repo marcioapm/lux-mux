@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"net/http"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -420,6 +421,7 @@ func TestSwitchLeavesLeftoverTerminate(t *testing.T) {
 	var once sync.Once
 	release := func() { once.Do(func() { close(gate) }) }
 	t.Cleanup(release)
+	enders := leftoverEnders()
 	h.b.SetTerminateHook(func(id string) {
 		if id == left {
 			select {
@@ -436,6 +438,9 @@ func TestSwitchLeavesLeftoverTerminate(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the leftover's terminate was not sent")
 	}
+	if n := leftoverEnders(); n <= enders {
+		t.Fatalf("%d leftover terminate goroutines while one is in flight, %d before", n, enders)
+	}
 	start := time.Now()
 	h.ui.session = SessionChoice{Switch: "c"}
 	h.type_("\x02s")
@@ -445,7 +450,9 @@ func TestSwitchLeavesLeftoverTerminate(t *testing.T) {
 	}
 	release()
 	h.waitFor("the leftover terminated", func() bool { return slices.Contains(h.b.Terminated(), left) })
-	time.Sleep(200 * time.Millisecond)
+	// Its effects, if any, are made before the goroutine that sent the
+	// terminate returns.
+	h.waitFor("the leftover's terminate goroutine returned", func() bool { return leftoverEnders() <= enders })
 	if f, _, _ := state.Load(h.dir, "a"); f == nil || f.Spares[state.LeftoverPrefix+left] != left {
 		t.Fatalf("a.json after the switch: %+v", f)
 	}
@@ -456,6 +463,88 @@ func TestSwitchLeavesLeftoverTerminate(t *testing.T) {
 	if inC || m.Session() != "c" {
 		t.Fatalf("session %s holds a's leftover: %v", m.Session(), inC)
 	}
+	h.detach()
+}
+
+// leftoverEnders counts the goroutines goEndLeftover runs.
+func leftoverEnders() int {
+	buf := make([]byte, 1<<22)
+	buf = buf[:runtime.Stack(buf, true)]
+	return strings.Count(string(buf), "mux.(*Mux).goEndLeftover.func")
+}
+
+// TestNewSessionRecordsUnlisted: a session created from the chooser while
+// lux b does not answer records b in its Unlisted, as luxmux new does, so
+// b's Runs labelled with its name join it once b answers.
+func TestNewSessionRecordsUnlisted(t *testing.T) {
+	h := newMultiTwo(t)
+	h.attach("a")
+	h.on("a")
+	h.b.SetDown(true)
+	h.ui.session = SessionChoice{New: &NewSessionRequest{Name: "fresh", ProfileName: "base", Profile: h.cfg.Profiles["base"]}}
+	h.type_("\x02s")
+	h.on("fresh")
+	m := h.con.Current()
+	m.mu.Lock()
+	un := slices.Clone(m.sess.Unlisted)
+	m.mu.Unlock()
+	if !slices.Equal(un, []config.Endpoint{h.bEP()}) {
+		t.Fatalf("fresh's Unlisted %v, want b", un)
+	}
+	h.detach()
+	if s, _, _ := state.Load(h.dir, "fresh"); s == nil || !slices.Contains(s.Unlisted, h.bEP()) {
+		t.Fatalf("fresh.json %+v", s)
+	}
+}
+
+// TestNewSessionFirstLuxDown: a session created from the chooser whose
+// first window is on lux b, while b does not answer, is refused with a
+// notice naming it; this session stays, and no file is made.
+func TestNewSessionFirstLuxDown(t *testing.T) {
+	h := newMultiTwo(t)
+	h.attach("a")
+	m := h.con.Current()
+	h.on("a")
+	h.b.SetDown(true)
+	h.ui.session = SessionChoice{New: &NewSessionRequest{Name: "fresh", ProfileName: "remote", Profile: h.cfg.Profiles["remote"]}}
+	mark := len(h.term.rawBytes())
+	h.type_("\x02s")
+	// SetDown makes b answer 503: its listing error is the notice.
+	h.waitDrawn("a notice naming fresh", mark, "session fresh: luxd is unavailable")
+	h.on("a")
+	if cur := h.con.Current(); cur == m {
+		t.Fatal("no switch was tried")
+	}
+	if _, ok, _ := state.Load(h.dir, "fresh"); ok {
+		t.Fatal("fresh was made with its first window's lux down")
+	}
+	h.detach()
+}
+
+// TestRenamedAdoptsExternalOnB: in a renamed session, a Run new-window
+// made on lux b under the session's label (its old name) is adopted as a
+// window while the session is attached.
+func TestRenamedAdoptsExternalOnB(t *testing.T) {
+	h := newMultiTwo(t)
+	h.attach("a")
+	h.on("a")
+	h.type_("\x02$")
+	h.waitScreen("prompt", "rename session: a")
+	h.type_("\x15alpha\r")
+	h.waitFor("renamed", func() bool { return h.con.Current().Session() == "alpha" })
+	sp, err := config.RunSpec(config.Profile{Image: "img"}, config.Target{Session: "a", Profile: "remote"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.Labels[config.LabelExternal] = "true"
+	c, _ := luxapi.New(h.b.Config())
+	r, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := h.con.Current()
+	h.waitFor("external Run on b adopted", func() bool { return slices.Contains(m.windowRuns(), r.ID) })
+	h.waitFor("its stream open on b", func() bool { return h.b.Streams(r.ID) > 0 })
 	h.detach()
 }
 
