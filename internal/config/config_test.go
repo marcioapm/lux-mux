@@ -199,9 +199,7 @@ func TestRunSpec(t *testing.T) {
 		Secrets: []api.Secret{{Name: "NPM_TOKEN", Value: "n", As: "env"}, {Name: "GH_TOKEN", Value: "g"}},
 		Git: &api.Git{Repositories: []api.Repository{{Name: "my-app", URL: "git@github.com:example/My.App.git",
 			Ref: "dev", Credential: "GH_TOKEN"}}},
-		Volumes: []api.Volume{
-			{Name: "workspace", Path: "/workspace", Kind: "state"},
-		},
+		Volumes:   []api.Volume{{Name: "workspace", Path: "/workspace", Kind: "state"}},
 		Resources: api.Resources{Size: "m-2-arm64"},
 		Placement: api.Placement{Pool: "m"},
 		Network:   api.Network{Egress: []api.EgressRule{{Host: "github.com"}, {CIDR: "10.0.0.0/8"}}},
