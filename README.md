@@ -19,7 +19,8 @@ go install github.com/marcioapm/lux-mux/cmd/luxmux@latest
 
 luxmux signs in to lux the same way the lux CLI does: `~/.config/lux/config.toml`
 (`url`, `api_key`, `tenant`), or `LUX_URL`, `LUX_API_KEY` and `LUX_TENANT`.
-There is no separate login.
+There is no separate login. A profile can name another lux, tenant or key
+(see [Several luxes](#several-luxes-tenants-and-keys)).
 
 ## Quick start
 
@@ -254,7 +255,55 @@ spare (off by default) and to make the window's profile the session's
 default for `C-b c` (off by default), and can save the result as a new
 profile. It is checked with
 lux's dry run first, and anything that would keep it from starting now is
-shown before you create it.
+shown before you create it. Under the profile it shows, read-only, the lux
+and tenant the profile's windows are made on (`lux.example.com · tenant
+example`), and its pools are that lux's.
+
+## Several luxes, tenants and keys
+
+Each profile may name the lux its windows live on, its tenant, and where
+its API key is; each one left out is the lux CLI configuration's:
+
+```toml
+[profiles.example]
+image = "ghcr.io/example/dev:latest"
+lux_url = "https://lux.example.com"
+tenant = "example"
+api_key_env = "EXAMPLE_LUX_API_KEY"     # the key is read from this environment variable…
+# api_key_file = "~/.config/luxmux/example.key"   # …or from this file, mode 0600
+pool = "example-pool"
+```
+
+With both `api_key_env` and `api_key_file`, the variable wins when it is
+set. With neither, the key is the lux CLI's (`api_key`, `LUX_API_KEY`).
+
+- `luxmux new -p` and `new-window -p` check and submit on the profile's lux.
+- Each window remembers its lux; attaching, resuming, terminating and its
+  warm spares go through that lux, with its key and tenant.
+- One event stream is kept per distinct lux (URL, tenant and key source),
+  shared by its windows; windows `new-window` makes are adopted from every
+  lux the configuration's profiles name.
+- `luxmux attach` of a session whose file is gone rebuilds it from every
+  lux the profiles name. A lux that does not answer is named on stderr;
+  the other luxes' windows work, and its windows are added once it
+  answers. In a session whose file has them, its windows show `endpoint
+  unreachable` until it does.
+- `luxmux ls`, `kill-session` and `spares` go across every lux, and say
+  which one did not answer.
+- The chooser marks with `@` a window on a lux other than the lux CLI's,
+  and names that lux above the preview.
+
+Security:
+
+- **A key is never written in `config.toml`**: a profile with `api_key` is
+  refused, pointing to `api_key_env` and `api_key_file`.
+- **`api_key_file` must be readable by you only** (mode `0600` or `0400`): a
+  file group or others may read is refused, with the `chmod` that fixes it.
+  Its first line is the key.
+- **The key is never stored or shown**: the session file records a window's
+  lux as its URL, tenant and the *name* of the variable or file the key
+  comes from; luxmux writes no logs, and its notices, errors, labels and
+  screens name a lux the same way. A URL with credentials in it is refused.
 
 ## Moves and reconnects
 
@@ -332,8 +381,9 @@ restore whose screen was too large to snapshot.
 ## Warm spares
 
 With `warm_spare = true`, luxmux keeps one extra started Run of that
-profile, labelled as a spare (with a hash of the Run's spec). A new window
-whose spec is the same takes it at once and a replacement is started; a
+profile on the profile's lux, labelled as a spare (with a hash of the
+Run's spec); the same spec on two luxes keeps a spare on each. A new window
+whose spec and lux are the same takes it at once and a replacement is started; a
 window from the dialog with an edited spec gets a Run of its own, and a
 spare is kept for it only if it was saved as a profile. A spare found
 stopped or ended when claimed is terminated and replaced. **A spare is a running Run and is
@@ -343,7 +393,7 @@ session's last window closing does too.
 
 ## Sessions and local state
 
-A session's window order, names and spare claims are kept in
+A session's window order, names, each window's lux and spare claims are kept in
 `$XDG_STATE_HOME/luxmux/<session>.json` (`~/.local/state/luxmux/`). Every
 Run is also labelled `luxmux-session=<session>` and
 `luxmux-profile=<profile>` (and `app=luxmux`), so when that file is gone —
