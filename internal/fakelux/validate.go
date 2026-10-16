@@ -17,13 +17,17 @@ type specError struct {
 
 // normalized is lux's own RunSpec.Normalize (lux internal/spec/spec.go)
 // run on a copy of sp with luxd's built-in defaults: what luxd refuses
-// with 422 invalid_spec before anything else. Normalize's Defaults type
-// is internal to lux; zeroOf names it through the method's signature.
+// with 422 invalid_spec before anything else, and the spec it stores.
+// Normalize's Defaults type is internal to lux; zeroOf names it through
+// the method's signature.
 func normalized(sp api.RunSpec) (api.RunSpec, *specError) {
 	var cp api.RunSpec
 	b, _ := json.Marshal(sp)
 	_ = json.Unmarshal(b, &cp)
 	d := zeroOf(cp.Normalize)
+	// spec.BuiltinDefaults (lux internal/spec/spec.go), luxd's Defaults
+	// when the operator sets none (internal/server/server.go); not exported.
+	d.CPUs, d.Memory, d.Disk, d.Pids = 2, 8<<30, 20<<30, 4096
 	if err := cp.Normalize(d); err != nil {
 		return cp, &specError{422, "invalid_spec", err.Error()}
 	}

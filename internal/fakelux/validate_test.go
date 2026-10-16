@@ -7,6 +7,7 @@ import (
 
 	"github.com/marcioapm/lux/api"
 
+	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
@@ -140,6 +141,39 @@ func TestSubmitValidatesAsLuxd(t *testing.T) {
 		got, _ := c.Get(context.Background(), r.ID)
 		if (got.Sizing != nil) != tc.sizing || (tc.sizing && (got.Sizing.Resolved.Size != tc.size || (got.Sizing.Requested.CPUs != nil) != tc.reqCPUs)) {
 			t.Errorf("%+v: sizing %+v", tc, got.Sizing)
+		}
+	}
+}
+
+// TestStoresNormalizedSpec: GET and the listing return the spec as luxd
+// stores it: normalized with luxd's built-in defaults (resources, a
+// repository's ref and path, a credential secret runner-only and not in
+// the environment), without secret values.
+func TestStoresNormalizedSpec(t *testing.T) {
+	s := New()
+	defer s.Close()
+	c, _ := luxapi.New(s.Config())
+	sp := shellSpec(api.Repository{Name: "a", URL: "https://example.com/a.git", Credential: "TOKEN"})
+	sp.Secrets = []api.Secret{{Name: "TOKEN", Value: "v"}}
+	sp.Labels = map[string]string{config.LabelApp: config.AppName}
+	r, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Get(context.Background(), r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := c.ListAll(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("listing %v %v", listed, err)
+	}
+	for _, run := range []*api.Run{got, listed[0]} {
+		res, repo := run.Spec.Resources, run.Spec.Git.Repositories[0]
+		if res.CPUs != 2 || res.Memory != 8<<30 || res.Disk != 20<<30 || res.Pids != 4096 ||
+			repo.Ref != "HEAD" || repo.Path != "/workspace/repos/a" ||
+			len(run.Spec.Secrets) != 1 || run.Spec.Secrets[0].Value != "" || run.Spec.Secrets[0].As != "none" || !run.Spec.Secrets[0].RunnerOnly || run.Sizing != nil {
+			t.Fatalf("stored %+v sizing %+v", run.Spec, run.Sizing)
 		}
 	}
 }

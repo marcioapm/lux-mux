@@ -315,7 +315,8 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	// luxd's order: Normalize, then (validateOnly) the pool and size, or
 	// (a submit) the secret values, then the pool and size.
 	validateOnly := req.URL.Query().Get("validateOnly") == "true"
-	if _, e := normalized(sp); e != nil {
+	norm, e := normalized(sp)
+	if e != nil {
 		e.write(w)
 		return
 	}
@@ -328,8 +329,9 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	pool, from, known := s.resolvePool(sp.Placement.Pool)
 	s.mu.Unlock()
-	stored := sp
-	stored.Resources.Size = ""
+	// luxd stores the normalized spec, secret values and size split off;
+	// the size is resolved from the resources as submitted.
+	stored, _, _ := norm.SplitSecrets()
 	sizing, e := resolveSize(pool, sp.Resources, &stored.Resources)
 	if e != nil {
 		e.write(w)
