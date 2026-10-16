@@ -62,6 +62,8 @@ OVERRIDES change the profile for this window:
   --image I  --pool P  --size S | --cpus N --memory M --disk D
   --secret NAME                   one more secret (repeatable)
   --workdir W                     the shell's working directory
+  --on-start CMD | --on-resume CMD  run in the window before its prompt: on the
+                                  Run's first start, on each later placement
 
 Inside a session the prefix is C-b by default; C-b ? lists the keys.
 `
