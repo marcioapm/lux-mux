@@ -185,16 +185,10 @@ func (c *SessionChooser) Key(k string) tea.Cmd {
 			c.mode = modeList
 		case "esc":
 			c.filter, c.mode = "", modeList
-		case "backspace":
-			if r := []rune(c.filter); len(r) > 0 {
-				c.filter = string(r[:len(r)-1])
-			}
 		case "up", "down":
 			c.move(k)
 		default:
-			if len([]rune(k)) == 1 {
-				c.filter += k
-			}
+			c.filter = editLine(c.filter, k)
 		}
 		c.clampCursor()
 		return nil
@@ -215,14 +209,8 @@ func (c *SessionChooser) Key(k string) tea.Cmd {
 			c.mode = modeList
 		case "esc":
 			c.mode = modeList
-		case "backspace":
-			if r := []rune(c.input); len(r) > 0 {
-				c.input = string(r[:len(r)-1])
-			}
 		default:
-			if len([]rune(k)) == 1 {
-				c.input += k
-			}
+			c.input = editLine(c.input, k)
 		}
 		return cmd
 	case modeConfirmKill:
@@ -273,6 +261,21 @@ func (c *SessionChooser) Key(k string) tea.Cmd {
 	return nil
 }
 
+// editLine applies key k to a line being typed: backspace drops its last
+// rune, a single rune is appended, any other key leaves it.
+func editLine(s, k string) string {
+	if k == "backspace" {
+		if r := []rune(s); len(r) > 0 {
+			return string(r[:len(r)-1])
+		}
+		return s
+	}
+	if len([]rune(k)) == 1 {
+		return s + k
+	}
+	return s
+}
+
 func (c *SessionChooser) selectName(name string) {
 	for i, s := range c.Visible() {
 		if s.Name == name {
@@ -305,43 +308,10 @@ func (c *SessionChooser) View() string {
 	b.WriteString(palette.section.Render(fit(header, c.cols)) + "\n")
 	start := max(0, c.cursor-listRows+1)
 	for i := start; i < start+listRows; i++ {
-		if i >= len(vis) {
-			b.WriteString("\n")
-			continue
+		if i < len(vis) {
+			b.WriteString(c.row(vis[i], i == c.cursor))
 		}
-		s := vis[i]
-		mark := "  "
-		if i == c.cursor {
-			mark = "▸ "
-		}
-		name := s.Name
-		if s.Current {
-			name += " *"
-		}
-		attached := "-"
-		switch {
-		case s.Current:
-			attached = "here"
-		case s.Elsewhere:
-			attached = "elsewhere"
-		}
-		attachedCol := fit(attached, 10)
-		if s.Elsewhere {
-			attachedCol = palette.warning.Render(attachedCol)
-		}
-		prof, when := s.DefaultProfile, "-"
-		if prof == "" {
-			prof = "-"
-		}
-		if !s.Created.IsZero() {
-			when = age(c.now().Sub(s.Created))
-		}
-		line := fmt.Sprintf("%s%-18s %-7d %s %-16s %s", mark, fit(name, 18), s.Windows, attachedCol, fit(prof, 16), when)
-		line = fitLine(line, c.cols)
-		if i == c.cursor {
-			line = palette.focus.Render(fitLine(ansi.Strip(line), c.cols))
-		}
-		b.WriteString(line + "\n")
+		b.WriteString("\n")
 	}
 	b.WriteString(palette.border.Render(strings.Repeat("─", max(c.cols, 1))) + "\n")
 	prevRows := c.rows - listRows - 3
@@ -359,6 +329,49 @@ func (c *SessionChooser) View() string {
 		}
 		b.WriteString("\n")
 	}
+	b.WriteString(c.status())
+	return b.String()
+}
+
+// row is session s's line in the list, highlighted when focused.
+func (c *SessionChooser) row(s mux.SessionInfo, focused bool) string {
+	mark := "  "
+	if focused {
+		mark = "▸ "
+	}
+	name := s.Name
+	if s.Current {
+		name += " *"
+	}
+	attached := "-"
+	switch {
+	case s.Current:
+		attached = "here"
+	case s.Elsewhere:
+		attached = "elsewhere"
+	}
+	attachedCol := fit(attached, 10)
+	if s.Elsewhere {
+		attachedCol = palette.warning.Render(attachedCol)
+	}
+	prof, when := s.DefaultProfile, "-"
+	if prof == "" {
+		prof = "-"
+	}
+	if !s.Created.IsZero() {
+		when = age(c.now().Sub(s.Created))
+	}
+	line := fmt.Sprintf("%s%-18s %-7d %s %-16s %s", mark, fit(name, 18), s.Windows, attachedCol, fit(prof, 16), when)
+	line = fitLine(line, c.cols)
+	if focused {
+		line = palette.focus.Render(fitLine(ansi.Strip(line), c.cols))
+	}
+	return line
+}
+
+// status is the chooser's last line: the mode's prompt, a message, or
+// the keys.
+func (c *SessionChooser) status() string {
 	var status string
 	switch {
 	case c.mode == modeFilter:
@@ -395,8 +408,7 @@ func (c *SessionChooser) View() string {
 	default:
 		status = keyHints(status)
 	}
-	b.WriteString(status)
-	return b.String()
+	return status
 }
 
 // sessionProgram adapts the session chooser, and the new-session dialog
