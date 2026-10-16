@@ -14,6 +14,7 @@ import (
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/luxapi"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
@@ -379,7 +380,7 @@ func TestAttachRecordsExternalWindows(t *testing.T) {
 	defer lux.Close()
 	lux.SetHoldTerminate(true)
 	cfg, _ := config.Parse([]byte(twoProfiles))
-	c, _ := client(Env{Lux: lux.Config})
+	c, _ := luxapi.New(lux.Config())
 	first := submit(t, lux, "work", "a", false)
 	external := func(session string, spare bool) string {
 		t.Helper()
@@ -415,8 +416,8 @@ func TestAttachRecordsExternalWindows(t *testing.T) {
 	other := lux.Run(external("other", false))
 	runs = append(runs, &other)
 	s := &state.Session{Name: "work", Windows: []state.Window{{RunID: first, Name: "a", Profile: "a"}}}
-	state.RecordExternal(s, "work", runs, cfg.Profiles)
-	state.RecordExternal(s, "work", runs, cfg.Profiles)
+	state.RecordExternal(s, "work", []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg.Profiles)
+	state.RecordExternal(s, "work", []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg.Profiles)
 	if len(s.Windows) != 2 || s.Windows[1].RunID != ext || s.Windows[1].Name != "ext" || s.Windows[1].Profile != "b" {
 		t.Fatalf("windows %+v", s.Windows)
 	}

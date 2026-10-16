@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -140,8 +141,6 @@ func run(env Env, args []string) error {
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
 }
 
-func client(env Env) (*luxapi.Client, error) { return luxapi.New(env.Lux()) }
-
 func loadConfig(env Env) (*config.Config, error) { return config.Load(env.ConfigPath) }
 
 func freeName(env Env) (string, error) {
@@ -169,7 +168,10 @@ func freeName(env Env) (string, error) {
 }
 
 // newSession creates session o.Session with a first window of o's
-// profile and overrides, and attaches it.
+// profile and overrides, and attaches it. Its name must be free on every
+// lux (sessions.CheckFree); the lux the first window goes to must answer.
+// Runs of the name on another lux that did not answer join the session
+// once it does, as a rebuild's do.
 func newSession(env Env, o windowFlags) error {
 	name := o.Session
 	if err := sessions.CheckName(name); err != nil {
@@ -180,17 +182,6 @@ func newSession(env Env, o windowFlags) error {
 		return err
 	}
 	defer unlock()
-	c, err := client(env)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := sessions.CheckFree(ctx, c, env.StateDir, name, "", true); errors.Is(err, sessions.ErrTaken) {
-		return fmt.Errorf("%w: luxmux attach -t %s", err, name)
-	} else if err != nil {
-		return err
-	}
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
@@ -199,6 +190,23 @@ func newSession(env Env, o windowFlags) error {
 	if err != nil {
 		return err
 	}
+	eps := endpoints(env)
+	ep := eps.Of(p)
+	c, err := eps.Client(ep)
+	if err != nil {
+		return err
+	}
+	ls, err := sessions.CheckFree(context.Background(), luxes(env, eps, cfg), env.StateDir, name, "", true)
+	if errors.Is(err, sessions.ErrTaken) {
+		return fmt.Errorf("%w: luxmux attach -t %s", err, name)
+	} else if err != nil {
+		return err
+	}
+	if err := ls.ErrOn(ep); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
 	if err := dryRun(ctx, env, c, name, profile, p); err != nil {
 		return err
 	}
@@ -209,11 +217,14 @@ func newSession(env Env, o windowFlags) error {
 	}
 	// Only -p pins the session's default; without it C-b c follows
 	// default_profile.
-	return runMux(env, c, &state.Session{Name: name, DefaultProfile: o.Profile}, name, unlock, &p)
+	return startMux(env, eps, &state.Session{Name: name, DefaultProfile: o.Profile, Unlisted: ls.Unlisted()}, name, unlock, &p)
 }
 
-// attach attaches name: its file, else rebuilt from its Runs' labels.
-// create makes it when there is neither.
+// attach attaches name: its file, else rebuilt from its Runs' labels on
+// every lux the configuration and the file name (sessions.Open). create
+// makes it when there is neither. A lux that cannot be listed leaves its
+// windows as the file has them (they show it unreachable) or, rebuilding,
+// adds them once it answers.
 func attach(env Env, name string, create bool) error {
 	if err := sessions.CheckName(name); err != nil {
 		return err
@@ -223,25 +234,29 @@ func attach(env Env, name string, create bool) error {
 		return err
 	}
 	defer unlock()
-	c, err := client(env)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
 	}
-	sess, label, existed, err := sessions.Open(ctx, c, env.StateDir, cfg, name)
+	eps := endpoints(env)
+	sess, label, existed, err := sessions.Open(context.Background(), luxes(env, eps, cfg), env.StateDir, name)
 	if err != nil {
 		return err
 	}
 	if !existed && !create {
+		if len(sess.Unlisted) > 0 {
+			// Its windows may be on a lux that did not answer: none is
+			// made in their place.
+			return fmt.Errorf("no session %s on the luxes that answered; try again when the others do", name)
+		}
 		return fmt.Errorf("no session %s: luxmux new -s %s", name, name)
 	}
-	return runMux(env, c, sess, label, unlock, nil)
+	return startMux(env, eps, sess, label, unlock, nil)
 }
+
+// startMux is runMux; tests see the session it is given without a
+// terminal.
+var startMux = runMux
 
 // lockSession makes this process the session's only one until unlock.
 func lockSession(env Env, name string) (func(), error) {
@@ -257,7 +272,7 @@ func lockSession(env Env, name string) (func(), error) {
 // each session switched to from inside it. Its first window, in a
 // session that has none, is made from first (nil: the session's default
 // profile).
-func runMux(env Env, c *luxapi.Client, sess *state.Session, label string, unlock func(), first *config.Profile) error {
+func runMux(env Env, eps *luxapi.Endpoints, sess *state.Session, label string, unlock func(), first *config.Profile) error {
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
@@ -305,7 +320,7 @@ func runMux(env Env, c *luxapi.Client, sess *state.Session, label string, unlock
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	reason, name, err := mux.Attach(ctx, mux.Options{Session: sess.Name, Label: label, Unlock: unlock, Console: con,
-		Config: cfg, Lux: c, StateDir: env.StateDir, In: in, Out: env.Stdout, Size: size, UI: env.UI,
+		Config: cfg, Endpoints: eps, StateDir: env.StateDir, In: in, Out: env.Stdout, Size: size, UI: env.UI,
 		Lookup: env.Lookup, Crash: crash, First: first}, sess)
 	con.Close(2 * time.Second)
 	term.Restore(int(in.Fd()), old)
@@ -317,18 +332,25 @@ func runMux(env Env, c *luxapi.Client, sess *state.Session, label string, unlock
 		fmt.Fprintf(env.Stderr, "[detached (from session %s)]\n", name)
 	case "exited":
 		fmt.Fprintf(env.Stderr, "[exited (session %s)]\n", name)
+		// The session that exited is the last one the console showed.
+		if m := con.Current(); m != nil {
+			if left := m.Unterminated(); len(left) > 0 {
+				fmt.Fprintf(env.Stderr, "session file kept: Runs not terminated:\n  %s\n", strings.Join(left, "\n  "))
+			}
+		}
 	}
 	return nil
 }
 
+// list lists the sessions across every lux the configuration and the
+// session files name. A lux that cannot be listed is said on stderr and
+// in the NOTE of the sessions whose files have windows there.
 func list(env Env) error {
-	c, err := client(env)
+	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	all, err := sessions.List(ctx, c, env.StateDir)
+	all, err := sessions.List(context.Background(), luxes(env, endpoints(env), cfg), env.StateDir)
 	if err != nil {
 		return err
 	}
@@ -339,7 +361,7 @@ func list(env Env) error {
 	tw := tabwriter.NewWriter(env.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "SESSION\tWINDOWS\tRUNNING\tSPARES\tCREATED\tNOTE")
 	for _, s := range all {
-		var notes []string
+		notes := slices.Clone(s.Unreachable)
 		if !s.HasFile {
 			notes = append(notes, "no local file: attach rebuilds it from lux")
 		}
@@ -355,92 +377,82 @@ func list(env Env) error {
 	return tw.Flush()
 }
 
-// killSession terminates session name's Runs and forgets it; a rename
-// entry whose Runs all ended, with no file left, is dropped.
+// killSession terminates session name's Runs on every lux it has them
+// on, each on its own, and forgets it (sessions.Killing): its file and
+// rename entry are kept while a terminate failed or a lux it has windows
+// on did not answer.
 func killSession(env Env, name string, yes bool) error {
-	c, err := client(env)
+	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	live, err := sessions.LiveRuns(ctx, c, env.StateDir, name)
+	x := luxes(env, endpoints(env), cfg)
+	k, err := sessions.PlanKill(context.Background(), x, env.StateDir, name)
 	if err != nil {
 		return err
 	}
-	_, hasFile, _ := state.Load(env.StateDir, name)
-	renames, err := state.Renames(env.StateDir)
-	if err != nil {
-		return err
-	}
-	_, mapped := renames[name]
-	if len(live) == 0 && !hasFile && !mapped {
-		return fmt.Errorf("no session %s", name)
-	}
-	if !yes && len(live) > 0 {
-		fmt.Fprintf(env.Stderr, "terminate %d Run(s) of session %s (their shells and anything not saved go)? [y/N] ", len(live), name)
+	if !yes && len(k.Live) > 0 {
+		fmt.Fprintf(env.Stderr, "terminate %d Run(s) of session %s (their shells and anything not saved go)? [y/N] ", len(k.Live), name)
 		line, _ := bufio.NewReader(env.Stdin).ReadString('\n')
 		if a := strings.TrimSpace(strings.ToLower(line)); a != "y" && a != "yes" {
 			return errors.New("not killed")
 		}
 	}
-	return sessions.Kill(ctx, c, env.StateDir, name, func(id string) { fmt.Fprintln(env.Stdout, "terminated", id) })
+	ctx, cancel := context.WithTimeout(context.Background(), bulkTimeout)
+	defer cancel()
+	return k.Do(ctx, x, env.StateDir, func(id string) { fmt.Fprintln(env.Stdout, "terminated", id) })
 }
 
+// spares lists (or with rm terminates) the warm spares no session has
+// claimed, on every lux.
 func spares(env Env, rm bool) error {
-	c, err := client(env)
+	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	runs, err := c.ListAll(ctx)
-	if err != nil {
+	files := sessions.Files(env.StateDir)
+	eps := endpoints(env)
+	ls := luxes(env, eps, cfg).ListAll(context.Background(), files...)
+	if err := ls.Report(env.Stderr); err != nil {
 		return err
 	}
 	// A spare label stays on a claimed spare: the session files say
 	// which were claimed.
 	claimed := map[string]bool{}
-	files, _ := state.List(env.StateDir)
-	for _, f := range files {
-		if s, ok, _ := state.Load(env.StateDir, f); ok {
-			for _, id := range s.Claimed {
-				claimed[id] = true
-			}
-			for _, w := range s.Windows {
-				claimed[w.RunID] = true
-			}
+	for _, s := range files {
+		for _, id := range s.Claimed {
+			claimed[id] = true
+		}
+		for _, w := range s.Windows {
+			claimed[w.RunID] = true
 		}
 	}
-	var out []*api.Run
-	for _, r := range runs {
-		if r.Labels[config.LabelSpare] == "true" && state.Live(r.State) && !claimed[r.ID] {
-			out = append(out, r)
-		}
-	}
+	out := ls.Live(func(r *api.Run) bool { return r.Labels[config.LabelSpare] == "true" && !claimed[r.ID] })
 	if !rm {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "RUN\tSESSION\tPROFILE\tSTATE")
-		for _, r := range out {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.ID, r.Labels[config.LabelSession], r.Labels[config.LabelProfile], r.State)
+		fmt.Fprintln(tw, "RUN\tSESSION\tPROFILE\tSTATE\tLUX")
+		for _, s := range out {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", s.Run.ID, s.Run.Labels[config.LabelSession], s.Run.Labels[config.LabelProfile], s.Run.State, s.Endpoint.Label())
 		}
 		return tw.Flush()
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), bulkTimeout)
+	defer cancel()
 	var errs []error
-	for _, r := range out {
-		if err := c.Terminate(ctx, r.ID); err != nil {
+	for _, s := range out {
+		if err := s.Terminate(ctx, eps); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		fmt.Fprintln(env.Stdout, "terminated", r.ID)
-		sn := r.Labels[config.LabelSession]
-		if s, ok, _ := state.Load(env.StateDir, sn); ok {
-			for p, id := range s.Spares {
-				if id == r.ID {
-					delete(s.Spares, p)
+		fmt.Fprintln(env.Stdout, "terminated", s.Run.ID)
+		sn := s.Run.Labels[config.LabelSession]
+		if sf, ok, _ := state.Load(env.StateDir, sn); ok {
+			for slot, id := range sf.Spares {
+				if id == s.Run.ID {
+					sf.DropSpare(slot)
 				}
 			}
-			_ = state.Save(env.StateDir, s)
+			_ = state.Save(env.StateDir, sf)
 		}
 	}
 	return errors.Join(errs...)

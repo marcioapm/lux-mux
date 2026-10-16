@@ -196,22 +196,22 @@ func (h *harness) start(sess *state.Session) {
 		}
 		sess = s
 	}
-	cl, _ := luxapi.New(h.lux.Config())
 	pr, pw := io.Pipe()
 	h.keys = pw
 	h.term = newClientTerm(h.rows, h.cols)
+	lookup := func(k string) (string, bool) {
+		h.envMu.Lock()
+		defer h.envMu.Unlock()
+		if k == h.panicOn {
+			panic("injected: lookup " + k)
+		}
+		v, ok := h.env[k]
+		return v, ok
+	}
 	opt := Options{
-		Session: "s", Config: h.cfg, Lux: cl, StateDir: h.dir,
+		Session: "s", Config: h.cfg, Endpoints: luxapi.NewEndpoints(h.lux.Config(), lookup), StateDir: h.dir,
 		In: pr, Out: h.term, Size: func() (int, int) { return h.rows, h.cols }, UI: &fakeUI{choose: -1},
-		Lookup: func(k string) (string, bool) {
-			h.envMu.Lock()
-			defer h.envMu.Unlock()
-			if k == h.panicOn {
-				panic("injected: lookup " + k)
-			}
-			v, ok := h.env[k]
-			return v, ok
-		},
+		Lookup: lookup,
 		Crash: func(msg string) {
 			h.crashed <- msg
 			// As os.Exit: the goroutine that crashed never returns.

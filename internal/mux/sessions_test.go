@@ -29,6 +29,7 @@ import (
 type multi struct {
 	t    *testing.T
 	lux  *fakelux.Server
+	eps  *luxapi.Endpoints
 	cl   *luxapi.Client
 	rt   *hookRT
 	dir  string
@@ -84,7 +85,9 @@ func newMulti(t *testing.T) *multi {
 	t.Helper()
 	h := &multi{t: t, lux: fakelux.New(), dir: t.TempDir(), term: newClientTerm(24, 80), ui: &fakeUI{choose: -1}}
 	t.Cleanup(h.lux.Close)
-	h.cl, _ = luxapi.New(h.lux.Config())
+	// Endpoints keeps the client it made: the default lux's is this one.
+	h.eps = luxapi.NewEndpoints(h.lux.Config(), func(string) (string, bool) { return "", false })
+	h.cl, _ = h.eps.Client(h.eps.Default())
 	h.rt = &hookRT{base: http.DefaultTransport}
 	h.cl.C.HTTP = &http.Client{Transport: h.rt}
 	cfg, err := config.Parse(nil)
@@ -110,11 +113,11 @@ func (h *multi) attach(name string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	sess, label, _, err := sessions.Open(context.Background(), h.cl, h.dir, h.cfg, name)
+	sess, label, _, err := sessions.Open(context.Background(), h.luxes(), h.dir, name)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	opt := Options{Session: name, Label: label, Unlock: unlock, Console: h.con, Config: h.cfg, Lux: h.cl, StateDir: h.dir,
+	opt := Options{Session: name, Label: label, Unlock: unlock, Console: h.con, Config: h.cfg, Endpoints: h.eps, StateDir: h.dir,
 		Size: func() (int, int) { return 24, 80 }, UI: h.ui, Lookup: func(string) (string, bool) { return "", false },
 		Crash:   func(msg string) { h.t.Errorf("crash: %s", msg); runtime.Goexit() },
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond, NoticeFor: 300 * time.Millisecond,
@@ -130,6 +133,15 @@ func (h *multi) attach(name string) {
 		}
 		h.done <- [2]string{r, n}
 	}()
+}
+
+// luxes are the luxes h's configuration names, through h's clients.
+func (h *multi) luxes() sessions.Luxes { return sessions.Luxes{Eps: h.eps, Cfg: h.cfg} }
+
+// checkFree is sessions.CheckFree's error for a new session, unlocked.
+func checkFree(ctx context.Context, x sessions.Luxes, dir, name string) error {
+	_, err := sessions.CheckFree(ctx, x, dir, name, "", false)
+	return err
 }
 
 // detach detaches the shown session and waits for Attach to return.
@@ -684,14 +696,14 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	h.on("alpha")
 	// The old name is the Runs' label: not free, and not attachable.
 	ctx := context.Background()
-	if err := sessions.CheckFree(ctx, h.cl, h.dir, "a", "", false); err == nil {
+	if err := checkFree(ctx, h.luxes(), h.dir, "a"); err == nil {
 		t.Fatal("the old name is free")
 	}
 	if _, err := sessions.Label(h.dir, "a"); err == nil || !strings.Contains(err.Error(), "renamed to alpha") {
 		t.Fatalf("old name: %v", err)
 	}
 	h.detach()
-	list, err := sessions.List(ctx, h.cl, h.dir)
+	list, err := sessions.List(ctx, h.luxes(), h.dir)
 	if err != nil || len(list) != 1 || list[0].Name != "alpha" || list[0].Windows != 2 {
 		t.Fatalf("list %+v %v", list, err)
 	}
@@ -700,7 +712,7 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	if err := state.Remove(h.dir, "alpha"); err != nil {
 		t.Fatal(err)
 	}
-	sess, label, existed, err := sessions.Open(ctx, h.cl, h.dir, h.cfg, "alpha")
+	sess, label, existed, err := sessions.Open(ctx, h.luxes(), h.dir, "alpha")
 	if err != nil || !existed || label != "a" || len(sess.Windows) != 2 || sess.Windows[0].RunID != id {
 		t.Fatalf("rebuilt %+v %q %v %v", sess, label, existed, err)
 	}
@@ -879,11 +891,11 @@ func TestNameCheckKeepsAttachedRenamedSession(t *testing.T) {
 	}
 	h.detach()
 	kept("after the detach")
-	list, err := sessions.List(context.Background(), h.cl, h.dir)
+	list, err := sessions.List(context.Background(), h.luxes(), h.dir)
 	if err != nil || len(list) != 1 || list[0].Name != "b" || list[0].Label != "a" {
 		t.Fatalf("list %+v %v", list, err)
 	}
-	sess, label, existed, err := sessions.Open(context.Background(), h.cl, h.dir, h.cfg, "b")
+	sess, label, existed, err := sessions.Open(context.Background(), h.luxes(), h.dir, "b")
 	if err != nil || !existed || label != "a" || len(sess.Windows) != 1 || sess.Windows[0].RunID != nid {
 		t.Fatalf("open b: %+v %q %v %v", sess, label, existed, err)
 	}

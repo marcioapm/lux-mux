@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -64,6 +65,15 @@ type Profile struct {
 	// PersistHome puts /home/agent on a state volume. Unset means true
 	// for luxmux's default image and false for any other.
 	PersistHome *bool `toml:"persist_home,omitempty" json:"persistHome,omitempty"`
+	// The lux the profile's Runs live on (see Endpoint); each one unset
+	// is the lux CLI configuration's.
+	LuxURL     string `toml:"lux_url,omitempty" json:"luxUrl,omitempty"`
+	Tenant     string `toml:"tenant,omitempty" json:"tenant,omitempty"`
+	APIKeyEnv  string `toml:"api_key_env,omitempty" json:"apiKeyEnv,omitempty"`
+	APIKeyFile string `toml:"api_key_file,omitempty" json:"apiKeyFile,omitempty"`
+	// APIKey is decoded only to be refused with a message: a key is never
+	// kept in config.toml, and never written out from here.
+	APIKey *string `toml:"api_key,omitempty" json:"-"`
 }
 
 // HomeVolume reports whether the profile's Runs get the home volume.
@@ -97,7 +107,13 @@ type Config struct {
 	DefaultProfile string             `toml:"default_profile,omitempty"`
 	Keys           Keys               `toml:"keys,omitempty"`
 	Profiles       map[string]Profile `toml:"profiles,omitempty"`
+	// APIKey is the lux CLI's own top-level key, decoded only to be
+	// refused as a profile's is.
+	APIKey *string `toml:"api_key,omitempty"`
 }
+
+// inlineKeyRefusal is the message for an api_key anywhere in config.toml.
+const inlineKeyRefusal = "api_key: a key is never kept in config.toml: set api_key_env (an environment variable holding it) or api_key_file (a file holding it, mode 0600)"
 
 // ImageRepository is where luxmux's default image is published.
 const ImageRepository = "ghcr.io/marcioapm/luxmux"
@@ -175,7 +191,7 @@ func Parse(b []byte) (*Config, error) {
 		if err := d.Decode(&c); err != nil {
 			var sm *toml.StrictMissingError
 			if errors.As(err, &sm) {
-				return nil, errors.New(sm.String())
+				return nil, unknownKeys(sm)
 			}
 			return nil, err
 		}
@@ -202,6 +218,19 @@ func Parse(b []byte) (*Config, error) {
 	return &c, nil
 }
 
+// unknownKeys names each key the configuration does not know by its path
+// and line. The decoder's own message quotes the source line, which can
+// hold a key value typed under a misspelt name.
+func unknownKeys(sm *toml.StrictMissingError) error {
+	errs := make([]error, 0, len(sm.Errors))
+	for i := range sm.Errors {
+		e := &sm.Errors[i]
+		line, _ := e.Position()
+		errs = append(errs, fmt.Errorf("line %d: unknown key %s", line, strings.Join(e.Key(), ".")))
+	}
+	return errors.Join(errs...)
+}
+
 // ProfileNames are the profiles' names, sorted.
 func (c *Config) ProfileNames() []string {
 	names := make([]string, 0, len(c.Profiles))
@@ -215,6 +244,9 @@ func (c *Config) ProfileNames() []string {
 // Validate reports every problem at once.
 func (c *Config) Validate() error {
 	var errs []error
+	if c.APIKey != nil {
+		errs = append(errs, errors.New(inlineKeyRefusal))
+	}
 	if _, err := ParsePrefix(c.Prefix); err != nil {
 		errs = append(errs, err)
 	}
@@ -324,6 +356,19 @@ func (p Profile) Validate() error {
 	}
 	if p.Workdir != "" && !strings.HasPrefix(p.Workdir, "/") {
 		fail("workdir must be absolute")
+	}
+	if p.APIKey != nil {
+		fail(inlineKeyRefusal)
+	}
+	if p.APIKeyEnv != "" && !envNameRe.MatchString(p.APIKeyEnv) {
+		fail("api_key_env: invalid environment variable name %q", p.APIKeyEnv)
+	}
+	if p.LuxURL != "" {
+		if u, err := url.Parse(p.LuxURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			fail("lux_url: want an http(s) URL such as https://lux.example.com")
+		} else if u.User != nil {
+			fail("lux_url: no credentials in the URL: set api_key_env or api_key_file")
+		}
 	}
 	for k := range p.Env {
 		if !envNameRe.MatchString(k) || strings.HasPrefix(k, "LUX_") {

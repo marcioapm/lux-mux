@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/marcioapm/lux/api"
 
@@ -137,23 +136,15 @@ func newWindow(env Env, o windowFlags) error {
 	if unlock != nil {
 		defer unlock()
 	}
-	c, err := client(env)
-	if err != nil {
-		return err
-	}
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	eps := endpoints(env)
+	x := luxes(env, eps, cfg)
 	// Its lock taken here, a renamed session whose Runs all ended is
 	// dropped and refused below, as attach does.
-	label, err := sessions.LiveLabel(ctx, c, env.StateDir, o.Session, !attached)
-	if err != nil {
-		return err
-	}
-	runs, err := c.ListSession(ctx, label)
+	label, ls, err := sessions.LiveLabel(context.Background(), x, env.StateDir, o.Session, !attached)
 	if err != nil {
 		return err
 	}
@@ -163,19 +154,33 @@ func newWindow(env Env, o windowFlags) error {
 		return err
 	}
 	if !ok {
-		sess = state.RebuildLabelled(o.Session, label, runs, cfg.Profiles)
+		if ls == nil {
+			ls = x.ListSession(context.Background(), label)
+		}
+		if err := ls.Report(env.Stderr); err != nil {
+			return err
+		}
+		sess = state.RebuildLabelledFrom(o.Session, label, ls, eps.Default(), cfg.Profiles)
 	}
-	if !ok && len(sess.Windows) == 0 {
+	if !ok && len(sess.Windows) == 0 && len(sess.Unlisted) == 0 {
 		return fmt.Errorf("no session %s: luxmux new -s %s", o.Session, o.Session)
 	}
 	profile, p, err := windowProfile(cfg, sess.DefaultProfile, o, env.Stderr)
 	if err != nil {
 		return err
 	}
+	ep := eps.Of(p)
+	c, err := eps.Client(ep)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
 	w, err := submitWindow(ctx, env, c, label, profile, o.Name, p)
 	if err != nil {
 		return err
 	}
+	w.Endpoint = &ep
 	if !attached {
 		sess.Windows = append(sess.Windows, w)
 		if err := state.Save(env.StateDir, sess); err != nil {

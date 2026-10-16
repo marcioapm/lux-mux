@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/marcioapm/lux/api"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -266,5 +267,26 @@ func TestShapedAndBlockers(t *testing.T) {
 	b := Blockers(&api.SubmitAnswer{Blockers: []api.AdmissionBlocker{{Code: "not_enough_spare", Hosts: 2}, {Code: "constraint", Hosts: 1, Reason: "requires arch"}}})
 	if !reflect.DeepEqual(b, []string{"not_enough_spare (2 hosts)", "constraint (1 hosts): requires arch"}) {
 		t.Fatal(b)
+	}
+}
+
+// TestChooserMarksOtherEndpoint: a window on a lux other than the lux
+// CLI's is marked @ in the list, and its lux and tenant head the preview.
+func TestChooserMarksOtherEndpoint(t *testing.T) {
+	h := host()
+	h.wins[2].OtherEndpoint, h.wins[2].Endpoint = true, "lux2.example.com · tenant example"
+	h.wins[0].Endpoint = "lux.example.com"
+	c := NewChooser(h, 24, 120)
+	out := ansi.Strip(c.View())
+	if !strings.Contains(out, "2@") || strings.Contains(out, "0@") || strings.Contains(out, "1*@") {
+		t.Fatalf("marks:\n%s", out)
+	}
+	if strings.Contains(out, "@ lux:") {
+		t.Fatalf("lux line for a default-endpoint window:\n%s", out)
+	}
+	keys(c, "down")
+	out = ansi.Strip(c.View())
+	if !strings.Contains(out, "@ lux: lux2.example.com · tenant example") || !strings.Contains(out, "preview of build") {
+		t.Fatalf("selected remote window:\n%s", out)
 	}
 }

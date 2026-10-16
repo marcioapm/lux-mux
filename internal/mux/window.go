@@ -172,6 +172,9 @@ func (q *feedQueue) pop() (feedItem, bool) {
 // Window is one window: a Run, its emulator and its supervisor.
 type Window struct {
 	m *Mux
+	// Endpoint is the lux the window's Runs live on; set when the window
+	// is made and never changed, so it is read without a lock.
+	Endpoint config.Endpoint
 
 	// Guarded by m.mu.
 	RunID   string
@@ -261,8 +264,8 @@ type Window struct {
 	notify chan struct{}
 }
 
-func (m *Mux) newWindow(name, profile string, spec config.Profile) *Window {
-	w := &Window{m: m, Name: name, Profile: profile, Spec: spec, created: time.Now(),
+func (m *Mux) newWindow(name, profile string, spec config.Profile, ep config.Endpoint) *Window {
+	w := &Window{m: m, Endpoint: ep, Name: name, Profile: profile, Spec: spec, created: time.Now(),
 		emu:    newEmulator(m.rows, m.cols),
 		q:      &feedQueue{wake: make(chan struct{}, 1)},
 		notify: make(chan struct{}, 1),

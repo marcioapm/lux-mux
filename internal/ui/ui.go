@@ -124,8 +124,11 @@ func (h muxHost) Config() *config.Config {
 	return &c
 }
 
-func (h muxHost) Recent() (images, repos []string)              { return h.m.Recent() }
-func (h muxHost) Pools(ctx context.Context) ([]api.Pool, error) { return h.m.Lux().Pools(ctx) }
+func (h muxHost) Recent() (images, repos []string) { return h.m.Recent() }
+func (h muxHost) Pools(ctx context.Context, p config.Profile) ([]api.Pool, error) {
+	return h.m.Pools(ctx, p)
+}
+func (h muxHost) Endpoint(p config.Profile) config.Endpoint { return h.m.Endpoint(p) }
 func (h muxHost) Validate(ctx context.Context, name string, p config.Profile) (*api.SubmitAnswer, error) {
 	return h.m.Validate(ctx, name, p)
 }

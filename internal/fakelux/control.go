@@ -1,7 +1,12 @@
 package fakelux
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -215,6 +220,38 @@ func (s *Server) Streams(id string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.runs[id].conns)
+}
+
+// KeyLeaks names each place that holds one of keys: a file under dir (a
+// state directory), or outs[i] (a terminal's bytes, stdout, stderr).
+// Tests fail on any.
+func KeyLeaks(keys []string, dir string, outs ...[]byte) []string {
+	var leaks []string
+	holds := func(b []byte) bool {
+		for _, k := range keys {
+			if k != "" && bytes.Contains(b, []byte(k)) {
+				return true
+			}
+		}
+		return false
+	}
+	if dir != "" {
+		_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if b, _ := os.ReadFile(p); holds(b) {
+				leaks = append(leaks, p)
+			}
+			return nil
+		})
+	}
+	for i, o := range outs {
+		if holds(o) {
+			leaks = append(leaks, fmt.Sprintf("output %d", i))
+		}
+	}
+	return leaks
 }
 
 // WaitFor polls cond until it holds or the deadline passes; it reports

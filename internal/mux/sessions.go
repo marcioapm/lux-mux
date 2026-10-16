@@ -152,7 +152,7 @@ func (m *Mux) switchOver(ctx context.Context) (Options, *state.Session, error) {
 	// long again: the saved state is reconciled by the supervisors.
 	if !timedOut {
 		rctx, cancel := context.WithTimeout(ctx, refreshWait)
-		if s, l, ok, rerr := sessions.Reopen(rctx, m.lux, m.opt.StateDir, opt.Config, old); rerr == nil && ok {
+		if s, l, ok, rerr := sessions.Reopen(rctx, m.luxes(), m.opt.StateDir, old); rerr == nil && ok {
 			sess, label = s, l
 		}
 		cancel()
@@ -183,16 +183,26 @@ func (m *Mux) relock(name string) (func(), error) {
 	}
 }
 
-// openTarget reads the session t names, its lock held: a new one is
-// checked free and starts empty; an existing one is opened as attach does.
+// openTarget reads the session t names, its lock held, across every lux
+// cfg's profiles and its file name: a new one is checked free and starts
+// empty (a lux that did not answer is in its Unlisted, as luxmux new
+// does); an existing one is opened as attach does.
 func (m *Mux) openTarget(ctx context.Context, cfg *config.Config, t *switchTarget) (*state.Session, string, error) {
+	x := sessions.Luxes{Eps: m.eps, Cfg: cfg}
 	if t.create {
-		if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, t.name, "", true); err != nil {
+		ls, err := sessions.CheckFree(ctx, x, m.opt.StateDir, t.name, "", true)
+		if err != nil {
 			return nil, "", err
 		}
-		return &state.Session{Name: t.name, DefaultProfile: t.defaultProfile}, t.name, nil
+		if t.first != nil {
+			// The first window's lux must answer, as for luxmux new.
+			if err := ls.ErrOn(m.eps.Of(*t.first)); err != nil {
+				return nil, "", err
+			}
+		}
+		return &state.Session{Name: t.name, DefaultProfile: t.defaultProfile, Unlisted: ls.Unlisted()}, t.name, nil
 	}
-	sess, label, existed, err := sessions.Open(ctx, m.lux, m.opt.StateDir, cfg, t.name)
+	sess, label, existed, err := sessions.Open(ctx, x, m.opt.StateDir, t.name)
 	if err != nil {
 		return nil, "", err
 	}
@@ -224,15 +234,20 @@ func (m *Mux) SwitchTo(name, notice string) bool {
 
 // CheckSessionName says whether a new session may be named name.
 func (m *Mux) CheckSessionName(ctx context.Context, name string) error {
-	return sessions.CheckFree(ctx, m.lux, m.opt.StateDir, name, "", false)
+	_, err := sessions.CheckFree(ctx, m.luxes(), m.opt.StateDir, name, "", false)
+	return err
 }
+
+// luxes are the luxes the configuration's profiles name, through this
+// session's clients.
+func (m *Mux) luxes() sessions.Luxes { return sessions.Luxes{Eps: m.eps, Cfg: m.config()} }
 
 // NewSession detaches this session and creates req's in its place,
 // unless its name is taken or its first window's secrets are missing.
 func (m *Mux) NewSession(req *NewSessionRequest) bool {
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 	defer cancel()
-	if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, req.Name, "", false); err != nil {
+	if _, err := sessions.CheckFree(ctx, m.luxes(), m.opt.StateDir, req.Name, "", false); err != nil {
 		m.Notice("new session: " + err.Error())
 		return false
 	}
@@ -262,7 +277,7 @@ func (m *Mux) startSwitch(t *switchTarget) bool {
 func (m *Mux) Sessions() ([]SessionInfo, error) {
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 	defer cancel()
-	list, err := sessions.List(ctx, m.lux, m.opt.StateDir)
+	list, err := sessions.List(ctx, m.luxes(), m.opt.StateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +366,10 @@ func (m *Mux) stepIn(list []SessionInfo, dir int) {
 // ErrKillCurrent is KillSession's refusal of the session attached here.
 var ErrKillCurrent = errors.New("this is the session attached here: switch away first, or exit its windows")
 
-// KillSession terminates session name's Runs and forgets it, as
-// luxmux kill-session does. The session attached here, and one attached
+// KillSession terminates session name's Runs, each on its own lux, and
+// forgets it, as luxmux kill-session does (sessions.Killing): a terminate
+// that fails keeps its file, leftovers included, and is named with its
+// lux in the error. The session attached here, and one attached
 // elsewhere, are refused.
 func (m *Mux) KillSession(name string) error {
 	if name == m.Session() {
@@ -366,7 +383,12 @@ func (m *Mux) KillSession(name string) error {
 	m.stopSessionPreview()
 	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
 	defer cancel()
-	return sessions.Kill(ctx, m.lux, m.opt.StateDir, name, nil)
+	x := m.luxes()
+	k, err := sessions.PlanKill(ctx, x, m.opt.StateDir, name)
+	if err != nil {
+		return err
+	}
+	return k.Do(ctx, x, m.opt.StateDir, nil)
 }
 
 // RenameSession names session old new: its file and the rename map (its
@@ -401,7 +423,7 @@ func (m *Mux) RenameSession(old, new string) error {
 		label, err = sessions.Label(m.opt.StateDir, old)
 	}
 	if err == nil {
-		err = sessions.CheckFree(ctx, m.lux, m.opt.StateDir, new, label, true)
+		_, err = sessions.CheckFree(ctx, m.luxes(), m.opt.StateDir, new, label, true)
 	}
 	if err != nil {
 		unlockNew()
@@ -590,7 +612,7 @@ func (m *Mux) startSessionPreview(name string, gen int) {
 // ctx ends; it returns what to show instead when it cannot.
 func (m *Mux) followPreview(ctx context.Context, name string, rows, cols int) string {
 	lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	runID, err := m.shownRun(lctx, name)
+	runID, ep, err := m.shownRun(lctx, name)
 	cancel()
 	if err != nil || runID == "" {
 		if ctx.Err() != nil {
@@ -601,10 +623,14 @@ func (m *Mux) followPreview(ctx context.Context, name string, rows, cols int) st
 		}
 		return "no window to preview"
 	}
+	lux, err := m.eps.Client(ep)
+	if err != nil {
+		return "no preview: " + err.Error()
+	}
 	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	// No size: an attach with one would resize the other session's
 	// shell. The snapshot comes at the size it has.
-	conn, cut, err := m.lux.Attach(actx, runID, true, 0, 0)
+	conn, cut, err := lux.Attach(actx, runID, true, 0, 0)
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -641,24 +667,33 @@ func (m *Mux) followPreview(ctx context.Context, name string, rows, cols int) st
 	}
 }
 
-// shownRun is the Run of session name's shown window: its file's active
-// window, else the first of its Runs.
-func (m *Mux) shownRun(ctx context.Context, name string) (string, error) {
+// shownRun is the Run of session name's shown window, and the lux it is
+// on: its file's active window, else the first of its Runs on any lux.
+func (m *Mux) shownRun(ctx context.Context, name string) (string, config.Endpoint, error) {
+	def := m.eps.Default()
 	if s, ok, err := state.Load(m.opt.StateDir, name); err != nil {
-		return "", err
+		return "", def, err
 	} else if ok && len(s.Windows) > 0 {
-		return s.Windows[clamp(s.Active, len(s.Windows))].RunID, nil
+		w := s.Windows[clamp(s.Active, len(s.Windows))]
+		return w.RunID, w.EndpointOr(def), nil
 	}
-	runs, err := sessions.LiveRuns(ctx, m.lux, m.opt.StateDir, name)
+	label, err := sessions.Label(m.opt.StateDir, name)
 	if err != nil {
-		return "", err
+		return "", def, err
 	}
-	label, _ := sessions.Label(m.opt.StateDir, name)
-	s := state.RebuildLabelled(name, label, runs, nil)
+	live, err := sessions.LiveRuns(ctx, m.luxes(), m.opt.StateDir, name)
+	if err != nil {
+		return "", def, err
+	}
+	ls := make([]state.Listing, len(live))
+	for i, t := range live {
+		ls[i] = state.Listing{Endpoint: t.Endpoint, Runs: []*api.Run{t.Run}}
+	}
+	s := state.RebuildLabelledFrom(name, label, ls, def, nil)
 	if len(s.Windows) == 0 {
-		return "", nil
+		return "", def, nil
 	}
-	return s.Windows[0].RunID, nil
+	return s.Windows[0].RunID, s.Windows[0].EndpointOr(def), nil
 }
 
 // stopSessionPreview ends the preview's stream and waits for its reader;

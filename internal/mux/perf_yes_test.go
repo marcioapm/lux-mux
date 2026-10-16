@@ -119,8 +119,8 @@ func TestPerfYesFlood(t *testing.T) {
 		out := &delayWriter{delay: tc.delay}
 		kr, kw := io.Pipe()
 		cfg, _ := config.Parse(nil)
-		cl, _ := luxapi.New(api.Config{URL: srv.URL, APIKey: "k"})
-		m, err := New(Options{Session: "perf", Config: cfg, Lux: cl, In: kr, Out: out,
+		eps := luxapi.NewEndpoints(api.Config{URL: srv.URL, APIKey: "k"}, func(string) (string, bool) { return "", false })
+		m, err := New(Options{Session: "perf", Config: cfg, Endpoints: eps, In: kr, Out: out,
 			Size: func() (int, int) { return tc.rows, tc.cols }, NoticeFor: 200 * time.Millisecond},
 			&state.Session{Name: "perf", Windows: []state.Window{{RunID: "run_1", Name: "w", Profile: "default"}}})
 		if err != nil {

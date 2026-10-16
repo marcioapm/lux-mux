@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -41,13 +42,27 @@ type fakeDialogHost struct {
 	valErr   error
 	// validated are the profiles the dry run was asked about.
 	validated []config.Profile
+	// poolsAsked are the endpoints Pools was asked about; poolsOn, when
+	// set, answers per endpoint URL.
+	poolsAsked []config.Endpoint
+	poolsOn    map[string][]api.Pool
 }
+
+var testBase = api.Config{URL: "https://lux.example.com", APIKey: "lux_fake_base_key"}
 
 func (f *fakeDialogHost) Config() *config.Config { return f.cfg }
 func (f *fakeDialogHost) Recent() ([]string, []string) {
 	return []string{"debian:12"}, []string{"https://example.com/recent.git"}
 }
-func (f *fakeDialogHost) Pools(context.Context) ([]api.Pool, error) { return f.pools, f.poolsErr }
+func (f *fakeDialogHost) Pools(_ context.Context, p config.Profile) ([]api.Pool, error) {
+	ep := f.Endpoint(p)
+	f.poolsAsked = append(f.poolsAsked, ep)
+	if f.poolsOn != nil {
+		return f.poolsOn[ep.URL], f.poolsErr
+	}
+	return f.pools, f.poolsErr
+}
+func (f *fakeDialogHost) Endpoint(p config.Profile) config.Endpoint { return p.Endpoint(testBase) }
 func (f *fakeDialogHost) Validate(_ context.Context, _ string, p config.Profile) (*api.SubmitAnswer, error) {
 	f.validated = append(f.validated, p)
 	if f.valErr != nil {
@@ -745,5 +760,38 @@ func TestDialogScrollsOnShortTerminal(t *testing.T) {
 	}
 	if n := len(strings.Split(out, "\n")); n != 14 {
 		t.Fatalf("%d rows", n)
+	}
+}
+
+// TestDialogShowsEndpoint: the dialog shows, read-only, the lux and tenant
+// of the chosen profile, never its key; choosing a profile on another lux
+// lists that lux's pools.
+func TestDialogShowsEndpoint(t *testing.T) {
+	cfg, err := config.Parse([]byte(dialogCfg + `
+[profiles.remote]
+image = "alpine:3"
+lux_url = "https://lux2.example.com"
+tenant = "example"
+api_key_env = "EXAMPLE_LUX_API_KEY"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeDialogHost{cfg: cfg, poolsOn: map[string][]api.Pool{
+		"https://lux.example.com":  testPools(),
+		"https://lux2.example.com": {{Name: "remote-pool"}},
+	}}
+	d := open(t, h, 40, 100)
+	if out := plain(d.View()); !regexp.MustCompile(`Lux +lux\.example\.com +│`).MatchString(out) || strings.Contains(out, testBase.APIKey) {
+		t.Fatalf("default endpoint line:\n%s", out)
+	}
+	to(t, d, stProfile)
+	press(d, "enter", "r", "e", "m", "enter")
+	out := plain(d.View())
+	if !strings.Contains(out, "lux2.example.com · tenant example") || strings.Contains(out, "EXAMPLE_LUX_API_KEY") {
+		t.Fatalf("remote endpoint line:\n%s", out)
+	}
+	if got := h.poolsAsked[len(h.poolsAsked)-1]; got.URL != "https://lux2.example.com" || len(d.pools) != 1 || d.pools[0].Name != "remote-pool" {
+		t.Fatalf("pools asked of %+v: %+v", got, d.pools)
 	}
 }

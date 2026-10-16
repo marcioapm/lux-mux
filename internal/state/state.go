@@ -29,6 +29,18 @@ type Window struct {
 	// Spec is the profile the Run was made from, kept so a relaunch or a
 	// resume needing its secrets works after the configuration changed.
 	Spec *config.Profile `json:"spec,omitempty"`
+	// Endpoint is the lux the Run lives on: URL, tenant and the name of
+	// its key's source, never the key. Nil (files from before endpoints):
+	// the lux CLI configuration's.
+	Endpoint *config.Endpoint `json:"endpoint,omitempty"`
+}
+
+// EndpointOr is w's endpoint, def when it has none recorded.
+func (w Window) EndpointOr(def config.Endpoint) config.Endpoint {
+	if w.Endpoint != nil {
+		return *w.Endpoint
+	}
+	return def
 }
 
 // Session is $XDG_STATE_HOME/luxmux/<session>.json.
@@ -44,9 +56,16 @@ type Session struct {
 	// Claimed are spare Runs that became windows: their luxmux-spare label
 	// stays, so this is how they are told from the spare still waiting.
 	Claimed []string `json:"claimed,omitempty"`
-	// Spares maps a spec key (config.SpecKey) to its waiting warm spare's
-	// Run id.
+	// Spares maps a warm-spare slot (config.SpareSlot) to its waiting
+	// spare's Run id.
 	Spares map[string]string `json:"spares,omitempty"`
+	// SpareEndpoints is the endpoint of each slot in Spares. A slot it
+	// lacks (files from before every slot recorded one) is the lux CLI
+	// configuration's at read time.
+	SpareEndpoints map[string]config.Endpoint `json:"spareEndpoints,omitempty"`
+	// Unlisted are endpoints the session's Runs could not be listed on
+	// when it was rebuilt: their windows are added once one answers.
+	Unlisted []config.Endpoint `json:"unlisted,omitempty"`
 	// Recent images and repositories typed in the dialog, newest first.
 	RecentImages []string `json:"recentImages,omitempty"`
 	RecentRepos  []string `json:"recentRepos,omitempty"`
@@ -297,27 +316,42 @@ func Adoptable(r *api.Run, session string) bool {
 }
 
 // RecordExternal appends to sess the Runs new-window made that its file
-// lacks (label: the luxmux-session label of the session's Runs):
-// new-window found the session attached and left the record to that
-// process, which detached before it adopted them. A Run being terminated
-// (its window was closed there) is not one.
-func RecordExternal(sess *Session, label string, runs []*api.Run, profiles map[string]config.Profile) {
-	for _, r := range runs {
-		if !Adoptable(r, label) {
-			continue
+// lacks (label: the luxmux-session label of the session's Runs), each
+// with the endpoint it was listed on: new-window found the session
+// attached and left the record to that process, which detached before it
+// adopted them. A Run being terminated (its window was closed there), or
+// one the file records as a spare or leftover, is not one.
+func RecordExternal(sess *Session, label string, ls []Listing, profiles map[string]config.Profile) {
+	for _, l := range ls {
+		for _, r := range l.Runs {
+			if !Adoptable(r, label) || sess.RecordsSpare(r.ID) ||
+				slices.ContainsFunc(sess.Windows, func(w Window) bool { return w.RunID == r.ID }) {
+				continue
+			}
+			w := WindowFromRun(r, profiles[r.Labels[config.LabelProfile]])
+			ep := l.Endpoint
+			w.Endpoint = &ep
+			sess.Windows = append(sess.Windows, w)
 		}
-		if slices.ContainsFunc(sess.Windows, func(w Window) bool { return w.RunID == r.ID }) {
-			continue
-		}
-		sess.Windows = append(sess.Windows, WindowFromRun(r, profiles[r.Labels[config.LabelProfile]]))
 	}
 }
 
-// RecordSpares puts into sess's empty spare slots the waiting spares lux
-// has of it (label: its Runs' luxmux-session label) that its file does
-// not know: a submit a switch cancelled may still have made its Run. A
-// slot already filled keeps its spare; the newest Run wins an empty one.
-func RecordSpares(sess *Session, label string, runs []*api.Run) {
+// LeftoverPrefix starts the Spares key of a leftover: a Run of the
+// session no window or slot has, recorded until it is terminated.
+// config.SpareSlot never makes a key starting with it, so none is claimed.
+const LeftoverPrefix = "leftover:"
+
+// IsLeftover reports whether a Spares key is a leftover's.
+func IsLeftover(slot string) bool { return strings.HasPrefix(slot, LeftoverPrefix) }
+
+// RecordSparesFrom puts into sess's empty spare slots the waiting spares
+// each endpoint lists of it (label: its Runs' luxmux-session label) that
+// its file does not know: a submit a switch cancelled may still have made
+// its Run. A Run's slot is config.SpareSlot of its spec on the endpoint it
+// was listed on (def: the lux CLI configuration's), and is recorded with
+// it. A slot already filled keeps its spare; the newest Run wins an empty
+// one. A leftover is never a slot, and its Run is never recorded again.
+func RecordSparesFrom(sess *Session, label string, ls []Listing, def config.Endpoint) {
 	known := map[string]bool{}
 	for _, w := range sess.Windows {
 		known[w.RunID] = true
@@ -332,64 +366,107 @@ func RecordSpares(sess *Session, label string, runs []*api.Run) {
 	for key, id := range sess.Spares {
 		filled[key] = id != ""
 	}
-	byAge := slices.Clone(runs)
-	sort.SliceStable(byAge, func(i, j int) bool { return byAge[i].CreatedAt.After(byAge[j].CreatedAt) })
-	for _, r := range byAge {
+	type listed struct {
+		r  *api.Run
+		ep config.Endpoint
+	}
+	var byAge []listed
+	for _, l := range ls {
+		for _, r := range l.Runs {
+			byAge = append(byAge, listed{r, l.Endpoint})
+		}
+	}
+	sort.SliceStable(byAge, func(i, j int) bool { return byAge[i].r.CreatedAt.After(byAge[j].r.CreatedAt) })
+	for _, x := range byAge {
+		r := x.r
 		if r.Labels[config.LabelSession] != label || r.Labels[config.LabelSpare] != "true" || known[r.ID] ||
 			!waitingSpare[r.State] || Terminating(r) {
 			continue
 		}
 		key := r.Labels[config.LabelSpec]
-		if key == "" || filled[key] {
+		if key == "" {
 			continue
 		}
-		if sess.Spares == nil {
-			sess.Spares = map[string]string{}
+		key = config.SpareSlot(key, x.ep, def)
+		if filled[key] || IsLeftover(key) {
+			continue
 		}
-		sess.Spares[key], filled[key] = r.ID, true
+		sess.SetSpare(key, r.ID, x.ep)
+		filled[key], known[r.ID] = true, true
 	}
 }
 
 // waitingSpare are the states of a spare that may still be claimed.
 var waitingSpare = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
 
-// RebuildLabelled makes session name from the Runs lux lists for it (those
-// labelled label: its name, or its old one if it was renamed, see
-// Renames), for when its file is gone: its non-terminated Runs that are
-// not a waiting warm spare, oldest first. Names are lost: each window is
-// named after its profile. A Run whose spec lux returns gets that spec
-// as its window's (profiles: the configuration's, by name).
-func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]config.Profile) *Session {
+// Listing is what one endpoint listed for a session; Err set: it could
+// not be listed.
+type Listing struct {
+	Endpoint config.Endpoint
+	Runs     []*api.Run
+	Err      error
+}
+
+// RebuildFrom makes a session from what every endpoint lists for it
+// (Runs labelled with the session), for when its file is gone: its
+// non-terminated Runs that are not a waiting warm spare, oldest first.
+// Names are lost: each window is named after its profile. A Run whose
+// spec lux returns gets that spec as its window's (profiles: the
+// configuration's, by name). Each window and spare records the endpoint
+// its Run was listed on, and each spare's slot is config.SpareSlot of its
+// spec on that endpoint (def: the lux CLI configuration's). A Run two
+// endpoints list (one lux, two key sources) is taken from the first.
+// Listings that failed add nothing and are recorded in Unlisted.
+func RebuildFrom(session string, ls []Listing, def config.Endpoint, profiles map[string]config.Profile) *Session {
+	return RebuildLabelledFrom(session, session, ls, def, profiles)
+}
+
+// RebuildLabelledFrom is RebuildFrom for session name whose Runs are
+// labelled label: its name, or its old one if it was renamed (Renames).
+func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, profiles map[string]config.Profile) *Session {
 	s := &Session{Name: name}
-	live := make([]*api.Run, 0, len(runs))
-	for _, r := range runs {
-		if r.Labels[config.LabelSession] != label || !Live(r.State) {
+	live := []*api.Run{}
+	epOf := map[string]config.Endpoint{}
+	for _, l := range ls {
+		if l.Err != nil {
+			s.Unlisted = append(s.Unlisted, l.Endpoint)
 			continue
 		}
-		live = append(live, r)
+		for _, r := range l.Runs {
+			if r.Labels[config.LabelSession] != label || !Live(r.State) {
+				continue
+			}
+			if _, dup := epOf[r.ID]; dup {
+				continue
+			}
+			epOf[r.ID] = l.Endpoint
+			live = append(live, r)
+		}
 	}
 	sort.SliceStable(live, func(i, j int) bool { return live[i].CreatedAt.Before(live[j].CreatedAt) })
+	window := func(id, prof string) Window {
+		ep := epOf[id]
+		return Window{RunID: id, Name: prof, Profile: prof, Endpoint: &ep}
+	}
 	for _, r := range live {
 		prof := r.Labels[config.LabelProfile]
 		if r.Labels[config.LabelSpare] == "true" {
 			// Which spares were claimed is only in the lost file: the
 			// newest of a spec is taken to be its waiting spare, any
 			// older one a claimed window.
-			if s.Spares == nil {
-				s.Spares = map[string]string{}
-			}
 			key := r.Labels[config.LabelSpec]
 			if key == "" {
 				key = prof
 			}
+			key = config.SpareSlot(key, epOf[r.ID], def)
 			if prev, ok := s.Spares[key]; ok {
 				s.Claimed = append(s.Claimed, prev)
-				s.Windows = append(s.Windows, Window{RunID: prev, Name: prof, Profile: prof})
+				s.Windows = append(s.Windows, window(prev, prof))
 			}
-			s.Spares[key] = r.ID
+			s.SetSpare(key, r.ID, epOf[r.ID])
 			continue
 		}
-		s.Windows = append(s.Windows, Window{RunID: r.ID, Name: prof, Profile: prof})
+		s.Windows = append(s.Windows, window(r.ID, prof))
 	}
 	sortWindowsByCreation(s, live)
 	byID := map[string]*api.Run{}
@@ -398,7 +475,9 @@ func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]co
 	}
 	for i, w := range s.Windows {
 		if r := byID[w.RunID]; r != nil && r.Spec.Image.Ref != "" {
-			s.Windows[i] = WindowFromRun(r, profiles[w.Profile])
+			nw := WindowFromRun(r, profiles[w.Profile])
+			nw.Endpoint = w.Endpoint
+			s.Windows[i] = nw
 		}
 	}
 	return s
@@ -481,7 +560,7 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 }
 
 // sortWindowsByCreation orders windows by their Runs' creation, after
-// RebuildLabelled appended claimed spares out of order.
+// RebuildFrom appended claimed spares out of order.
 func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	at := map[string]time.Time{}
 	for _, r := range runs {
@@ -490,27 +569,39 @@ func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	sort.SliceStable(s.Windows, func(i, j int) bool { return at[s.Windows[i].RunID].Before(at[s.Windows[j].RunID]) })
 }
 
-// Reconcile drops windows whose Runs lux no longer has or has terminated
-// (known maps a Run id to its state; ids it lacks are gone), keeping
-// Active and Last pointing at the same windows where they survive.
-func (s *Session) Reconcile(known map[string]string) {
+// ReconcileUp drops windows whose Runs lux no longer has or has
+// terminated (known maps a Run id to its state; ids it lacks are gone),
+// keeping Active and Last pointing at the same windows where they
+// survive. The windows and spares on an endpoint down reports (nil: none)
+// are kept as they are; def is the endpoint of a window or spare that
+// records none.
+func (s *Session) ReconcileUp(known map[string]string, def config.Endpoint, down func(config.Endpoint) bool) {
+	isDown := func(ep config.Endpoint) bool { return down != nil && down(ep) }
+	keep := func(id string) bool { st, ok := known[id]; return ok && Live(st) }
 	active, last := s.at(s.Active), s.at(s.Last)
 	kept := s.Windows[:0]
+	held := map[string]bool{}
 	for _, w := range s.Windows {
-		if st, ok := known[w.RunID]; ok && Live(st) {
+		if keep(w.RunID) || isDown(w.EndpointOr(def)) {
 			kept = append(kept, w)
+			held[w.RunID] = true
 		}
 	}
 	s.Windows = kept
 	s.Active, s.Last = s.index(active), s.index(last)
 	for p, id := range s.Spares {
-		if st, ok := known[id]; !ok || !Live(st) {
+		if !keep(id) && !isDown(s.SpareEndpoint(p, def)) {
 			delete(s.Spares, p)
+		}
+	}
+	for p := range s.SpareEndpoints {
+		if _, ok := s.Spares[p]; !ok {
+			delete(s.SpareEndpoints, p)
 		}
 	}
 	claimed := s.Claimed[:0]
 	for _, id := range s.Claimed {
-		if st, ok := known[id]; ok && Live(st) {
+		if keep(id) || held[id] {
 			claimed = append(claimed, id)
 		}
 	}
@@ -531,6 +622,44 @@ func (s *Session) index(id string) int {
 		}
 	}
 	return 0
+}
+
+// SetSpare records id as slot's waiting spare, on ep.
+func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
+	if s.Spares == nil {
+		s.Spares = map[string]string{}
+	}
+	if s.SpareEndpoints == nil {
+		s.SpareEndpoints = map[string]config.Endpoint{}
+	}
+	s.Spares[slot] = id
+	s.SpareEndpoints[slot] = ep
+}
+
+// DropSpare forgets slot's spare and its endpoint.
+func (s *Session) DropSpare(slot string) {
+	delete(s.Spares, slot)
+	delete(s.SpareEndpoints, slot)
+}
+
+// SpareEndpoint is the endpoint slot's spare lives on; def when the file
+// records none for it.
+func (s *Session) SpareEndpoint(slot string, def config.Endpoint) config.Endpoint {
+	if ep, ok := s.SpareEndpoints[slot]; ok {
+		return ep
+	}
+	return def
+}
+
+// RecordsSpare reports whether id is the Run of one of s's spare slots,
+// a leftover's included.
+func (s *Session) RecordsSpare(id string) bool {
+	for _, v := range s.Spares {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // AddRecent puts v first in list, without duplicates, keeping at most 10.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -899,5 +900,188 @@ func TestPanicGivesTerminalBack(t *testing.T) {
 	}
 	if i := strings.LastIndex(out, "\x1b[?1049l"); i < 0 || strings.Contains(out[i:], "\x1b[?1049h") {
 		t.Fatalf("the alternate screen set again after the Reset: %q", out[i:])
+	}
+}
+
+// TestTwoEndpointsRebuildOneDown: a session with a window on each of two
+// luxes (the second a profile's, its key in an environment variable)
+// loses its file; attached while the second lux is down, it shows the
+// first's window and says the second is unreachable; when that lux
+// answers its window comes back. Neither key is in the state directory
+// or on the screen.
+func TestTwoEndpointsRebuildOneDown(t *testing.T) {
+	lux, env := e2eEnv(t)
+	const keyB = "lux_fake_key_BBBB_e2e_test"
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	b.NewTerminal = lux.NewTerminal
+	var cfgDir, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgDir = filepath.Join(dir, "luxmux")
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile = \"near\"\n[profiles.near]\nimage = \"alpine\"\n[profiles.far]\nimage = \"alpine\"\n" +
+		"lux_url = \"" + b.URL + "\"\ntenant = \"example\"\napi_key_env = \"LMX_E2E_FAR_KEY\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "LMX_E2E_FAR_KEY="+keyB)
+	p := startLuxmux(t, env, "new -s two")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	q := startLuxmux(t, env, "new-window -t two -p far -n far")
+	q.exited()
+	if len(b.RunIDs()) != 1 || len(lux.RunIDs()) != 1 {
+		t.Fatalf("Runs: near %v, far %v", lux.RunIDs(), b.RunIDs())
+	}
+	if err := state.Remove(stateDir, "two"); err != nil {
+		t.Fatal(err)
+	}
+	b.SetDown(true)
+	p = startLuxmux(t, env, "attach -t two")
+	p.wait("near window", has("$"))
+	if !strings.Contains(p.rawSince(0), "endpoint unreachable") {
+		p.wait("unreachable notice", has("endpoint unreachable"))
+	}
+	b.SetDown(false)
+	p.wait("far window back", func(string) bool { return strings.Contains(p.rawSince(0), "window(s) added") })
+	p.typ("\x021")
+	p.wait("far window shown", func(string) bool { return p.scr.title() == "luxmux:two [1] far" })
+	p.typ("\x02d")
+	p.exited()
+	s, _, _ := state.Load(stateDir, "two")
+	if len(s.Windows) != 2 || s.Windows[1].Endpoint == nil || s.Windows[1].Endpoint.URL != b.URL {
+		t.Fatalf("file %+v", s)
+	}
+	if b.Refused() != 0 {
+		t.Fatalf("far lux refused %d requests", b.Refused())
+	}
+	for _, l := range fakelux.KeyLeaks([]string{keyB, fakelux.DefaultKey}, stateDir, []byte(p.rawSince(0))) {
+		t.Errorf("%s holds a key", l)
+	}
+}
+
+// TestAttachRecordsExternalOnItsLux: a Run new-window -p far made on the
+// far lux while the session was attached elsewhere (never adopted there)
+// is recorded by the next attach with the far lux as its endpoint: the
+// window attaches to it there, and the file names that lux.
+func TestAttachRecordsExternalOnItsLux(t *testing.T) {
+	lux, env := e2eEnv(t)
+	const keyB = "lux_fake_key_BBBB_e2e_test"
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	b.NewTerminal = lux.NewTerminal
+	var cfgDir, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgDir = filepath.Join(dir, "luxmux")
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile = \"near\"\n[profiles.near]\nimage = \"alpine\"\n[profiles.far]\nimage = \"alpine\"\n" +
+		"lux_url = \"" + b.URL + "\"\ntenant = \"example\"\napi_key_env = \"LMX_E2E_FAR_KEY\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "LMX_E2E_FAR_KEY="+keyB)
+	p := startLuxmux(t, env, "new -s ext")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	unlock, err := state.Lock(stateDir, "ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := startLuxmux(t, env, "new-window -t ext -p far -n far")
+	q.exited()
+	unlock()
+	if len(b.RunIDs()) != 1 {
+		t.Fatalf("far lux has %v", b.RunIDs())
+	}
+	far := b.RunIDs()[0]
+	if s, _, _ := state.Load(stateDir, "ext"); len(s.Windows) != 1 {
+		t.Fatalf("new-window wrote the file of an attached session: %+v", s.Windows)
+	}
+
+	p = startLuxmux(t, env, "attach -t ext")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("far window shown", func(string) bool { return p.scr.title() == "luxmux:ext [1] far" })
+	p.wait("far window attached on the far lux", func(string) bool { return b.Streams(far) > 0 })
+	p.typ("\x02d")
+	p.exited()
+	s, _, _ := state.Load(stateDir, "ext")
+	if len(s.Windows) != 2 || s.Windows[1].RunID != far || s.Windows[1].Endpoint == nil ||
+		s.Windows[1].Endpoint.URL != b.URL || s.Windows[1].Endpoint.Tenant != "example" {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	if slices.Contains(lux.Requests(), "GET /v1/runs/"+far) {
+		t.Fatal("the far Run was looked for on the near lux")
+	}
+}
+
+// TestEndUnterminatedSpareNamed: the last window's shell exits while the
+// far lux refuses the key: the far spare cannot be terminated, and
+// luxmux says the session file is kept and names the spare.
+func TestEndUnterminatedSpareNamed(t *testing.T) {
+	_, env := e2eEnv(t)
+	const keyB = "lux_fake_key_BBBB_e2e_test"
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	var cfgDir, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgDir = filepath.Join(dir, "luxmux")
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile = \"near\"\n[profiles.near]\nimage = \"alpine\"\n[profiles.far]\nimage = \"alpine\"\nwarm_spare = true\n" +
+		"lux_url = \"" + b.URL + "\"\napi_key_env = \"LMX_E2E_FAR_KEY\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, append(env, "LMX_E2E_FAR_KEY="+keyB), "new -s ks")
+	p.wait("prompt", has("$"))
+	if !fakelux.WaitFor(context.Background(), 15*time.Second, func() bool {
+		s, _, _ := state.Load(stateDir, "ks")
+		return s != nil && len(b.RunIDs()) == 1 && slices.Contains(slices.Collect(maps.Values(s.Spares)), b.RunIDs()[0])
+	}) {
+		t.Fatalf("no spare recorded on the far lux: %v", b.RunIDs())
+	}
+	spare := b.RunIDs()[0]
+	p.typ("\x02d")
+	p.exited()
+
+	p = startLuxmux(t, append(env, "LMX_E2E_FAR_KEY=lux_fake_key_AAAA_e2e_test"), "attach -t ks")
+	p.wait("prompt", has("$"))
+	p.typ("exit\r")
+	p.exited()
+	out := p.rawSince(0)
+	if !strings.Contains(out, "session file kept: Runs not terminated:") || !strings.Contains(out, spare+" on ") {
+		t.Fatalf("output %q", out)
+	}
+	if _, ok, _ := state.Load(stateDir, "ks"); !ok || b.Run(spare).State != "running" {
+		t.Fatalf("file kept %v, spare %s", ok, b.Run(spare).State)
 	}
 }

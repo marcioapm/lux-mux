@@ -59,6 +59,14 @@ func run(id, session, profile, state string, at int, spare bool) *api.Run {
 	return r
 }
 
+// testEP is the one endpoint of rebuildOne.
+var testEP = config.Endpoint{URL: "https://lux.example.com"}
+
+// rebuildOne is RebuildFrom over one endpoint's listing of runs.
+func rebuildOne(session string, runs []*api.Run, profiles map[string]config.Profile) *Session {
+	return RebuildFrom(session, []Listing{{Endpoint: testEP, Runs: runs}}, testEP, profiles)
+}
+
 // TestSessionDefaultProfile: a session's default profile is kept in its
 // file, and a file from before it has none.
 func TestSessionDefaultProfile(t *testing.T) {
@@ -101,7 +109,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	r := run("run_1", "work", "dev", "running", 1, false)
 	r.Spec = sp
 	r.Labels[config.LabelWindow] = "named"
-	s := RebuildLabelled("work", "work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
+	s := rebuildOne("work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
 	if len(s.Windows) != 1 || s.Windows[0].Name != "named" || s.Windows[0].Profile != "dev" || s.Windows[0].Spec == nil {
 		t.Fatalf("%+v", s.Windows)
 	}
@@ -115,7 +123,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	}
 	// A Run listed without its spec keeps the profile name only.
 	bare := run("run_2", "work", "dev", "running", 2, false)
-	if s := RebuildLabelled("work", "work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
+	if s := rebuildOne("work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
 		t.Fatalf("%+v", s.Windows[0])
 	}
 }
@@ -212,7 +220,7 @@ func TestRebuild(t *testing.T) {
 		run("run_2", "work", "app", "stopped", 20, true), // an older spare: claimed
 		run("run_4", "work", "app", "running", 40, true), // the newest spare: waiting
 	}
-	s := RebuildLabelled("work", "work", runs, nil)
+	s := rebuildOne("work", runs, nil)
 	var ids []string
 	for _, w := range s.Windows {
 		ids = append(ids, w.RunID)
@@ -240,7 +248,7 @@ func TestRebuildBySpec(t *testing.T) {
 		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
 		run("run_e", "work", "legacy", "running", 50, true),
 	}
-	s := RebuildLabelled("work", "work", runs, nil)
+	s := rebuildOne("work", runs, nil)
 	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
@@ -254,7 +262,7 @@ func TestReconcile(t *testing.T) {
 	s := &Session{Windows: []Window{{RunID: "a"}, {RunID: "b"}, {RunID: "c"}}, Active: 2, Last: 1,
 		Spares:  map[string]string{"p": "s1", "q": "s2"},
 		Claimed: []string{"a", "b", "gone"}}
-	s.Reconcile(map[string]string{"a": "running", "b": "terminated", "c": "stopped", "s1": "running"})
+	s.ReconcileUp(map[string]string{"a": "running", "b": "terminated", "c": "stopped", "s1": "running"}, testEP, nil)
 	if len(s.Windows) != 2 || s.Windows[0].RunID != "a" || s.Windows[1].RunID != "c" {
 		t.Fatalf("%+v", s.Windows)
 	}
@@ -335,9 +343,80 @@ func TestRecordSpares(t *testing.T) {
 	}
 	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"},
 		Claimed: []string{"run_cl"}, Windows: []Window{{RunID: "run_win"}}}
-	RecordSpares(s, "work", runs)
+	RecordSparesFrom(s, "work", []Listing{{Endpoint: testEP, Runs: runs}}, testEP)
 	want := map[string]string{"k1": "run_new", "k2": "run_kept", "k3": "run_k3"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
+	}
+}
+
+// TestRebuildFromEndpoints: windows rebuilt from two endpoints' listings
+// record the endpoint each Run was listed on; an endpoint that could not
+// be listed adds nothing; a spare off the default endpoint gets a slot of
+// its own; every spare records its endpoint, the default's too.
+func TestRebuildFromEndpoints(t *testing.T) {
+	def := config.Endpoint{URL: "https://lux.example.com"}
+	other := config.Endpoint{URL: "https://lux2.example.com", Tenant: "example", KeyEnv: "EXAMPLE_LUX_API_KEY"}
+	down := config.Endpoint{URL: "https://down.example.com"}
+	spec := func(r *api.Run) *api.Run { r.Labels[config.LabelSpec] = "k"; return r }
+	ls := []Listing{
+		{Endpoint: def, Runs: []*api.Run{run("run_1", "work", "a", "running", 10, false), spec(run("run_s1", "work", "a", "running", 15, true))}},
+		{Endpoint: other, Runs: []*api.Run{run("run_2", "work", "b", "running", 20, false), spec(run("run_s2", "work", "b", "running", 25, true))}},
+		{Endpoint: down, Err: errors.New("unreachable")},
+	}
+	s := RebuildFrom("work", ls, def, nil)
+	if len(s.Windows) != 2 || *s.Windows[0].Endpoint != def || *s.Windows[1].Endpoint != other {
+		t.Fatalf("windows %+v", s.Windows)
+	}
+	slot := config.SpareSlot("k", other, def)
+	if !reflect.DeepEqual(s.Spares, map[string]string{"k": "run_s1", slot: "run_s2"}) ||
+		!reflect.DeepEqual(s.SpareEndpoints, map[string]config.Endpoint{"k": def, slot: other}) {
+		t.Fatalf("spares %v endpoints %v", s.Spares, s.SpareEndpoints)
+	}
+}
+
+// TestReconcileKeepsDownEndpoint: windows and spares on an endpoint that
+// could not be listed are kept; those on the endpoints that answered are
+// reconciled.
+func TestReconcileKeepsDownEndpoint(t *testing.T) {
+	def := config.Endpoint{URL: "https://lux.example.com"}
+	down := config.Endpoint{URL: "https://down.example.com"}
+	s := &Session{Windows: []Window{{RunID: "a"}, {RunID: "b", Endpoint: &down}, {RunID: "gone"}},
+		Spares: map[string]string{"k": "s1", "k@x": "s2"}, SpareEndpoints: map[string]config.Endpoint{"k@x": down},
+		Claimed: []string{"b"}}
+	s.ReconcileUp(map[string]string{"a": "running"}, def, func(e config.Endpoint) bool { return e == down })
+	if len(s.Windows) != 2 || s.Windows[0].RunID != "a" || s.Windows[1].RunID != "b" {
+		t.Fatalf("windows %+v", s.Windows)
+	}
+	if !reflect.DeepEqual(s.Spares, map[string]string{"k@x": "s2"}) || !reflect.DeepEqual(s.Claimed, []string{"b"}) {
+		t.Fatalf("spares %v claimed %v", s.Spares, s.Claimed)
+	}
+}
+
+// TestRecordSparesFromEndpoints: a waiting spare listed on a second lux
+// takes that lux's slot, with its endpoint; a leftover entry is never an
+// empty slot, is not overwritten, and its Run is not recorded again.
+func TestRecordSparesFromEndpoints(t *testing.T) {
+	other := config.Endpoint{URL: "https://lux2.example.com", Tenant: "example"}
+	spare := func(id, key string, at int) *api.Run {
+		r := run(id, "work", "dev", "running", at, true)
+		r.Labels[config.LabelSpec] = key
+		return r
+	}
+	slot := config.SpareSlot("k1", other, testEP)
+	s := &Session{Name: "work"}
+	s.SetSpare(LeftoverPrefix+"run_left", "run_left", other)
+	s.SetSpare(LeftoverPrefix+"k2", "", other)
+	ls := []Listing{
+		{Endpoint: testEP, Runs: []*api.Run{spare("run_a", "k1", 1)}},
+		{Endpoint: other, Runs: []*api.Run{spare("run_b", "k1", 2), spare("run_left", "k1", 3), spare("run_x", LeftoverPrefix+"k2", 4)}},
+	}
+	RecordSparesFrom(s, "work", ls, testEP)
+	want := map[string]string{"k1": "run_a", slot: "run_b", LeftoverPrefix + "run_left": "run_left", LeftoverPrefix + "k2": ""}
+	if !reflect.DeepEqual(s.Spares, want) {
+		t.Fatalf("spares %v, want %v", s.Spares, want)
+	}
+	if s.SpareEndpoint(slot, testEP) != other || s.SpareEndpoint("k1", testEP) != testEP {
+		t.Fatalf("spare endpoints %v", s.SpareEndpoints)
 	}
 }

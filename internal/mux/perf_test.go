@@ -160,8 +160,8 @@ func perfPayload(line string, size int) []byte {
 
 func startPerfMux(t *testing.T, srv *perfServer, out io.Writer, keys io.Reader) (*Mux, chan struct{}) {
 	cfg, _ := config.Parse(nil)
-	cl, _ := luxapi.New(api.Config{URL: srv.URL, APIKey: "k"})
-	m, err := New(Options{Session: "perf", Config: cfg, Lux: cl, In: keys, Out: out,
+	eps := luxapi.NewEndpoints(api.Config{URL: srv.URL, APIKey: "k"}, func(string) (string, bool) { return "", false })
+	m, err := New(Options{Session: "perf", Config: cfg, Endpoints: eps, In: keys, Out: out,
 		Size: func() (int, int) { return 50, 200 }, RestoreWait: time.Second},
 		&state.Session{Name: "perf", Windows: []state.Window{{RunID: "run_1", Name: "w", Profile: "default"}}})
 	if err != nil {

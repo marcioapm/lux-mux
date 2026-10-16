@@ -1,6 +1,7 @@
 // Package sessions is what luxmux does to whole sessions, from the
 // command line or from inside a session: list, open for attaching,
-// rename and kill, with the names a rename gave them.
+// rename and kill, with the names a rename gave them, across every lux
+// the session's Runs may be on (Luxes).
 //
 // lux cannot change a Run's labels, so a renamed session's Runs keep the
 // luxmux-session label of the name they were made under; the state
@@ -11,10 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/marcioapm/lux/api"
@@ -55,12 +59,17 @@ func Label(dir, name string) (string, error) {
 
 // LiveLabel is Label after a stale rename entry naming name was dropped
 // (pruneStale): a renamed session whose Runs all ended frees both names.
-// locked: the caller has just taken name's lock (see pruneStale).
-func LiveLabel(ctx context.Context, c *luxapi.Client, dir, name string, locked bool) (string, error) {
-	if err := pruneStale(ctx, c, dir, name, locked); err != nil {
-		return "", err
+// locked: the caller has just taken name's lock (see pruneStale). ls,
+// when not nil, is the label's Runs as x.ListSession(ctx, label, name's
+// file) lists them, made by the prune check.
+func LiveLabel(ctx context.Context, x Luxes, dir, name string, locked bool) (label string, ls Listings, err error) {
+	if ls, err = pruneStale(ctx, x, dir, name, locked); err != nil {
+		return "", nil, err
 	}
-	return Label(dir, name)
+	if label, err = Label(dir, name); err != nil {
+		return "", nil, err
+	}
+	return label, ls, nil
 }
 
 func labelIn(m map[string]string, name string) (string, error) {
@@ -75,7 +84,7 @@ func labelIn(m map[string]string, name string) (string, error) {
 	return name, nil
 }
 
-// Info is one session as the session chooser and ( ) see it.
+// Info is one session as the session chooser, ( ) and luxmux ls see it.
 type Info struct {
 	Name  string
 	Label string
@@ -92,19 +101,24 @@ type Info struct {
 	// Elsewhere: another process holds its lock, Pid the one it wrote.
 	Elsewhere bool
 	Pid       string
+	// Unreachable names each lux its file has windows on that could not
+	// be listed, with why: "endpoint unreachable: <lux>".
+	Unreachable []string
 }
 
-// List is every session, sorted by name: those with a file and those lux
-// has live Runs of.
-func List(ctx context.Context, c *luxapi.Client, dir string) ([]Info, error) {
-	runs, err := c.ListAll(ctx)
-	if err != nil {
+// List is every session, sorted by name: those with a file and those any
+// lux has live Runs of. A lux that cannot be listed while others can is
+// said on x.Warn and in the Unreachable of the sessions with windows
+// there; with none listed, their errors are returned.
+func List(ctx context.Context, x Luxes, dir string) ([]Info, error) {
+	ls := x.ListAll(ctx, Files(dir)...)
+	if err := x.report(ls); err != nil {
 		return nil, err
 	}
-	return list(dir, runs)
+	return list(dir, ls, x.Eps.Default())
 }
 
-func list(dir string, runs []*api.Run) ([]Info, error) {
+func list(dir string, ls Listings, def config.Endpoint) ([]Info, error) {
 	files, err := state.List(dir)
 	if err != nil {
 		return nil, err
@@ -114,10 +128,9 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 		return nil, err
 	}
 	byLabel := map[string][]*api.Run{}
-	for _, r := range runs {
-		if l := r.Labels[config.LabelSession]; l != "" && state.Live(r.State) {
-			byLabel[l] = append(byLabel[l], r)
-		}
+	for _, t := range ls.Live(func(r *api.Run) bool { return r.Labels[config.LabelSession] != "" }) {
+		l := t.Run.Labels[config.LabelSession]
+		byLabel[l] = append(byLabel[l], t.Run)
 	}
 	nameOf := map[string]string{}
 	for n, l := range renames {
@@ -158,6 +171,14 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 			in.Windows = len(s.Windows)
 			in.Spares = len(s.Spares)
 			in.DefaultProfile = s.DefaultProfile
+			down := map[string]bool{}
+			for _, w := range s.Windows {
+				ep := w.EndpointOr(def)
+				if err := ls.ErrOn(ep); err != nil {
+					down[luxapi.FailedWord(err)+": "+ep.Label()] = true
+				}
+			}
+			in.Unreachable = slices.Sorted(maps.Keys(down))
 		} else {
 			in.Windows = len(byLabel[label]) - in.Spares
 		}
@@ -169,47 +190,60 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 }
 
 // Open reads session name for attaching, as luxmux attach does: its file
-// reconciled with its Runs (and the Runs new-window made, and the waiting
-// spares, that it lacks), else rebuilt from their labels. existed is
-// false when there is neither. A stale rename entry naming name is
-// dropped first (pruneStale). The caller holds the session's lock, just
-// taken to attach it.
-func Open(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
-	if err := pruneStale(ctx, c, dir, name, true); err != nil {
+// reconciled with its Runs on every lux (and the Runs new-window made, and
+// the waiting spares, that it lacks), else rebuilt from their labels.
+// existed is false when there is neither. A lux that cannot be listed
+// keeps the file's windows and spares there as they are, or, rebuilding,
+// is recorded in the session's Unlisted. A stale rename entry naming name
+// is dropped first (pruneStale). The caller holds the session's lock,
+// just taken to attach it. Each lux is listed once: the prune check's
+// listing of name's entry is the one reconciled.
+func Open(ctx context.Context, x Luxes, dir, name string) (sess *state.Session, label string, existed bool, err error) {
+	own, err := pruneStale(ctx, x, dir, name, true)
+	if err != nil {
 		return nil, "", false, err
 	}
-	return Reopen(ctx, c, dir, cfg, name)
+	return reopen(ctx, x, dir, name, own)
 }
 
 // Reopen is Open for a session this process had attached: its rename
 // entry is kept even when none of its Runs is live (its windows show
 // their end).
-func Reopen(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
+func Reopen(ctx context.Context, x Luxes, dir, name string) (sess *state.Session, label string, existed bool, err error) {
+	return reopen(ctx, x, dir, name, nil)
+}
+
+// reopen is Reopen reconciling from ls, pruneStale's listing of name's
+// own rename entry, else (nil) from a listing of its own.
+func reopen(ctx context.Context, x Luxes, dir, name string, ls Listings) (sess *state.Session, label string, existed bool, err error) {
 	if label, err = Label(dir, name); err != nil {
 		return nil, "", false, err
 	}
-	runs, err := c.ListSession(ctx, label)
+	file, _, err := state.Load(dir, name)
 	if err != nil {
 		return nil, "", false, err
 	}
-	if err := recoverMove(dir, name, runs); err != nil {
+	if ls == nil {
+		ls = x.ListSession(ctx, label, file)
+	}
+	if err := x.report(ls); err != nil {
+		return nil, "", false, err
+	}
+	if err := recoverMove(dir, name, ls.Runs()); err != nil {
 		return nil, "", false, err
 	}
 	sess, ok, err := state.Load(dir, name)
 	if err != nil {
 		return nil, "", false, err
 	}
+	def := x.Eps.Default()
 	if ok {
-		known := map[string]string{}
-		for _, r := range runs {
-			known[r.ID] = r.State
-		}
-		state.RecordExternal(sess, label, runs, cfg.Profiles)
-		sess.Reconcile(known)
-		state.RecordSpares(sess, label, runs)
+		state.RecordExternal(sess, label, ls, x.Cfg.Profiles)
+		sess.ReconcileUp(ls.Known(), def, ls.Down())
+		state.RecordSparesFrom(sess, label, ls, def)
 		return sess, label, true, nil
 	}
-	sess = state.RebuildLabelled(name, label, runs, cfg.Profiles)
+	sess = state.RebuildLabelledFrom(name, label, ls, def, x.Cfg.Profiles)
 	return sess, label, len(sess.Windows) > 0, nil
 }
 
@@ -218,62 +252,82 @@ var ErrTaken = errors.New("session exists")
 
 // CheckFree checks that name may be given to a new or renamed session:
 // a valid name with no file, not a renamed session's name or label, and
-// no live Runs labelled with it. own is the label of the session being
-// renamed, which may take its label back as its name ("" for a new one).
-// A rename entry naming name that is stale (see pruneStale) is dropped
-// first. locked: the caller has just taken name's lock; unlocked, an
-// entry whose session's lock is held, by this process too, is kept.
-func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string, locked bool) error {
+// no live Runs labelled with it on any lux. own is the label of the
+// session being renamed, which may take its label back as its name (""
+// for a new one). A rename entry naming name that is stale (see
+// pruneStale) is dropped first. locked: the caller has just taken name's
+// lock; unlocked, an entry whose session's lock is held, by this process
+// too, is kept.
+//
+// The listings are returned: for a new session, a lux that did not answer
+// may hold Runs of name, which join it once that lux answers (its
+// Unlisted). A rename is refused then: Runs labelled with the new name
+// would not be the renamed session's.
+func CheckFree(ctx context.Context, x Luxes, dir, name, own string, locked bool) (Listings, error) {
 	if err := CheckName(name); err != nil {
-		return err
+		return nil, err
 	}
-	if err := pruneStale(ctx, c, dir, name, locked); err != nil {
-		return err
+	if _, err := pruneStale(ctx, x, dir, name, locked); err != nil {
+		return nil, err
 	}
 	if _, ok, err := state.Load(dir, name); err != nil {
-		return err
+		return nil, err
 	} else if ok {
-		return fmt.Errorf("session %s: %w", name, ErrTaken)
+		return nil, fmt.Errorf("session %s: %w", name, ErrTaken)
 	}
 	renames, err := state.Renames(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, ok := renames[name]; ok {
-		return fmt.Errorf("session %s: %w", name, ErrTaken)
+		return nil, fmt.Errorf("session %s: %w", name, ErrTaken)
 	}
 	if name == own {
-		return nil
+		return nil, nil
 	}
 	for n, l := range renames {
 		if l == name {
-			return fmt.Errorf("%s is the label of session %s's Runs (it was renamed): choose another name", name, n)
+			return nil, fmt.Errorf("%s is the label of session %s's Runs (it was renamed): choose another name", name, n)
 		}
 	}
-	runs, err := c.ListSession(ctx, name)
-	if err != nil {
-		return err
+	ls := x.ListSession(ctx, name)
+	for _, t := range ls.Live(anyRun) {
+		return ls, fmt.Errorf("session %s has Runs on lux %s: %w", name, t.Endpoint.Label(), ErrTaken)
 	}
-	if hasLive(runs) {
-		return fmt.Errorf("session %s has Runs on lux: %w", name, ErrTaken)
+	if err := x.report(ls); err != nil {
+		return ls, err
 	}
-	return nil
+	if down := ls.Unlisted(); own != "" && len(down) > 0 {
+		return ls, fmt.Errorf("session %s may have Runs on %s, which did not answer: try again when it does", name, labels(down))
+	}
+	return ls, nil
+}
+
+func labels(eps []config.Endpoint) string {
+	out := make([]string, len(eps))
+	for i, ep := range eps {
+		out[i] = ep.Label()
+	}
+	return strings.Join(out, ", ")
 }
 
 // pruneStale drops a rename entry naming name (as its session or its
-// label) that is stale: no live Run carries its label, and no process
-// holds its session's lock. locked makes the one exception: the caller
+// label) that is stale: no lux has a live Run carrying its label, and no
+// process holds its session's lock. An entry whose label could not be
+// listed on every lux is kept. locked makes the one exception: the caller
 // has just taken name's lock, which state.Lock refuses while any Mux,
 // this process's included, has name attached, so name's lock held by
 // this process is the caller's. Any other lock is a session attached
 // somewhere, which ends itself when its windows do (Mux.endSession). A
 // pruned entry's file, whose windows' Runs are then all gone, goes with
-// it.
-func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string, locked bool) error {
+// it. The listing of name's own entry (label renames[name], endpoints of
+// name's file), when that entry is kept, is returned; else nil.
+func pruneStale(ctx context.Context, x Luxes, dir, name string, locked bool) (Listings, error) {
 	renames, err := state.Renames(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var own Listings
 	for n, l := range renames {
 		if n != name && l != name {
 			continue
@@ -281,21 +335,26 @@ func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string, locked 
 		if pid, held := state.Held(dir, n); held && !(locked && n == name && pid == strconv.Itoa(os.Getpid())) {
 			continue
 		}
-		runs, err := c.ListSession(ctx, l)
-		if err != nil {
-			return err
+		file, _, _ := state.Load(dir, n)
+		ls := x.ListSession(ctx, l, file)
+		down := ls.Unlisted()
+		if len(down) == len(ls) && len(ls) > 0 {
+			return nil, ls.Report(io.Discard)
 		}
-		if hasLive(runs) {
+		if len(down) > 0 || len(ls.Live(anyRun)) > 0 {
+			if n == name {
+				own = ls
+			}
 			continue
 		}
 		if err := state.Remove(dir, n); err != nil {
-			return err
+			return nil, err
 		}
 		if err := state.DropRenamed(dir, n); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return own, nil
 }
 
 // Move renames session old to new (label is its Runs' label). The caller
@@ -365,52 +424,110 @@ func recoverMove(dir, name string, runs []*api.Run) error {
 	return nil
 }
 
-// Kill terminates session name's live Runs and forgets it: its file and
-// its rename entry, once every terminate succeeded. done is called with
-// each Run terminated. The session chooser holds the session's lock for
-// it; luxmux kill-session takes none, and a luxmux attached to the
-// session ends once its windows do.
-func Kill(ctx context.Context, c *luxapi.Client, dir, name string, done func(id string)) error {
-	live, err := LiveRuns(ctx, c, dir, name)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, r := range live {
-		if err := c.Terminate(ctx, r.ID); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.ID, err))
-		} else if done != nil {
-			done(r.ID)
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	if err := state.Remove(dir, name); err != nil {
-		return err
-	}
-	return state.DropRenamed(dir, name)
+// Killing is a kill of session Name read from every lux: its live Runs,
+// each with the lux it was listed on, and what decides whether its file
+// may go.
+type Killing struct {
+	Name string
+	Live []Target
+	// HasFile and Mapped: it has a file, a rename entry.
+	HasFile, Mapped bool
+	file            *state.Session
+	ls              Listings
 }
 
-// LiveRuns are session name's live Runs.
-func LiveRuns(ctx context.Context, c *luxapi.Client, dir, name string) ([]*api.Run, error) {
+// PlanKill lists session name's Runs on every lux its file and the
+// configuration name. A lux that cannot be listed while others can is
+// said on x.Warn; with none listed, their errors are returned. A session
+// with neither file, rename entry nor live Run is an error: no session,
+// or, while a lux did not answer, that it may still have Runs there.
+func PlanKill(ctx context.Context, x Luxes, dir, name string) (*Killing, error) {
 	label, err := Label(dir, name)
 	if err != nil {
 		return nil, err
 	}
-	runs, err := c.ListSession(ctx, label)
+	file, hasFile, _ := state.Load(dir, name)
+	renames, err := state.Renames(dir)
 	if err != nil {
 		return nil, err
 	}
-	var live []*api.Run
-	for _, r := range runs {
-		if state.Live(r.State) {
-			live = append(live, r)
-		}
+	_, mapped := renames[name]
+	ls := x.ListSession(ctx, label, file)
+	if err := x.report(ls); err != nil {
+		return nil, err
 	}
-	return live, nil
+	k := &Killing{Name: name, Live: ls.Live(anyRun), HasFile: hasFile, Mapped: mapped, file: file, ls: ls}
+	if len(k.Live) == 0 && !hasFile && !mapped {
+		if err := k.mayRemain(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("no session %s", name)
+	}
+	return k, nil
 }
 
-func hasLive(runs []*api.Run) bool {
-	return slices.ContainsFunc(runs, func(r *api.Run) bool { return state.Live(r.State) })
+// mayRemain is the error for a session with no file of which a lux that
+// did not answer may still hold Runs (nil: every lux answered).
+func (k *Killing) mayRemain() error {
+	down := k.ls.Unlisted()
+	if len(down) == 0 {
+		return nil
+	}
+	return fmt.Errorf("session %s may still have Runs on %s: run kill-session again when it answers", k.Name, labels(down))
+}
+
+// Do terminates the Runs on each one's own lux (done is called with each
+// Run terminated) and forgets the session, its file and rename entry,
+// only once every terminate succeeded and no lux its file has windows,
+// spares or leftovers on went unlisted. Otherwise the file, with its
+// leftovers, is kept and the error names each Run not terminated and its
+// lux.
+func (k *Killing) Do(ctx context.Context, x Luxes, dir string, done func(id string)) error {
+	var errs []error
+	for _, t := range k.Live {
+		if err := t.Terminate(ctx, x.Eps); err != nil {
+			errs = append(errs, fmt.Errorf("%s on %s: %w", t.Run.ID, t.Endpoint.Label(), err))
+		} else if done != nil {
+			done(t.Run.ID)
+		}
+	}
+	if len(errs) > 0 {
+		kept := fmt.Errorf("session %s: file kept, %d Run(s) not terminated", k.Name, len(errs))
+		return errors.Join(append([]error{kept}, errs...)...)
+	}
+	if k.HasFile {
+		// Its Runs on a lux that did not answer may still be there. One
+		// lux under two key sources is named once.
+		down := k.ls.Down()
+		var unanswered []string
+		for _, ep := range endpointsOf(x.Eps.Default(), k.file) {
+			if down(ep) && !slices.Contains(unanswered, ep.Label()) {
+				unanswered = append(unanswered, ep.Label())
+			}
+		}
+		if len(unanswered) > 0 {
+			return fmt.Errorf("session file kept: %s, which it has windows on, did not answer", strings.Join(unanswered, ", "))
+		}
+	} else if err := k.mayRemain(); err != nil {
+		return err
+	}
+	if err := state.Remove(dir, k.Name); err != nil {
+		return err
+	}
+	return state.DropRenamed(dir, k.Name)
+}
+
+// LiveRuns are session name's live Runs on every lux, each with the lux
+// it was listed on.
+func LiveRuns(ctx context.Context, x Luxes, dir, name string) ([]Target, error) {
+	label, err := Label(dir, name)
+	if err != nil {
+		return nil, err
+	}
+	file, _, _ := state.Load(dir, name)
+	ls := x.ListSession(ctx, label, file)
+	if err := x.report(ls); err != nil {
+		return nil, err
+	}
+	return ls.Live(anyRun), nil
 }

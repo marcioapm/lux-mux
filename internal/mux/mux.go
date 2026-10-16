@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"sync"
@@ -51,10 +52,11 @@ type Options struct {
 	// when the session ends.
 	Console *Console
 	// Notice is shown once the session is on the terminal.
-	Notice   string
-	Config   *config.Config
-	Lux      *luxapi.Client
-	StateDir string
+	Notice string
+	Config *config.Config
+	// Endpoints makes the client of each window's lux.
+	Endpoints *luxapi.Endpoints
+	StateDir  string
 	// In is the keyboard (raw mode is the caller's), Out the terminal.
 	In  io.Reader
 	Out io.Writer
@@ -94,6 +96,9 @@ type Options struct {
 	// afterSwitchUnlock, when set, runs once a switch released this
 	// session's lock and before it takes the target's. Only tests set it.
 	afterSwitchUnlock func()
+	// spareDetachWait: how long a detach waits for spare submits in
+	// flight (default spareDetachWait). Unexported: only tests change it.
+	spareDetachWait time.Duration
 	// writeKeys writes one message of keystrokes to a stream (default
 	// wsjson.Write). Unexported: only tests change it.
 	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
@@ -102,7 +107,7 @@ type Options struct {
 // Mux is one attached session.
 type Mux struct {
 	opt  Options
-	lux  *luxapi.Client
+	eps  *luxapi.Endpoints
 	keys *keys.Machine
 	in   *input
 	// tw is the only writer of the terminal (opt.Out).
@@ -116,7 +121,8 @@ type Mux struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	// spareCtx bounds spare submits: a detach does not cancel them (lux
-	// may make the Run, and its id must be recorded); a switch does.
+	// may make the Run, and its id must be recorded) until it has waited
+	// spareDetachWait for them; a switch cancels them at once.
 	spareCtx   context.Context
 	stopSpares context.CancelFunc
 	// inputDone closes when the input loop returned: the next session's
@@ -146,7 +152,16 @@ type Mux struct {
 	// adoption (considerRun), and those of windows closed or relaunched,
 	// which are never adopted back.
 	considered map[string]bool
-	byRun      map[string]*Window
+	// consideredOn is the endpoint each considered id was seen on, so a
+	// listing of one endpoint prunes only its own.
+	consideredOn map[string]config.Endpoint
+	byRun        map[string]*Window
+	// feeds are the endpoints whose event stream is followed: one each.
+	feeds map[config.Endpoint]bool
+	// listed is closed for an endpoint once its first listing of the
+	// session was tried; a spare is submitted there only after it, so a
+	// spare an earlier attach left unrecorded is found first.
+	listed map[config.Endpoint]chan struct{}
 	// promptState is the open prompt.
 	promptState *prompt
 	// shown is the window whose screen the terminal shows, painted and
@@ -156,9 +171,11 @@ type Mux struct {
 	shown *Window
 	// ending: the last window closed; spares submitted from now on are
 	// terminated, not recorded.
-	ending    bool
-	done      chan string // the reason Run returns
-	crashOnce sync.Once
+	ending bool
+	// unterminated are the Runs the session's end could not terminate.
+	unterminated []string
+	done         chan string // the reason Run returns
+	crashOnce    sync.Once
 	// preview follows another session's shown window for the session
 	// chooser.
 	preview sessionPreview
@@ -201,6 +218,9 @@ func (o *Options) defaults() {
 	if o.switchOpenWait == 0 {
 		o.switchOpenWait = switchOpenWait
 	}
+	if o.spareDetachWait == 0 {
+		o.spareDetachWait = spareDetachWait
+	}
 	if o.writeKeys == nil {
 		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
 			return wsjson.Write(ctx, c, d)
@@ -227,32 +247,44 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	if opt.Label == "" {
 		opt.Label = opt.Session
 	}
-	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
+	eps := opt.Endpoints
+	m := &Mux{opt: opt, eps: eps, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
-		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, done: make(chan string, 1)}
+		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
+		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1)}
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
-	for _, sw := range sess.Windows {
-		spec := opt.Config.Profiles[sw.Profile]
-		if sw.Spec != nil {
-			spec = *sw.Spec
+	def := eps.Default()
+	// A slot reserved with no id is a submit a detach or a switch stopped
+	// waiting for: it is free, and the Run lux may have made is found by
+	// its labels (sessions.Open, adoptSpares).
+	for slot, id := range sess.Spares {
+		if id == "" {
+			sess.DropSpare(slot)
 		}
-		w := m.newWindow(sw.Name, sw.Profile, spec)
-		w.RunID = sw.RunID
-		m.windows = append(m.windows, w)
-		m.byRun[w.RunID] = w
+	}
+	for _, sw := range sess.Windows {
+		m.addWindowLocked(sw, opt.Config.Profiles, sw.EndpointOr(def))
 	}
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
-	// A slot reserved with no id is a submit a switch cancelled: it is
-	// free (sessions.Open records the Run lux may have made in it).
-	for key, id := range sess.Spares {
-		if id == "" {
-			delete(sess.Spares, key)
-		}
-	}
 	return m, nil
+}
+
+// addWindowLocked appends the window sw records, with its Run, on ep; its
+// spec is sw's, else its profile's in profiles. Its supervisor is not
+// started.
+func (m *Mux) addWindowLocked(sw state.Window, profiles map[string]config.Profile, ep config.Endpoint) *Window {
+	spec := profiles[sw.Profile]
+	if sw.Spec != nil {
+		spec = *sw.Spec
+	}
+	w := m.newWindow(sw.Name, sw.Profile, spec, ep)
+	w.RunID = sw.RunID
+	m.windows = append(m.windows, w)
+	m.byRun[w.RunID] = w
+	return w
 }
 
 // clampSize bounds a terminal size to what lux attaches with and its
@@ -291,8 +323,17 @@ func (m *Mux) DefaultProfile() string {
 	return m.opt.Config.DefaultProfile
 }
 
-// Lux is the lux client.
-func (m *Mux) Lux() *luxapi.Client { return m.lux }
+// Endpoint is the lux a window of profile p is made on.
+func (m *Mux) Endpoint(p config.Profile) config.Endpoint { return m.eps.Of(p) }
+
+// Pools are the pools a window of profile p may use, on p's lux.
+func (m *Mux) Pools(ctx context.Context, p config.Profile) ([]api.Pool, error) {
+	c, err := m.eps.Client(m.eps.Of(p))
+	if err != nil {
+		return nil, err
+	}
+	return c.Pools(ctx)
+}
 
 // Terminal is where dialogs draw, in order with everything else written
 // to the terminal, and its size.
@@ -325,6 +366,8 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 		case <-m.ctx.Done():
 		}
 	})
+	// Before any endpoint is listed, so no listing adopts a leftover.
+	m.terminateLeftovers()
 	m.mu.Lock()
 	if len(m.windows) == 0 {
 		cfg := m.opt.Config
@@ -342,15 +385,26 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 			m.startSupervisor(w)
 		}
 	}
+	// Every lux the configured profiles name, the session's windows live
+	// on, or the rebuild could not list: one event stream and listing each.
+	eps := m.opt.Config.Endpoints(m.eps.Base())
+	for _, w := range m.windows {
+		eps = append(eps, w.Endpoint)
+	}
+	for _, ep := range m.sess.Unlisted {
+		eps = append(eps, ep)
+		m.setNoticeLocked("lux " + ep.Label() + ": endpoint unreachable; its windows are added when it answers")
+	}
+	for _, ep := range eps {
+		m.followEndpointLocked(ep)
+	}
 	m.repaintLocked()
 	m.saveLocked()
 	if m.opt.Notice != "" {
 		m.setNoticeLocked(m.opt.Notice)
 	}
 	m.mu.Unlock()
-	m.wg.Add(3)
-	m.goSafe(m.discoverWindows)
-	m.goSafe(m.followEvents)
+	m.wg.Add(1)
 	m.goSafe(m.keepSpares)
 	m.goSafe(func() {
 		defer close(m.inputDone)
@@ -374,16 +428,24 @@ func (m *Mux) finish(reason string) {
 	m.cancel()
 }
 
-// shutdown closes every stream, the event feed and the session preview,
+// spareDetachWait is how long a detach waits for spare submits in
+// flight; a lux that does not answer would otherwise hold it for the
+// submit's 30 s.
+const spareDetachWait = 5 * time.Second
+
+// shutdown closes every stream, the event feeds and the session preview,
 // and waits for the session's goroutines, the input loop's included; the
-// Runs keep running and the state is saved. For a switch, spare submits
-// in flight are cancelled rather than waited for. A Console the session
-// made is closed; a shared one is left to the next session, its terminal
-// reset.
+// Runs keep running and the state is saved. Spare submits in flight are
+// waited for up to spareDetachWait; for a switch they are cancelled
+// rather than waited for. A Console the session made is closed; a shared
+// one is left to the next session, its terminal reset.
 func (m *Mux) shutdown(switching bool) {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
-	m.saveLocked()
+	// An ended session's file was written or removed by endSession.
+	if !m.ending {
+		m.saveLocked()
+	}
 	m.suspended = true
 	m.tw.enqueue(screen.Reset(nil))
 	m.mu.Unlock()
@@ -399,7 +461,9 @@ func (m *Mux) shutdown(switching bool) {
 	// preview until it returns.
 	<-m.inputDone
 	m.stopSessionPreview()
+	capWait := time.AfterFunc(m.opt.spareDetachWait, m.stopSpares)
 	m.wg.Wait()
+	capWait.Stop()
 	m.stopSpares()
 	m.mu.Lock()
 	for _, w := range ws {
@@ -710,7 +774,8 @@ func (m *Mux) saveLocked() {
 			continue
 		}
 		spec := w.Spec
-		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec})
+		ep := w.Endpoint
+		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep})
 	}
 	s.Active, s.Last = m.active, m.last
 	if m.opt.StateDir != "" {
@@ -723,9 +788,11 @@ func (m *Mux) Windows() []WindowInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]WindowInfo, 0, len(m.windows))
+	def := m.eps.Default()
 	for i, w := range m.windows {
 		out = append(out, WindowInfo{Index: i, Name: w.Name, RunID: w.RunID, State: m.stateWordLocked(w),
-			Image: w.Spec.Image, Size: sizeWord(w.Spec), Repo: repoWord(w.Spec), Created: w.created, Active: i == m.active})
+			Image: w.Spec.Image, Size: sizeWord(w.Spec), Repo: repoWord(w.Spec), Created: w.created, Active: i == m.active,
+			Endpoint: w.Endpoint.Label(), OtherEndpoint: w.Endpoint != def})
 	}
 	return out
 }
@@ -741,6 +808,10 @@ type WindowInfo struct {
 	Repo    string
 	Created time.Time
 	Active  bool
+	// Endpoint is the window's lux and tenant; OtherEndpoint: not the
+	// lux CLI configuration's.
+	Endpoint      string
+	OtherEndpoint bool
 }
 
 func sizeWord(p config.Profile) string {
@@ -866,16 +937,30 @@ func (m *Mux) Kill(i int) {
 }
 
 // closeWindow removes w; with terminate, its Run is terminated first.
-// notice, when set, is shown afterwards.
-func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
-	if terminate && w.RunID != "" {
-		m.terminate(w.RunID)
+// notice, when set, is shown afterwards. A Run terminate could not end
+// (no client, the key refused, lux failing) keeps its window, with a
+// notice, and closeWindow returns the error: dropping the window would
+// leave the Run running with nothing recording it.
+func (m *Mux) closeWindow(w *Window, terminate bool, notice string) error {
+	m.mu.Lock()
+	id := w.RunID
+	m.mu.Unlock()
+	if terminate && id != "" {
+		if err := m.terminate(w.Endpoint, id); err != nil {
+			m.Notice(cannotTerminate(w.Endpoint, err))
+			return err
+		}
 	}
 	m.mu.Lock()
+	if terminate && w.RunID != id {
+		// Relaunched meanwhile: its new Run is terminated too.
+		m.mu.Unlock()
+		return m.closeWindow(w, terminate, notice)
+	}
 	i := m.indexLocked(w)
 	if i < 0 {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	if w.cancel != nil {
 		w.cancel()
@@ -885,14 +970,14 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)
-	m.considered[w.RunID] = true
+	m.considerLocked(w.Endpoint, w.RunID)
 	m.dropClaimedLocked(w.RunID)
 	m.closeFeedLocked(w)
 	if len(m.windows) == 0 {
 		m.saveLocked()
 		m.mu.Unlock()
 		m.endSession()
-		return
+		return nil
 	}
 	// The window shown next: the last one if it was the active one, as
 	// tmux does, else the active one stays.
@@ -920,46 +1005,99 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	m.repaintLocked()
 	m.saveLocked()
 	m.mu.Unlock()
+	return nil
 }
 
-// endSession ends the session when its last window closed: its spares are
-// terminated (nothing would claim them) and its file removed.
+// endSession ends the session when its last window closed: its spares and
+// leftovers are terminated (nothing would claim them) and its file
+// removed. One terminate cannot end (no client, the key refused, lux
+// failing) stays recorded in the file, which then holds only those, and
+// is listed by Unterminated; the file is not removed then.
 func (m *Mux) endSession() {
 	m.mu.Lock()
 	m.ending = true
-	spares := make([]string, 0, len(m.sess.Spares))
-	for _, id := range m.sess.Spares {
+	type spare struct {
+		slot string
+		ep   config.Endpoint
+		id   string
+	}
+	spares := make([]spare, 0, len(m.sess.Spares))
+	def := m.eps.Default()
+	for slot, id := range m.sess.Spares {
 		if id != "" {
-			spares = append(spares, id)
+			spares = append(spares, spare{slot, m.sess.SpareEndpoint(slot, def), id})
 		}
 	}
-	m.sess.Spares = nil
+	m.sess.Spares, m.sess.SpareEndpoints = nil, nil
 	m.mu.Unlock()
-	sort.Strings(spares)
-	for _, id := range spares {
-		m.terminate(id)
+	sort.Slice(spares, func(i, j int) bool { return spares[i].id < spares[j].id })
+	type failure struct {
+		spare
+		err error
 	}
-	if m.opt.StateDir != "" {
-		m.mu.Lock()
-		name := m.name
-		m.mu.Unlock()
-		_ = state.Remove(m.opt.StateDir, name)
-		_ = state.DropRenamed(m.opt.StateDir, name)
+	var kept []failure
+	for _, s := range spares {
+		if err := m.terminate(s.ep, s.id); err != nil {
+			kept = append(kept, failure{s, err})
+		}
 	}
+	m.mu.Lock()
+	for _, f := range kept {
+		m.sess.SetSpare(f.slot, f.id, f.ep)
+		m.unterminatedLocked(f.ep, f.id, f.err)
+	}
+	m.saveEndedLocked()
+	m.mu.Unlock()
 	m.finish("exited")
 }
 
-// terminate terminates a Run, retrying a few times on errors.
-func (m *Mux) terminate(id string) {
-	d := m.opt.Backoff
-	for range 5 {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err := m.lux.Terminate(ctx, id)
-		cancel()
-		if err == nil {
-			return
-		}
-		time.Sleep(d)
-		d = min(2*d, m.opt.MaxBackoff)
+// saveEndedLocked writes an ended session's file: removed when it records
+// no Run, kept while a spare or leftover terminate could not end is in it.
+func (m *Mux) saveEndedLocked() {
+	if m.opt.StateDir == "" {
+		return
 	}
+	if len(m.sess.Spares) == 0 {
+		_ = state.Remove(m.opt.StateDir, m.name)
+		_ = state.DropRenamed(m.opt.StateDir, m.name)
+		return
+	}
+	// Kept with its rename entry: the Runs it records carry the label.
+	m.saveLocked()
+}
+
+// cannotTerminate is the notice for a Run left running because terminate
+// could not end it.
+func cannotTerminate(ep config.Endpoint, err error) string {
+	return fmt.Sprintf("cannot terminate on %s: %v", ep.Label(), err)
+}
+
+// terminate terminates Run id on ep, trying up to 5 times. It returns nil
+// when lux accepted, or answered 404 (the Run is gone) or 409 (it is
+// already ending). Any other error means the Run may still be running and
+// the caller must keep it recorded: ep has no client, lux refused the key
+// (401/403, not retried), or lux did not answer or failed every try.
+func (m *Mux) terminate(ep config.Endpoint, id string) error {
+	c, err := m.eps.Client(ep)
+	if err != nil {
+		return err
+	}
+	d := m.opt.Backoff
+	for i := range 5 {
+		if i > 0 {
+			time.Sleep(d)
+			d = min(2*d, m.opt.MaxBackoff)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err = c.Terminate(ctx, id)
+		cancel()
+		// Client.Terminate already answers nil for a 404.
+		if err == nil || luxapi.IsStatus(err, http.StatusConflict) {
+			return nil
+		}
+		if luxapi.Refused(err) {
+			break
+		}
+	}
+	return luxapi.Described(err)
 }

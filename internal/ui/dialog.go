@@ -24,7 +24,10 @@ import (
 type DialogHost interface {
 	Config() *config.Config
 	Recent() (images, repos []string)
-	Pools(ctx context.Context) ([]api.Pool, error)
+	// Pools are those on the lux of profile p.
+	Pools(ctx context.Context, p config.Profile) ([]api.Pool, error)
+	// Endpoint is the lux a window of profile p is made on.
+	Endpoint(p config.Profile) config.Endpoint
 	Validate(ctx context.Context, name string, p config.Profile) (*api.SubmitAnswer, error)
 	// Background is the shown window's screen as plain text, drawn
 	// dimmed around the box.
@@ -91,6 +94,7 @@ const (
 )
 
 type poolsMsg struct {
+	ep    config.Endpoint
 	pools []api.Pool
 	err   error
 }
@@ -123,6 +127,8 @@ type Dialog struct {
 	useAsDefault bool
 	pools        []api.Pool
 	poolsState   poolsState
+	// endpoint is the lux of the chosen profile, whose pools are listed.
+	endpoint config.Endpoint
 
 	focus  stop
 	scroll int
@@ -194,6 +200,7 @@ func NewDialogModel(ctx context.Context, h DialogHost, rows, cols int) *Dialog {
 		d.in[s] = newInput(place[s], sugg[s])
 	}
 	d.fill(ValuesFrom(d.profile.value, cfg.Profiles[d.profile.value]), true)
+	d.endpoint = h.Endpoint(cfg.Profiles[d.profile.value])
 	d.refreshPoolOptions()
 	d.setFocus(stProfile)
 	d.resize(rows, cols)
@@ -264,15 +271,21 @@ func (d *Dialog) resize(rows, cols int) {
 func (d *Dialog) valueWidth() int { return max(1, innerWidth(d.cols)-labelWidth) }
 
 // Init loads the pools.
-func (d *Dialog) Init() tea.Cmd {
+func (d *Dialog) Init() tea.Cmd { return d.loadPools() }
+
+// loadPools lists the pools on the chosen profile's lux; the new-session
+// form has no pool field and lists none.
+func (d *Dialog) loadPools() tea.Cmd {
 	if d.session {
 		return nil
 	}
+	p := d.cfg.Profiles[d.profile.value]
+	ep := d.endpoint
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(d.ctx, poolsFor)
 		defer cancel()
-		p, err := d.host.Pools(ctx)
-		return poolsMsg{p, err}
+		pools, err := d.host.Pools(ctx, p)
+		return poolsMsg{ep, pools, err}
 	}
 }
 
@@ -454,6 +467,10 @@ func (d *Dialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		d.resize(m.Height, m.Width)
 	case poolsMsg:
+		if m.ep != d.endpoint {
+			// For a profile on another lux, chosen before.
+			return d, nil
+		}
 		if m.err != nil {
 			d.poolsState = poolsFailed
 			setText(d.in[stPool], d.pool.value)
@@ -485,7 +502,7 @@ func (d *Dialog) key(m tea.KeyMsg) tea.Cmd {
 			return d.submit()
 		}
 		if dd.key(m) {
-			d.picked(d.focus)
+			return d.picked(d.focus)
 		}
 		return nil
 	}
@@ -603,8 +620,9 @@ func (d *Dialog) acceptSuggestion() bool {
 	return true
 }
 
-// picked is called after an option was picked in the list at s.
-func (d *Dialog) picked(s stop) {
+// picked is called after an option was picked in the list at s. A
+// profile on another lux lists that lux's pools.
+func (d *Dialog) picked(s stop) tea.Cmd {
 	d.changed(s)
 	switch s {
 	case stProfile:
@@ -613,9 +631,19 @@ func (d *Dialog) picked(s stop) {
 		// The profile is not a field the user typed: a later change
 		// refills again.
 		delete(d.edited, stProfile)
+		if ep := d.host.Endpoint(d.cfg.Profiles[name]); ep != d.endpoint {
+			d.endpoint = ep
+			if d.session {
+				break
+			}
+			d.poolsState, d.pools = poolsLoading, nil
+			d.refreshPoolOptions()
+			return d.loadPools()
+		}
 	case stPool:
 		d.refreshPoolOptions()
 	}
+	return nil
 }
 
 func (d *Dialog) cancel() tea.Cmd {
@@ -967,9 +995,15 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 		at[stCancel] = at[stCreate]
 	}
 
+	// Read-only: the profile says which lux; its key is never shown.
+	luxRow := func() {
+		out = append(out, "  "+fitLine("Lux", labelWidth-2)+palette.dim.Render(ansi.Truncate(d.endpoint.Label(), vw, "…")))
+	}
+
 	if d.session {
 		textRow(stName)
 		ddRow(stProfile, d.profile)
+		luxRow()
 		for _, s := range d.repoStops() {
 			textRow(s)
 		}
@@ -981,6 +1015,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	}
 
 	ddRow(stProfile, d.profile)
+	luxRow()
 	textRow(stImage)
 	switch d.poolsState {
 	case poolsLoading:
