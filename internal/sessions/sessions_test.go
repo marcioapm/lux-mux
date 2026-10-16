@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +317,87 @@ func TestOpenRenamedWithHungLux(t *testing.T) {
 	}
 	if r, _ := state.Renames(f.dir); r["b"] != "a" {
 		t.Fatalf("renames %v", r)
+	}
+}
+
+// secondLux is a second fake lux; x names it through profile remote.
+func (f *fixture) secondLux() (b *fakelux.Server, ep config.Endpoint, x Luxes) {
+	f.t.Helper()
+	b = fakelux.New()
+	f.t.Cleanup(b.Close)
+	b.IDPrefix = "run_b"
+	cfg, err := config.Parse([]byte("default_profile = \"base\"\n[profiles.base]\nimage = \"i\"\n[profiles.remote]\nimage = \"img\"\nlux_url = \"" + b.URL + "\"\n"))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return b, config.Endpoint{URL: b.URL}, Luxes{Eps: f.x.Eps, Cfg: cfg}
+}
+
+// submitOn submits a Run on l labelled session label.
+func submitOn(t *testing.T, l *fakelux.Server, label string) string {
+	t.Helper()
+	c, _ := luxapi.New(l.Config())
+	sp, err := config.RunSpec(config.Profile{Image: "alpine"}, config.Target{Session: label, Profile: "default"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.ID
+}
+
+// TestCheckFreeRunsOnSecondLux: a name whose live Runs are only on a
+// profile's second lux is taken, and the refusal names that lux.
+func TestCheckFreeRunsOnSecondLux(t *testing.T) {
+	f := newFixture(t)
+	b, _, x := f.secondLux()
+	submitOn(t, b, "x")
+	err := checkFree(context.Background(), x, f.dir, "x", "", false)
+	if !errors.Is(err, ErrTaken) || !strings.Contains(err.Error(), "on lux "+strings.TrimPrefix(b.URL, "http://")) {
+		t.Fatalf("x with Runs on b only: %v", err)
+	}
+}
+
+// TestPruneKeepsEntryWhileLuxDown: a rename entry whose file has a
+// window on a lux that does not answer is kept, with the file, though
+// the default lux lists no live Run of its label.
+func TestPruneKeepsEntryWhileLuxDown(t *testing.T) {
+	f := newFixture(t)
+	b, ep, _ := f.secondLux()
+	id := submitOn(t, b, "a")
+	if err := state.Save(f.dir, &state.Session{Name: "a", Windows: []state.Window{{RunID: id, Endpoint: &ep}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Move(f.dir, "a", "b", "a"); err != nil {
+		t.Fatal(err)
+	}
+	b.SetDown(true)
+	if _, _, err := LiveLabel(context.Background(), f.x, f.dir, "b", false); err != nil {
+		t.Fatalf("LiveLabel(b): %v", err)
+	}
+	if r, _ := state.Renames(f.dir); r["b"] != "a" {
+		t.Fatalf("rename entry dropped while b's lux is down: %v", r)
+	}
+	if _, ok, _ := state.Load(f.dir, "b"); !ok {
+		t.Fatal("b's file dropped while its lux is down")
+	}
+}
+
+// TestRenameRefusedWhileLuxDown: renaming to a name while a configured
+// lux, which may hold Runs labelled with it, does not answer is refused;
+// a new session of a name is not (that lux is its Unlisted).
+func TestRenameRefusedWhileLuxDown(t *testing.T) {
+	f := newFixture(t)
+	b, _, x := f.secondLux()
+	b.SetDown(true)
+	ctx := context.Background()
+	if err := checkFree(ctx, x, f.dir, "newname", "s", true); err == nil || !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("rename with a lux down: %v", err)
+	}
+	ls, err := CheckFree(ctx, x, f.dir, "fresh", "", true)
+	if err != nil || len(ls.Unlisted()) != 1 || ls.Unlisted()[0].URL != b.URL {
+		t.Fatalf("new with a lux down: %v, unlisted %v", err, ls.Unlisted())
 	}
 }
