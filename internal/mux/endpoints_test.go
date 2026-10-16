@@ -471,6 +471,30 @@ func TestEventWakesWindowOnItsLux(t *testing.T) {
 	x.detach()
 }
 
+// TestStateEventShownWhileReadHeld: a state event on b's feed adds its
+// step to the starting window on b at once, while reading the Run hangs:
+// the progress screen does not wait for the supervisor's next read.
+func TestStateEventShownWhileReadHeld(t *testing.T) {
+	x := newTwoLux(t, slowPoll)
+	x.live(0)
+	x.b.SetHold(true)
+	x.newRemote()
+	x.waitFor("submitted on b", func() bool { return len(x.b.RunIDs()) == 1 })
+	id := x.b.RunIDs()[0]
+	x.waitFor("window 1 has its Run", func() bool { return x.window(1) == id })
+	x.waitFor("b read the Run", func() bool { return slices.Contains(x.b.Requests(), "GET /v1/runs/"+id) })
+	g := newGate()
+	t.Cleanup(g.open)
+	x.b.SetGetHook(func(string) { g.wait() })
+	// No stage word names provisioning: only the state event records it.
+	x.b.SetState(id, "provisioning", "")
+	x.waitScreen("the state's step on window 1", x.contains("  - provisioning"))
+	g.open()
+	x.b.Start(id)
+	x.liveOnB(1)
+	x.detach()
+}
+
 // TestEventRoutedByEndpoint: two luxes whose Run ids collide: an event of
 // a's feed for an id never reaches the window of that id on b, and b's
 // event reaches it at once. (Windows are indexed by Run id alone, so with
