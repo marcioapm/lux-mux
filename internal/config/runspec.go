@@ -125,7 +125,7 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		if sp.Workload.Workdir == "" {
 			sp.Workload.Workdir = r.Path
 			if r.Path == "" {
-				sp.Workload.Workdir = Workspace + "/repos/" + r.RepoName()
+				sp.Workload.Workdir = RepoDir(r.RepoName())
 			}
 		}
 	}

@@ -281,7 +281,7 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 			// lux fills in defaults; dropping them keeps the window's
 			// SpecKey equal to its profile's.
 			name, path := repo.Name, repo.Path
-			if path == config.Workspace+"/repos/"+name {
+			if path == config.RepoDir(name) {
 				path = ""
 			}
 			if name == config.RepoName(repo.URL) {

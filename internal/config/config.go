@@ -295,17 +295,14 @@ func (p Profile) Validate() error {
 		if r.Branch != "" && r.Ref != "" && r.Branch != r.Ref {
 			fail("%s: branch and ref are the same setting: give one", at)
 		}
-		name := r.Name
-		if name == "" {
-			name = RepoName(r.URL)
-		}
+		name := r.RepoName()
 		if !repoNameRe.MatchString(name) {
 			fail("%s: name %q: lowercase letters, digits, '_' and '-', at most 32 (set name)", at, name)
 		} else if names[name] {
 			fail("%s: name %q is taken by another repository (set name)", at, name)
 		}
 		names[name] = true
-		dir := Workspace + "/repos/" + name
+		dir := RepoDir(name)
 		if r.Path != "" {
 			dir = path.Clean(r.Path)
 			if !strings.HasPrefix(dir, Workspace+"/") {
@@ -414,7 +411,7 @@ func (p Profile) GitRef() string {
 func (p Profile) SecretNames() []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, s := range append(append([]string{}, p.Secrets...), p.CredentialNames()...) {
+	for _, s := range append(slices.Clone(p.Secrets), p.CredentialNames()...) {
 		if s != "" && !seen[s] {
 			seen[s] = true
 			out = append(out, s)
@@ -422,6 +419,9 @@ func (p Profile) SecretNames() []string {
 	}
 	return out
 }
+
+// RepoDir is where lux clones a repository named name when it has no path.
+func RepoDir(name string) string { return Workspace + "/repos/" + name }
 
 // RepoName is the repository's name in the Run: the URL's last path
 // element without .git, lowercased into lux's volume-name alphabet.
