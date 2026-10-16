@@ -161,7 +161,7 @@ func TestEntryHeldHereDroppedOnlyByOpen(t *testing.T) {
 				}
 				kept("CheckFree(" + n + ")")
 			}
-			if l, err := LiveLabel(ctx, f.x, f.dir, "b", false); err != nil || l != "a" {
+			if l, _, err := LiveLabel(ctx, f.x, f.dir, "b", false); err != nil || l != "a" {
 				t.Fatalf("LiveLabel(b): %q %v", l, err)
 			}
 			kept("LiveLabel(b)")

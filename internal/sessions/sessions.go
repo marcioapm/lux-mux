@@ -59,12 +59,17 @@ func Label(dir, name string) (string, error) {
 
 // LiveLabel is Label after a stale rename entry naming name was dropped
 // (pruneStale): a renamed session whose Runs all ended frees both names.
-// locked: the caller has just taken name's lock (see pruneStale).
-func LiveLabel(ctx context.Context, x Luxes, dir, name string, locked bool) (string, error) {
-	if _, err := pruneStale(ctx, x, dir, name, locked); err != nil {
-		return "", err
+// locked: the caller has just taken name's lock (see pruneStale). ls,
+// when not nil, is the label's Runs as x.ListSession(ctx, label, name's
+// file) lists them, made by the prune check.
+func LiveLabel(ctx context.Context, x Luxes, dir, name string, locked bool) (label string, ls Listings, err error) {
+	if ls, err = pruneStale(ctx, x, dir, name, locked); err != nil {
+		return "", nil, err
 	}
-	return Label(dir, name)
+	if label, err = Label(dir, name); err != nil {
+		return "", nil, err
+	}
+	return label, ls, nil
 }
 
 func labelIn(m map[string]string, name string) (string, error) {

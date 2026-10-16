@@ -144,7 +144,7 @@ func newWindow(env Env, o windowFlags) error {
 	x := luxes(env, eps, cfg)
 	// Its lock taken here, a renamed session whose Runs all ended is
 	// dropped and refused below, as attach does.
-	label, err := sessions.LiveLabel(context.Background(), x, env.StateDir, o.Session, !attached)
+	label, ls, err := sessions.LiveLabel(context.Background(), x, env.StateDir, o.Session, !attached)
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,9 @@ func newWindow(env Env, o windowFlags) error {
 		return err
 	}
 	if !ok {
-		ls := x.ListSession(context.Background(), label)
+		if ls == nil {
+			ls = x.ListSession(context.Background(), label)
+		}
 		if err := ls.Report(env.Stderr); err != nil {
 			return err
 		}

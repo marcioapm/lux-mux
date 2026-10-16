@@ -161,6 +161,31 @@ func TestAttachRenamedHungLuxOneListing(t *testing.T) {
 	}
 }
 
+// TestNewWindowRenamedHungLuxOneListing: new-window -t of a renamed
+// session with no file, while a configured lux never answers, lists each
+// lux once: the rename entry's check is the listing it rebuilds from.
+func TestNewWindowRenamedHungLuxOneListing(t *testing.T) {
+	shortTimeouts(t)
+	a := fakelux.NewWithKey(cliKeyA)
+	t.Cleanup(a.Close)
+	env, _, errb := testEnv(t, a, "")
+	env.Lookup = func(k string) (string, bool) { return cliKeyB, k == cliKeyEnv }
+	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
+	submitTo(t, a, "work", "a")
+	if err := sessions.Move(env.StateDir, "work", "job", "work"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	code := Main(env, []string{"new-window", "-t", "job", "-p", "a"})
+	d := time.Since(start)
+	if code != 0 || len(a.Submits()) != 2 || a.Run(a.RunIDs()[1]).Labels[config.LabelSession] != "work" {
+		t.Fatalf("new-window -t job: %d after %v, %d submits: %q", code, d, len(a.Submits()), errb.String())
+	}
+	if bound := sessions.ListTimeout * 3 / 2; d > bound {
+		t.Fatalf("new-window -t job took %v, more than %v", d, bound)
+	}
+}
+
 // muxSession makes the next runMux record the session it was given and
 // return without a terminal.
 func muxSession(t *testing.T) func() *state.Session {
