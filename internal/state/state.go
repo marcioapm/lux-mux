@@ -635,6 +635,17 @@ func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
 	s.SpareEndpoints[slot] = ep
 }
 
+// RecordsSpare reports whether id is the Run of one of s's spare slots,
+// a leftover's included.
+func (s *Session) RecordsSpare(id string) bool {
+	for _, v := range s.Spares {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
 // AddRecent puts v first in list, without duplicates, keeping at most 10.
 func AddRecent(list []string, v string) []string {
 	if v == "" {

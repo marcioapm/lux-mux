@@ -1,7 +1,6 @@
 package mux
 
 import (
-	"maps"
 	"net/http"
 	"slices"
 	"testing"
@@ -51,7 +50,7 @@ func (h *harness) runIDs() []string {
 }
 
 func recordedSpare(sp map[string]string, id string) bool {
-	return slices.Contains(slices.Collect(maps.Values(sp)), id)
+	return (&state.Session{Spares: sp}).RecordsSpare(id)
 }
 
 // TestExternalLeftoverNotReadopted: a new-window Run on b replaced by r

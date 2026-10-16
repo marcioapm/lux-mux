@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"strings"
 
@@ -195,8 +194,7 @@ func recordExternal(sess *state.Session, ls []state.Listing, cfg *config.Config)
 				continue
 			}
 			// A spare or leftover the file records is never a window.
-			if slices.ContainsFunc(sess.Windows, func(w state.Window) bool { return w.RunID == r.ID }) ||
-				slices.Contains(slices.Collect(maps.Values(sess.Spares)), r.ID) {
+			if slices.ContainsFunc(sess.Windows, func(w state.Window) bool { return w.RunID == r.ID }) || sess.RecordsSpare(r.ID) {
 				continue
 			}
 			w := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])

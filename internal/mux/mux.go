@@ -1098,7 +1098,8 @@ func (m *Mux) terminate(ep config.Endpoint, id string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err = c.Terminate(ctx, id)
 		cancel()
-		if err == nil || luxapi.IsStatus(err, http.StatusNotFound) || luxapi.IsStatus(err, http.StatusConflict) {
+		// Client.Terminate already answers nil for a 404.
+		if err == nil || luxapi.IsStatus(err, http.StatusConflict) {
 			return nil
 		}
 		if luxapi.Refused(err) {

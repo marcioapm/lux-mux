@@ -598,7 +598,7 @@ func TestKeyUnsetSpareKeptAtEnd(t *testing.T) {
 		t.Fatal("the session did not end")
 	}
 	s, ok, _ := state.Load(h.dir, "s")
-	if !ok || !slices.Contains(slices.Collect(maps.Values(s.Spares)), spare) {
+	if !ok || !s.RecordsSpare(spare) {
 		t.Fatalf("file %v %+v", ok, s)
 	}
 	if r := b.Run(spare); r.State != "running" || len(b.Terminated()) != 0 {
@@ -657,7 +657,7 @@ func TestWrongKeySpareKeptAtEnd(t *testing.T) {
 		t.Fatal("the session did not end")
 	}
 	s, ok, _ := state.Load(h.dir, "s")
-	if !ok || !slices.Contains(slices.Collect(maps.Values(s.Spares)), spare) {
+	if !ok || !s.RecordsSpare(spare) {
 		t.Fatalf("file %v %+v", ok, s)
 	}
 	if r := b.Run(spare); r.State != "running" || len(b.Terminated()) != 0 {
@@ -751,7 +751,7 @@ func TestWrongKeyRelaunchKeepsOldRun(t *testing.T) {
 				return true
 			}
 		}
-		return slices.Contains(slices.Collect(maps.Values(s.Spares)), b1)
+		return s.RecordsSpare(b1)
 	}
 	x.detach()
 	if !recorded() {

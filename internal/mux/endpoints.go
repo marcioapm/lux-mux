@@ -3,7 +3,6 @@ package mux
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"time"
 
@@ -335,7 +334,10 @@ func (m *Mux) adoptRun(ep config.Endpoint, r *api.Run) {
 	sw := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil || slices.Contains(slices.Collect(maps.Values(m.sess.Spares)), r.ID) {
+	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil {
+		return
+	}
+	if m.sess.RecordsSpare(r.ID) {
 		return
 	}
 	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec, ep)
