@@ -115,6 +115,21 @@ func TestSpecKeyCommands(t *testing.T) {
 	}
 }
 
+// TestSpecKeyGolden pins the keys of two profiles at this version: any
+// change to the wrapper text or the static env changes every key, and so
+// retires every waiting spare at the next attach. Update the values only
+// together with such a deliberate change.
+func TestSpecKeyGolden(t *testing.T) {
+	for want, p := range map[string]Profile{
+		"282dd191caa12d39": {Image: "alpine"},
+		"8fad9133a889c4d0": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/app.git", Branch: "main", OnStart: "make deps", Shell: []string{"zsh", "-l"}},
+	} {
+		if got := SpecKey(p); got != want {
+			t.Errorf("SpecKey(%+v) = %q, want %q", p, got, want)
+		}
+	}
+}
+
 // TestResourcesLabel: a window's Run is labelled with the resources its
 // profile asks, in a form ApplyResourcesLabel reads back to the same
 // SpecKey, and not labelled when it asks none.
