@@ -311,7 +311,8 @@ func TestLock(t *testing.T) {
 
 // TestRecordSpares: lux's waiting spares of the session fill only its
 // empty slots, the newest Run per slot; a filled slot keeps its spare,
-// and a spare being terminated, ended, or of another label is skipped.
+// and a spare being terminated, ended, of another label, without a spec
+// key, or already a window's Run (claimed or not) is skipped.
 func TestRecordSpares(t *testing.T) {
 	spare := func(id, label, key, st string, at int) *api.Run {
 		r := run(id, label, "dev", st, at, true)
@@ -328,8 +329,12 @@ func TestRecordSpares(t *testing.T) {
 		spare("run_k3", "work", "k3", "running", 4),
 		spare("run_end", "work", "k4", "terminated", 5),
 		spare("run_other", "play", "k5", "running", 6),
+		spare("run_cl", "work", "k6", "running", 10),
+		spare("run_win", "work", "k7", "running", 11),
+		spare("run_nokey", "work", "", "running", 12),
 	}
-	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"}}
+	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"},
+		Claimed: []string{"run_cl"}, Windows: []Window{{RunID: "run_win"}}}
 	RecordSpares(s, "work", runs)
 	want := map[string]string{"k1": "run_new", "k2": "run_kept", "k3": "run_k3"}
 	if !reflect.DeepEqual(s.Spares, want) {
