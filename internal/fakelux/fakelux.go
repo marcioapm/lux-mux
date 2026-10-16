@@ -4,6 +4,7 @@
 package fakelux
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,6 +60,9 @@ type Server struct {
 	FailAttachDelay time.Duration
 	// Hold keeps new Runs queued (submitted) until Start is called.
 	Hold bool
+	// IDPrefix starts every Run id (default "run_"): luxd's ids are
+	// random, so two fakes in one test need prefixes of their own.
+	IDPrefix string
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -101,8 +105,13 @@ type Server struct {
 	failGets map[string]bool
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
-	// feeds counts the event feed requests being served.
-	feeds int
+	// key is the one API key accepted; refused counts requests without it.
+	key     string
+	refused int
+	tenants []string
+	// feeds: event streams open now; feedOpens: ever opened.
+	feeds     int
+	feedOpens int
 }
 
 // Feeds is how many event feed requests are being served.
@@ -188,9 +197,16 @@ func resumable(r *fakeRun) bool {
 	return false
 }
 
-// New starts a fake luxd.
-func New() *Server {
-	s := &Server{runs: map[string]*fakeRun{}}
+// New starts a fake luxd whose API key is DefaultKey.
+func New() *Server { return NewWithKey(DefaultKey) }
+
+// DefaultKey is New's API key.
+const DefaultKey = "lux_test"
+
+// NewWithKey starts a fake luxd that answers 401 to a request without
+// "Authorization: Bearer key".
+func NewWithKey(key string) *Server {
+	s := &Server{runs: map[string]*fakeRun{}, key: key}
 	s.cond = sync.NewCond(&s.mu)
 	s.NewTerminal = func(*api.Run) *Terminal { return EchoTerminal(24, 80) }
 	mux := http.NewServeMux()
@@ -205,10 +221,47 @@ func New() *Server {
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		s.mu.Lock()
 		s.reqs = append(s.reqs, req.Method+" "+req.URL.EscapedPath())
+		s.tenants = append(s.tenants, req.URL.Query().Get("tenant"))
 		s.mu.Unlock()
+		if req.Header.Get("Authorization") != "Bearer "+s.key {
+			s.mu.Lock()
+			s.refused++
+			s.mu.Unlock()
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid API key")
+			return
+		}
 		mux.ServeHTTP(w, req)
 	}))
 	return s
+}
+
+// Refused is how many requests were answered 401 for their key.
+func (s *Server) Refused() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused
+}
+
+// Tenants are the tenant query parameter of each request received ("":
+// none), in order.
+func (s *Server) Tenants() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.tenants)
+}
+
+// FeedStreams is how many event streams are open now.
+func (s *Server) FeedStreams() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.feeds
+}
+
+// FeedOpens is how many event streams were ever opened.
+func (s *Server) FeedOpens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.feedOpens
 }
 
 // Close stops the server and every terminal.
@@ -229,7 +282,7 @@ func (s *Server) Close() {
 }
 
 // Config is a lux client configuration for this server.
-func (s *Server) Config() api.Config { return api.Config{URL: s.URL, APIKey: "lux_test"} }
+func (s *Server) Config() api.Config { return api.Config{URL: s.URL, APIKey: s.key} }
 
 // SetPools sets what GET /v1/pools answers.
 func (s *Server) SetPools(p []api.Pool) {
@@ -360,7 +413,7 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	}
 	s.mu.Lock()
 	s.seq++
-	id := fmt.Sprintf("run_%04d", s.seq)
+	id := fmt.Sprintf("%s%04d", cmp.Or(s.IDPrefix, "run_"), s.seq)
 	run := &api.Run{ID: id, Name: sp.Name, Labels: sp.Labels, Spec: stored, CreatedAt: time.Now().Add(time.Duration(s.seq) * time.Millisecond),
 		Pool: pool.Name, Sizing: sizing}
 	for _, sec := range sp.Secrets {
@@ -742,6 +795,7 @@ func (s *Server) feed(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	after := len(s.events)
 	s.feeds++
+	s.feedOpens++
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

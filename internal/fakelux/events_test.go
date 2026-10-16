@@ -29,7 +29,7 @@ func feedEvents(t *testing.T, s *Server, n int) []api.FeedEvent {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.URL+"/v1/events?after=0", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authed.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestSubmitEventsAsLuxd(t *testing.T) {
 			s.Hold = true
 			s.SetPools([]api.Pool{{Name: "gpu"}})
 			body := `{"image":{"ref":"alpine"},"workload":{"command":["sh"]},"placement":{"pool":"` + c.pool + `"}}`
-			resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(body))
+			resp, err := authed.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -115,7 +115,7 @@ func TestSubmitEventsAsLuxd(t *testing.T) {
 	defer s.Close()
 	s.Hold = true
 	s.SetPools([]api.Pool{{Name: "m", IsDefault: &yes}})
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
+	resp, err := authed.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}

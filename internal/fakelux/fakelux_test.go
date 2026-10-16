@@ -63,7 +63,7 @@ func TestRestoreAttachWithoutSnapshotIsStrict(t *testing.T) {
 func TestSnapshotFramedAsShim(t *testing.T) {
 	s := New()
 	defer s.Close()
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
+	resp, err := authed.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestSnapshotFramedAsShim(t *testing.T) {
 	s.Term(id).Output(bytes.Repeat([]byte("history line 0123456789abcdef\r\n"), 4096))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(s.URL, "http")+"/v1/runs/"+id+"/attach?restore=true&rows=24&cols=80", nil)
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(s.URL, "http")+"/v1/runs/"+id+"/attach?restore=true&rows=24&cols=80", &websocket.DialOptions{HTTPClient: authed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestSnapshotFramedAsShim(t *testing.T) {
 func TestAttachOverMaxSize(t *testing.T) {
 	s := New()
 	defer s.Close()
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
+	resp, err := authed.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestAttachOverMaxSize(t *testing.T) {
 	}{{201, 80, 422}, {24, 501, 422}, {200, 500, http.StatusUpgradeRequired}} {
 		// Not a websocket upgrade: a size luxd takes gets as far as the
 		// upgrade (426), one it refuses is answered 422 before that.
-		resp, err := http.Get(fmt.Sprintf("%s/v1/runs/%s/attach?restore=true&rows=%d&cols=%d", s.URL, id, tc.rows, tc.cols))
+		resp, err := authed.Get(fmt.Sprintf("%s/v1/runs/%s/attach?restore=true&rows=%d&cols=%d", s.URL, id, tc.rows, tc.cols))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,5 +124,28 @@ func TestAttachOverMaxSize(t *testing.T) {
 		if resp.StatusCode != tc.want {
 			t.Errorf("%d×%d: status %d, want %d", tc.rows, tc.cols, resp.StatusCode, tc.want)
 		}
+	}
+}
+
+// TestWrongKeyRefused: a fake luxd answers 401 to any key but its own.
+func TestWrongKeyRefused(t *testing.T) {
+	s := NewWithKey("lux_fake_key_one")
+	defer s.Close()
+	for key, want := range map[string]int{"lux_fake_key_one": 200, "lux_fake_key_two": 401, "": 401} {
+		req, _ := http.NewRequest(http.MethodGet, s.URL+"/v1/runs", nil)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("key %q: %d, want %d", key, resp.StatusCode, want)
+		}
+	}
+	if s.Refused() != 2 {
+		t.Fatalf("refused %d", s.Refused())
 	}
 }
