@@ -87,7 +87,7 @@ func TestExternalLeftoverNotReadopted(t *testing.T) {
 		t.Fatalf("windows %v, want %s and %s; leftover %s", ids, a0, b2, ext)
 	}
 	x.detach()
-	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 2 || s.Windows[1].RunID != b2 || s.Spares[leftoverPrefix+ext] != ext {
+	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 2 || s.Windows[1].RunID != b2 || s.Spares[state.LeftoverPrefix+ext] != ext {
 		t.Fatalf("file windows %+v spares %v", s.Windows, s.Spares)
 	}
 
@@ -118,7 +118,7 @@ func TestAdoptRunSkipsRecordedSpare(t *testing.T) {
 	}
 	ep := x.bEndpoint()
 	x.m.mu.Lock()
-	x.m.sess.SetSpare(leftoverPrefix+"run_b9001", "run_b9001", ep)
+	x.m.sess.SetSpare(state.LeftoverPrefix+"run_b9001", "run_b9001", ep)
 	x.m.mu.Unlock()
 	x.m.adoptRun(ep, run("run_b9001"))
 	if n := x.nwindows(); n != 1 {
@@ -142,7 +142,7 @@ func TestUnlistedLeftoverNotAdded(t *testing.T) {
 	x.b.FailTerminates(http.StatusServiceUnavailable)
 	s, _, _ := state.Load(x.dir, "s")
 	s.Unlisted = []config.Endpoint{x.bEndpoint()}
-	s.SetSpare(leftoverPrefix+ext, ext, x.bEndpoint())
+	s.SetSpare(state.LeftoverPrefix+ext, ext, x.bEndpoint())
 	x.start(s)
 	x.live(0)
 	x.waitListedB()

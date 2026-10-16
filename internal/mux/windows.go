@@ -158,9 +158,6 @@ func (m *Mux) Unterminated() []string {
 	return slices.Clone(m.unterminated)
 }
 
-// leftoverPrefix is state.LeftoverPrefix.
-const leftoverPrefix = state.LeftoverPrefix
-
 // keepLeftoverLocked records leftover Run id on ep, which terminate could
 // not end; the next attach (terminateLeftovers) or the session's end
 // tries again.
@@ -172,7 +169,7 @@ func (m *Mux) keepLeftoverLocked(ep config.Endpoint, id string, err error) {
 // recordLeftoverLocked records Run id on ep as a leftover and writes the
 // file.
 func (m *Mux) recordLeftoverLocked(ep config.Endpoint, id string) {
-	m.sess.SetSpare(leftoverPrefix+id, id, ep)
+	m.sess.SetSpare(state.LeftoverPrefix+id, id, ep)
 	m.persistLocked()
 }
 
@@ -213,8 +210,8 @@ func (m *Mux) goEndLeftover(ep config.Endpoint, id string) {
 			return
 		}
 		// The session's end may have taken it already.
-		if m.sess.Spares[leftoverPrefix+id] == id {
-			m.sess.DropSpare(leftoverPrefix + id)
+		if m.sess.Spares[state.LeftoverPrefix+id] == id {
+			m.sess.DropSpare(state.LeftoverPrefix + id)
 			m.persistLocked()
 		}
 	})
@@ -273,7 +270,7 @@ func (m *Mux) relaunch(w *Window) {
 	m.considerLocked(w.Endpoint, old)
 	m.dropClaimedLocked(old)
 	if old != "" {
-		m.sess.SetSpare(leftoverPrefix+old, old, w.Endpoint)
+		m.sess.SetSpare(state.LeftoverPrefix+old, old, w.Endpoint)
 	}
 	w.RunID = ""
 	w.phase = phaseStarting

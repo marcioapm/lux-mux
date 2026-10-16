@@ -108,7 +108,7 @@ func TestRelaunchRecordsLeftoverAtOnce(t *testing.T) {
 	x.m.relaunchOrResume(w)
 	x.waitFor("the leftover in the file", func() bool {
 		s, _, _ := state.Load(x.dir, "s")
-		return s.Spares[leftoverPrefix+b1] == b1
+		return s.Spares[state.LeftoverPrefix+b1] == b1
 	})
 	g.open()
 	x.detach()
@@ -154,7 +154,7 @@ func TestClaimRefusedKeepsSpare(t *testing.T) {
 	h.type_("\x02C")
 	h.waitFor("window 1", func() bool { return h.nwindows() == 2 })
 	h.waitFor("window 1 ended", func() bool { return h.phase(1) == phaseDead })
-	h.waitFor("the spare kept as a leftover", func() bool { return h.spares()[leftoverPrefix+spare] == spare })
+	h.waitFor("the spare kept as a leftover", func() bool { return h.spares()[state.LeftoverPrefix+spare] == spare })
 	h.detach()
 	if s, _, _ := state.Load(h.dir, "s"); !recordedSpare(s.Spares, spare) {
 		t.Fatalf("file spares %v", s.Spares)
@@ -222,7 +222,7 @@ func TestExtraSpareTerminateFails(t *testing.T) {
 	}
 	h.start(nil)
 	h.live(0)
-	h.waitFor("the extra spare kept as a leftover", func() bool { return h.spares()[leftoverPrefix+spare] == spare })
+	h.waitFor("the extra spare kept as a leftover", func() bool { return h.spares()[state.LeftoverPrefix+spare] == spare })
 	if sp := h.spares(); !recordedSpare(sp, extra.ID) {
 		t.Fatalf("spares %v; %s in its slot", sp, extra.ID)
 	}
@@ -272,9 +272,9 @@ func TestClosedDuringSubmitTerminateFails(t *testing.T) {
 	g.open()
 	x.waitFor("b made the Run", func() bool { return len(b.RunIDs()) == 1 })
 	id := b.RunIDs()[0]
-	x.waitFor("the Run kept as a leftover", func() bool { return x.spares()[leftoverPrefix+id] == id })
+	x.waitFor("the Run kept as a leftover", func() bool { return x.spares()[state.LeftoverPrefix+id] == id })
 	x.detach()
-	if s, _, _ := state.Load(x.dir, "s"); s.Spares[leftoverPrefix+id] != id || len(s.Windows) != 1 {
+	if s, _, _ := state.Load(x.dir, "s"); s.Spares[state.LeftoverPrefix+id] != id || len(s.Windows) != 1 {
 		t.Fatalf("file windows %+v spares %v", s.Windows, s.Spares)
 	}
 
