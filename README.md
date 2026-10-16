@@ -377,10 +377,10 @@ the next placement runs `on_resume`. Make `on_resume` tolerate a start
 that did not finish, or have `on_start` leave its own marker.
 
 `LUXMUX_DISK` and `LUXMUX_BRANCH_CHECKED_OUT` come from `df` (or `stat`)
-and `git`. Each is given 1 s through the image's `timeout` utility; one
-that does not answer in time leaves its variable empty. An image without a
-usable `timeout -k` leaves both empty rather than wait on them. Hooks are
-never timed out.
+and `git`. The optional probes share a 1 s deadline, enforced by a shell
+watchdog (no `timeout` utility is needed). If the group does not finish,
+both facts are empty; the probe job and watchdog are stopped and reaped
+before the shell starts. Hooks are never timed out.
 
 With `warm_spare`, a spare's Run starts before any window takes it, so
 `on_start` runs in the spare (that is what makes it warm). Its output is in

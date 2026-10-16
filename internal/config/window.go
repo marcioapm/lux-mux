@@ -161,9 +161,7 @@ const (
 // the mux's 5 s exec deadline; the wrapper delays the prompt by at most this.
 const lockSeconds = "2"
 
-// probeSeconds bounds each external fact command (df, stat, git). A probe
-// that times out skips its fallback, so a placement waits at most twice
-// probeSeconds plus timeout(1)'s one-second kill grace for each.
+// probeSeconds bounds the whole optional probe group (df, stat, git).
 const probeSeconds = "1"
 
 // StartWrapper is the POSIX sh script every window's Run starts with. Its
@@ -229,10 +227,13 @@ const quoteFunc = `_lm_quote() {
 // (read-only volume), _lm_lock fails and the caller publishes nothing.
 // Temporary files are only made under the lock, so the holder removes any
 // left by a holder that died.
-const lockFunc = `_lm_lock() {
+var lockFunc = buildLockFunc(lockSeconds, "20")
+
+func buildLockFunc(seconds, retries string) string {
+	return `_lm_lock() {
 	command -v flock >/dev/null 2>&1 || return 1
 	{ command exec 9>>"$_lm_d/` + LockFile + `"; } 2>/dev/null || return 1
-	flock -E 75 -w ` + lockSeconds + ` 9 >/dev/null 2>&1
+	flock -E 75 -w ` + seconds + ` 9 >/dev/null 2>&1
 	case $? in
 	0) ;;
 	75) _lm_unlock; return 1 ;;
@@ -240,7 +241,7 @@ const lockFunc = `_lm_lock() {
 		_lm_li=0
 		until flock -n 9 >/dev/null 2>&1; do
 			_lm_li=$((_lm_li + 1))
-			[ "$_lm_li" -le $((` + lockSeconds + ` * 10)) ] || { _lm_unlock; return 1; }
+			[ "$_lm_li" -le ` + retries + ` ] || { _lm_unlock; return 1; }
 			sleep 0.1 2>/dev/null || { sleep 1 2>/dev/null; _lm_li=$((_lm_li + 9)); }
 		done
 		;;
@@ -250,6 +251,7 @@ const lockFunc = `_lm_lock() {
 }
 _lm_unlock() { command exec 9>&-; }
 `
+}
 
 // putFunc defines _lm_put TMP DEST: mode 0644, then rename over DEST, so a
 // reader holding DEST open keeps the complete old file. TMP is removed on
@@ -257,17 +259,6 @@ _lm_unlock() { command exec 9>&-; }
 const putFunc = `_lm_put() {
 	{ chmod 644 "$1" && mv -f "$1" "$2"; } 2>/dev/null || { rm -f "$1" 2>/dev/null; return 1; }
 }
-`
-
-// probeFunc defines _lm_probe NAME CMD...: CMD's stdout into $_lm_t/NAME,
-// under timeout(1) with a kill-after. Its status is CMD's, or 124, 137 or
-// 143 at the deadline (GNU and BusyBox differ); _lm_late tells those apart.
-const probeFunc = `_lm_probe() {
-	_lm_pf=$_lm_t/$1
-	shift
-	timeout -k 1 ` + probeSeconds + ` "$@" 2>/dev/null >"$_lm_pf" </dev/null
-}
-_lm_late() { case $1 in 124|137|143) return 0 ;; esac; return 1; }
 `
 
 func buildWrapper() string {
@@ -279,7 +270,7 @@ _lm_ws=${` + EnvTestWorkspace + `:-/workspace}
 _lm_cg=${` + EnvTestCgroup + `:-/sys/fs/cgroup}
 _lm_d=$_lm_ws/.luxmux
 _lm_num() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
-` + quoteFunc + lockFunc + putFunc + probeFunc + `LUXMUX_CPU='' _lm_q='' _lm_p=''
+` + quoteFunc + lockFunc + putFunc + `LUXMUX_CPU='' _lm_q='' _lm_p=''
 { read -r _lm_q _lm_p <"$_lm_cg/cpu.max"; } 2>/dev/null
 if _lm_num "$_lm_q" && _lm_num "$_lm_p" && [ "$_lm_p" -gt 0 ]; then
 	_lm_m=$((_lm_q * 1000 / _lm_p))
@@ -294,40 +285,63 @@ fi
 LUXMUX_MEMORY='' _lm_v=''
 { read -r _lm_v <"$_lm_cg/memory.max"; } 2>/dev/null
 _lm_num "$_lm_v" && LUXMUX_MEMORY=$_lm_v
-# df, stat and git run only under a timeout(1) that accepts -k, writing to
-# a private directory rather than a pipe, so none can hold the prompt past
-# its deadline. Without such a timeout they are skipped. The check runs sh,
-# which is on PATH: the Run's command is sh.
+# Optional probes share one background job and one watchdog. The trap kills
+# the currently running child before the job exits, so a timed-out probe
+# cannot leave df, stat or git behind.
 LUXMUX_DISK='' LUXMUX_BRANCH_CHECKED_OUT='' _lm_t=''
-if command -v timeout >/dev/null 2>&1 && timeout -k 1 ` + probeSeconds + ` sh -c : >/dev/null 2>&1; then
-	for _lm_t in "${TMPDIR:-/tmp}" "$_lm_d" ''; do
-		[ -n "$_lm_t" ] || break
-		_lm_t=$_lm_t/.luxmux-probe.$$
-		{ rm -rf "$_lm_t" && mkdir -m 700 "$_lm_t"; } 2>/dev/null && break
-	done
-fi
+for _lm_t in "${TMPDIR:-/tmp}" "$_lm_d" ''; do
+	[ -n "$_lm_t" ] || break
+	_lm_t=$_lm_t/.luxmux-probe.$$
+	{ rm -rf "$_lm_t" && mkdir -m 700 "$_lm_t"; } 2>/dev/null && break
+done
 if [ -n "$_lm_t" ]; then
-	_lm_b='' _lm_n=''
-	_lm_probe df df -Pk "$_lm_ws"
-	_lm_prc=$?
-	[ "$_lm_prc" -eq 0 ] && { read -r _lm_x; read -r _lm_x _lm_b _lm_x; } <"$_lm_t/df" 2>/dev/null
-	if _lm_num "$_lm_b"; then
-		LUXMUX_DISK=$((_lm_b * 1024))
-	elif ! _lm_late "$_lm_prc" && _lm_probe stat stat -f -c '%S %b' "$_lm_ws"; then
-		{ read -r _lm_b _lm_n; } <"$_lm_t/stat" 2>/dev/null
-		_lm_num "$_lm_b" && _lm_num "$_lm_n" && LUXMUX_DISK=$((_lm_b * _lm_n))
-	fi
-	_lm_g=${LUXMUX_REPO_DIR-}
-	if [ -n "$_lm_g" ] && [ -e "$_lm_g/.git" ] && command -v git >/dev/null 2>&1; then
-		_lm_v=''
-		_lm_probe git git -C "$_lm_g" symbolic-ref -q --short HEAD
-		_lm_prc=$?
-		if [ "$_lm_prc" -eq 0 ]; then
-			{ IFS= read -r _lm_v <"$_lm_t/git"; } 2>/dev/null
-		elif ! _lm_late "$_lm_prc" && _lm_probe git git -C "$_lm_g" rev-parse --short -q --verify HEAD; then
-			{ IFS= read -r _lm_v <"$_lm_t/git"; } 2>/dev/null
+	_lm_external() {
+		_lm_cmd=$1; shift
+		_lm_path=$PATH
+		while :; do
+			_lm_dir=${_lm_path%%:*}
+			[ -n "$_lm_dir" ] || _lm_dir=.
+			if [ -x "$_lm_dir/$_lm_cmd" ]; then exec "$_lm_dir/$_lm_cmd" "$@"; fi
+			case $_lm_path in *:*) _lm_path=${_lm_path#*:} ;; *) return 127 ;; esac
+		done
+	}
+	_lm_probe_group() {
+		trap '[ -n "${_lm_child-}" ] && { kill -KILL "$_lm_child" 2>/dev/null; wait "$_lm_child" 2>/dev/null; }; exit 124' TERM INT
+		_lm_external df -Pk "$_lm_ws" >"$_lm_t/df" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_df=$?
+		if [ "$_lm_df" -ne 0 ]; then
+			_lm_external stat -f -c '%S %b' "$_lm_ws" >"$_lm_t/stat" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_stat=$?
+		else
+			_lm_stat=1
 		fi
-		LUXMUX_BRANCH_CHECKED_OUT=$_lm_v
+		_lm_g=${LUXMUX_REPO_DIR-}
+		_lm_git=1
+		if [ -n "$_lm_g" ] && [ -e "$_lm_g/.git" ] && command -v git >/dev/null 2>&1; then
+			_lm_external git -C "$_lm_g" symbolic-ref -q --short HEAD >"$_lm_t/git" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_git=$?
+			if [ "$_lm_git" -ne 0 ]; then
+				_lm_external git -C "$_lm_g" rev-parse --short -q --verify HEAD >"$_lm_t/git" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_git=$?
+			fi
+		fi
+		printf '%s %s %s\n' "$_lm_df" "$_lm_stat" "$_lm_git" >"$_lm_t/status"
+	}
+	_lm_probe_group & _lm_pg=$!
+	(
+		trap 'kill "$_lm_sleep" 2>/dev/null; wait "$_lm_sleep" 2>/dev/null; exit' TERM INT
+		sleep ` + probeSeconds + ` & _lm_sleep=$!
+		wait "$_lm_sleep"
+		kill "$_lm_pg" 2>/dev/null
+	) & _lm_wd=$!
+	wait "$_lm_pg"; _lm_prc=$?
+	kill "$_lm_wd" 2>/dev/null; wait "$_lm_wd" 2>/dev/null
+	if [ "$_lm_prc" -eq 0 ] && read -r _lm_df _lm_stat _lm_git <"$_lm_t/status" 2>/dev/null; then
+		_lm_b='' _lm_n=''
+		[ "$_lm_df" -eq 0 ] && { read -r _lm_x; read -r _lm_x _lm_b _lm_x; } <"$_lm_t/df" 2>/dev/null
+		if _lm_num "$_lm_b"; then
+			LUXMUX_DISK=$((_lm_b * 1024))
+		elif [ "$_lm_stat" -eq 0 ]; then
+			{ read -r _lm_b _lm_n; } <"$_lm_t/stat" 2>/dev/null
+			_lm_num "$_lm_b" && _lm_num "$_lm_n" && LUXMUX_DISK=$((_lm_b * _lm_n))
+		fi
+		if [ "$_lm_git" -eq 0 ]; then IFS= read -r LUXMUX_BRANCH_CHECKED_OUT <"$_lm_t/git" 2>/dev/null; fi
 	fi
 	rm -rf "$_lm_t" 2>/dev/null
 fi

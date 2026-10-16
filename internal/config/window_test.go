@@ -648,16 +648,25 @@ exec REAL_flock "$@"`},
 	} {
 		t.Run(label, func(t *testing.T) {
 			f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
+			// Only these scripts use the shorter test deadline; production stays 2 s.
+			shortLock := func(s string) string {
+				return strings.ReplaceAll(s, lockFunc, buildLockFunc("0.2", "2"))
+			}
+			f.cmd[2] = shortLock(f.cmd[2])
 			f.mustWrapper()
 			f.mustName("first")
 			envBefore, _ := os.ReadFile(f.path(EnvFile))
 			kill := holdLock(t, f)
 
-			d, err := f.name("second")
+			name := func(n string) (time.Duration, error) {
+				_, d, err := f.run([]string{"-c", shortLock(WindowNameScript), "luxmux-window", n})
+				return d, err
+			}
+			d, err := name("second")
 			if err == nil {
 				t.Fatal("a rename succeeded while another process held the lock")
 			}
-			if d < time.Second || d > 10*time.Second {
+			if d < 150*time.Millisecond || d > 10*time.Second {
 				t.Fatalf("rename gave up after %v", d)
 			}
 			out, d, err := f.wrapper()
@@ -736,8 +745,8 @@ func TestEnvWritersMissingTools(t *testing.T) {
 }
 
 // TestWrapperProbesBounded: df, stat and git that never answer (and ignore
-// SIGTERM) delay the prompt only by the probe deadlines, and their facts
-// are empty. Without a timeout(1) that takes -k they never run.
+// SIGTERM) delay the prompt only by the single probe deadline, and their
+// facts are empty. The watchdog does not depend on timeout(1).
 func TestWrapperProbesBounded(t *testing.T) {
 	hang := `: >"$LM_STATE/${0##*/}.ran"
 trap '' TERM
@@ -755,11 +764,11 @@ exec sleep 30`
 		if err != nil || out != "shell:start" {
 			t.Fatalf("%q %v", out, err)
 		}
-		// Two probes reach the deadline, each 1 s plus 1 s before SIGKILL.
+		// A single watchdog cuts off the probe group.
 		if d > 9*time.Second {
 			t.Fatalf("prompt after %v", d)
 		}
-		for _, n := range []string{"df", "git"} {
+		for _, n := range []string{"df"} {
 			if _, err := os.Stat(filepath.Join(f.state, n+".ran")); err != nil {
 				t.Fatalf("%s never ran: the deadline was not exercised", n)
 			}
@@ -786,10 +795,8 @@ exec REAL_timeout "$@"`},
 			if err != nil || out != "shell:start" || d > 3*time.Second {
 				t.Fatalf("%q %v after %v", out, err, d)
 			}
-			for _, n := range []string{"df", "stat", "git"} {
-				if _, err := os.Stat(filepath.Join(f.state, n+".ran")); err == nil {
-					t.Fatalf("%s ran without a bounded timeout", n)
-				}
+			if _, err := os.Stat(filepath.Join(f.state, "df.ran")); err != nil {
+				t.Fatalf("df never ran: the deadline was not exercised: %v", err)
 			}
 			if got := f.source(); got[EnvDisk] != "" || got[EnvBranchCheckedOut] != "" {
 				t.Fatalf("%q", got)
@@ -803,6 +810,102 @@ exec REAL_timeout "$@"`},
 			t.Fatalf("disk %q", got[EnvDisk])
 		}
 	})
+}
+
+func TestWrapperProbeCost(t *testing.T) {
+	dash, err := exec.LookPath("dash")
+	if err != nil {
+		t.Skip("dash unavailable")
+	}
+	f := newFixture(t, toolDir(t, append(slices.Clone(baseTools), "df", "stat", "git"), nil), Profile{Image: "alpine"})
+	f.shell = []string{dash}
+	plain, placement := time.Hour, time.Hour
+	for i := 0; i < 8; i++ {
+		_, d, err := f.run([]string{"-c", ":"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d < plain {
+			plain = d
+		}
+		_, d, err = f.wrapper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d < placement {
+			placement = d
+		}
+	}
+	// Minimums select an idle sample; the relative allowance handles slow hosts.
+	bound := 60*time.Millisecond + 12*plain
+	t.Logf("plain shell %v, placement %v, bound %v", plain, placement, bound)
+	if placement > bound {
+		t.Fatalf("placement overhead: %v > %v", placement, bound)
+	}
+}
+
+func TestWrapperProbeProcesses(t *testing.T) {
+	for label, shell := range testShells(t) {
+		for _, hung := range []string{"", "df", "git"} {
+			t.Run(label+"/"+hung, func(t *testing.T) {
+				fakes := map[string]string{"df": "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nvolume 10 0 10 0%% workspace\\n'", "git": "printf 'main\\n'"}
+				if hung != "" {
+					fakes[hung] = `printf '%s' "$$" >"$LM_STATE/probe.pid"
+trap '' TERM
+exec sleep 30`
+				}
+				ps, err := exec.LookPath("ps")
+				if err != nil {
+					t.Fatal(err)
+				}
+				f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine", Shell: []string{ps, "-e", "-o", "pid=,pgid="}})
+				f.shell = shell
+				repo := filepath.Join(f.dir, "repo")
+				if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, shell[0], append(slices.Clone(shell[1:]), f.cmd[1:]...)...)
+				cmd.Env = append(slices.Clone(f.env), EnvRepoDir+"="+repo)
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+				start := time.Now()
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("%v: %s", err, out)
+				}
+				if time.Since(start) > 4*time.Second {
+					t.Fatal("probe deadline exceeded")
+				}
+				var pids []string
+				for _, line := range strings.Split(string(out), "\n") {
+					fields := strings.Fields(line)
+					if len(fields) == 2 && fields[1] == strconv.Itoa(cmd.Process.Pid) {
+						pids = append(pids, fields[0])
+					}
+				}
+				if len(pids) != 1 || pids[0] != strconv.Itoa(cmd.Process.Pid) {
+					t.Fatalf("processes at shell exec: %v", pids)
+				}
+				if hung != "" {
+					b, err := os.ReadFile(filepath.Join(f.state, "probe.pid"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					pid, err := strconv.Atoi(string(b))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+						t.Fatalf("probe %d remains: %v", pid, err)
+					}
+					if got := f.source(); got[EnvDisk] != "" || got[EnvBranchCheckedOut] != "" {
+						t.Fatalf("late facts: %v", got)
+					}
+				}
+			})
+		}
+	}
 }
 
 // TestWrapperRealFacts: LUXMUX_DISK from the real df matches statfs of the

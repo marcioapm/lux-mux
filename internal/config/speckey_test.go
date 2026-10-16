@@ -121,8 +121,8 @@ func TestSpecKeyCommands(t *testing.T) {
 // together with such a deliberate change.
 func TestSpecKeyGolden(t *testing.T) {
 	for want, p := range map[string]Profile{
-		"282dd191caa12d39": {Image: "alpine"},
-		"8fad9133a889c4d0": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/app.git", Branch: "main", OnStart: "make deps", Shell: []string{"zsh", "-l"}},
+		"00bb6f63e43ab8b6": {Image: "alpine"},
+		"5244e9e1a496662b": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/app.git", Branch: "main", OnStart: "make deps", Shell: []string{"zsh", "-l"}},
 	} {
 		if got := SpecKey(p); got != want {
 			t.Errorf("SpecKey(%+v) = %q, want %q", p, got, want)
