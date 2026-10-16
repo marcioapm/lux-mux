@@ -1,0 +1,263 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/marcioapm/lux-mux/internal/config"
+	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/state"
+)
+
+// Obviously fake keys, one per fake luxd; each luxd refuses the other's.
+const (
+	cliKeyA   = "lux_fake_key_AAAA_cli_test"
+	cliKeyB   = "lux_fake_key_BBBB_cli_test"
+	cliKeyEnv = "LMX_TEST_REMOTE_KEY"
+)
+
+// twoLuxEnv is an Env whose lux CLI configuration is a, with profile
+// "remote" on b (its key in cliKeyEnv) and "a" on a.
+func twoLuxEnv(t *testing.T) (env Env, a, b *fakelux.Server, out, errb *bytes.Buffer) {
+	t.Helper()
+	a = fakelux.NewWithKey(cliKeyA)
+	t.Cleanup(a.Close)
+	b = fakelux.NewWithKey(cliKeyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	env, out, errb = testEnv(t, a, "")
+	env.Lookup = func(k string) (string, bool) {
+		if k == cliKeyEnv {
+			return cliKeyB, true
+		}
+		return "", false
+	}
+	writeConfig(t, env, twoProfiles+`[profiles.remote]
+image = "img-remote"
+lux_url = "`+b.URL+`"
+tenant = "example"
+api_key_env = "`+cliKeyEnv+`"
+`)
+	return env, a, b, out, errb
+}
+
+func submitTo(t *testing.T, l *fakelux.Server, session, profile string) string {
+	t.Helper()
+	c, _ := luxapi.New(l.Config())
+	sp, err := config.RunSpec(config.Profile{Image: "img"}, config.Target{Session: session, Profile: profile}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.ID
+}
+
+// noKeysIn fails if either fake key is in dir's files or in outs.
+func noKeysIn(t *testing.T, dir string, outs ...string) {
+	t.Helper()
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, _ := os.ReadFile(p)
+		for _, k := range []string{cliKeyA, cliKeyB} {
+			if bytes.Contains(b, []byte(k)) {
+				t.Errorf("%s holds a key", p)
+			}
+		}
+		return nil
+	})
+	for i, o := range outs {
+		for _, k := range []string{cliKeyA, cliKeyB} {
+			if strings.Contains(o, k) {
+				t.Errorf("output %d holds a key", i)
+			}
+		}
+	}
+}
+
+// TestNewWindowOnProfileEndpoint: new-window -p remote submits on the
+// remote profile's lux, with its key and tenant, and records that
+// endpoint (never the key) for the window; its labels carry no key.
+func TestNewWindowOnProfileEndpoint(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	first := submitTo(t, a, "work", "a")
+	if err := state.Save(env.StateDir, &state.Session{Name: "work", Windows: []state.Window{{RunID: first, Name: "a", Profile: "a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote", "-n", "far"}); code != 0 {
+		t.Fatal(errb.String())
+	}
+	id := strings.TrimSpace(out.String())
+	if !slices.Contains(b.RunIDs(), id) || len(a.Submits()) != 1 {
+		t.Fatalf("Run %s: b has %v; a had %d submits", id, b.RunIDs(), len(a.Submits()))
+	}
+	for _, tn := range b.Tenants() {
+		if tn != "example" {
+			t.Fatalf("request to b with tenant %q", tn)
+		}
+	}
+	s, _, _ := state.Load(env.StateDir, "work")
+	if len(s.Windows) != 2 || s.Windows[1].RunID != id || s.Windows[1].Endpoint == nil ||
+		*s.Windows[1].Endpoint != (config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}) {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	for k, v := range b.Run(id).Labels {
+		if strings.Contains(k+v, "fake_key") {
+			t.Fatalf("label %s=%s", k, v)
+		}
+	}
+	if a.Refused() != 0 || b.Refused() != 0 {
+		t.Fatalf("refused: a %d b %d", a.Refused(), b.Refused())
+	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
+}
+
+// TestNewDryRunsOnProfileEndpoint: new -p remote checks the spec with the
+// remote lux's dry run (and stops at the terminal check here).
+func TestNewDryRunsOnProfileEndpoint(t *testing.T) {
+	env, a, b, _, errb := twoLuxEnv(t)
+	if code := Main(env, []string{"new", "-s", "fresh", "-p", "remote"}); code == 0 || !strings.Contains(errb.String(), "needs a terminal") {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	posts := func(l *fakelux.Server) int {
+		n := 0
+		for _, r := range l.Requests() {
+			if r == "POST /v1/runs" {
+				n++
+			}
+		}
+		return n
+	}
+	if posts(b) != 1 || posts(a) != 0 {
+		t.Fatalf("dry runs: b %d, a %d", posts(b), posts(a))
+	}
+}
+
+// TestLsAcrossEndpoints: ls lists the sessions on both luxes; with one
+// down it lists the other's, names the one that failed (by URL, tenant
+// and key source, never the key) and marks the sessions with windows
+// there.
+func TestLsAcrossEndpoints(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	submitTo(t, a, "here", "a")
+	far := submitTo(t, b, "there", "remote")
+	if code := Main(env, []string{"ls"}); code != 0 {
+		t.Fatal(errb.String())
+	}
+	if !strings.Contains(out.String(), "here") || !strings.Contains(out.String(), "there") {
+		t.Fatalf("ls:\n%s", out.String())
+	}
+	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	if err := state.Save(env.StateDir, &state.Session{Name: "there", Windows: []state.Window{{RunID: far, Name: "remote", Profile: "remote", Endpoint: &ep}}}); err != nil {
+		t.Fatal(err)
+	}
+	b.SetDown(true)
+	out.Reset()
+	errb.Reset()
+	if code := Main(env, []string{"ls"}); code != 0 {
+		t.Fatal(errb.String())
+	}
+	if !strings.Contains(out.String(), "here") || !strings.Contains(errb.String(), "endpoint unreachable") ||
+		!strings.Contains(errb.String(), strings.TrimPrefix(b.URL, "http://")+" · tenant example") || !strings.Contains(errb.String(), "$"+cliKeyEnv) {
+		t.Fatalf("ls with b down:\n%s\nstderr: %s", out.String(), errb.String())
+	}
+	var thereLine string
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(l, "there") {
+			thereLine = l
+		}
+	}
+	if !strings.Contains(thereLine, "endpoint unreachable") {
+		t.Fatalf("session there not marked:\n%s", out.String())
+	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
+}
+
+// TestKillSessionAcrossEndpoints: kill-session terminates the session's
+// Runs on each lux through that lux's client.
+func TestKillSessionAcrossEndpoints(t *testing.T) {
+	env, a, b, _, errb := twoLuxEnv(t)
+	near := submitTo(t, a, "work", "a")
+	far := submitTo(t, b, "work", "remote")
+	if code := Main(env, []string{"kill-session", "-t", "work", "-y"}); code != 0 {
+		t.Fatal(errb.String())
+	}
+	if !slices.Equal(a.Terminated(), []string{near}) || !slices.Equal(b.Terminated(), []string{far}) {
+		t.Fatalf("terminated: a %v, b %v", a.Terminated(), b.Terminated())
+	}
+	if a.Refused() != 0 || b.Refused() != 0 {
+		t.Fatalf("refused: a %d b %d", a.Refused(), b.Refused())
+	}
+
+	// A file with a window on b while b is down is kept; a's Runs go.
+	near2 := submitTo(t, a, "work2", "a")
+	far2 := submitTo(t, b, "work2", "remote")
+	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	if err := state.Save(env.StateDir, &state.Session{Name: "work2", Windows: []state.Window{{RunID: far2, Endpoint: &ep}}}); err != nil {
+		t.Fatal(err)
+	}
+	b.SetDown(true)
+	if code := Main(env, []string{"kill-session", "-t", "work2", "-y"}); code == 0 || !strings.Contains(errb.String(), "session file kept") {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if _, ok, _ := state.Load(env.StateDir, "work2"); !ok || !slices.Contains(a.Terminated(), near2) {
+		t.Fatalf("file kept %v, a terminated %v", ok, a.Terminated())
+	}
+	// A configured profile whose key variable is unset (here: b's, with
+	// b back) does not keep the file of a session with nothing there.
+	b.SetDown(false)
+	env.Lookup = func(string) (string, bool) { return "", false }
+	near3 := submitTo(t, a, "work3", "a")
+	_ = state.Save(env.StateDir, &state.Session{Name: "work3", Windows: []state.Window{{RunID: near3}}})
+	errb.Reset()
+	if code := Main(env, []string{"kill-session", "-t", "work3", "-y"}); code != 0 {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if _, ok, _ := state.Load(env.StateDir, "work3"); ok {
+		t.Fatal("work3's file kept")
+	}
+}
+
+// TestKeyFileModeRefusedByCLI: a profile whose api_key_file others may
+// read is refused with the fix, the key not shown.
+func TestKeyFileModeRefusedByCLI(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	key := filepath.Join(t.TempDir(), "remote.key")
+	if err := os.WriteFile(key, []byte(cliKeyB+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, env, twoProfiles+`[profiles.remote]
+image = "img-remote"
+lux_url = "`+b.URL+`"
+api_key_file = "`+key+`"
+`)
+	submitTo(t, a, "work", "a")
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote"}); code == 0 || !strings.Contains(errb.String(), "chmod 600") {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if len(b.Submits()) != 0 {
+		t.Fatal("submitted with a key file others can read")
+	}
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote"}); code != 0 || len(b.Submits()) != 1 {
+		t.Fatalf("0600: %d %q", code, errb.String())
+	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
+}
