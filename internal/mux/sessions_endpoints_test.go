@@ -336,6 +336,26 @@ func TestRenameRebuildAcrossEndpoints(t *testing.T) {
 		return h.lux.Streams(a0) > 0 && h.b.Streams(a1) > 0 && h.b.Streams(a2) > 0
 	})
 	h.detach()
+
+	// Rebuilt again while b is down: b is unlisted, and its windows are
+	// added under the new name once it answers, found by their label.
+	if err := state.Remove(h.dir, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	h.b.SetDown(true)
+	h.attach("alpha")
+	h.on("alpha")
+	m := h.con.Current()
+	if got := m.windowRuns(); !slices.Equal(got, []string{a0}) {
+		t.Fatalf("windows with b down: %v", got)
+	}
+	h.b.SetDown(false)
+	h.waitFor("b's windows added", func() bool { return len(m.windowRuns()) == 3 })
+	h.waitFor("b's windows attached on b", func() bool { return h.b.Streams(a1) > 0 && h.b.Streams(a2) > 0 })
+	if s, _, _ := state.Load(h.dir, "alpha"); s == nil || len(s.Windows) != 3 || len(s.Unlisted) != 0 {
+		t.Fatalf("alpha.json %+v", s)
+	}
+	h.detach()
 }
 
 // TestSessionPreviewOtherLux: the chooser's preview of a session whose

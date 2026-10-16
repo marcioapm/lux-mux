@@ -364,7 +364,7 @@ func RecordSparesFrom(sess *Session, label string, ls []Listing, def config.Endp
 	}
 	filled := map[string]bool{}
 	for key, id := range sess.Spares {
-		filled[key] = id != "" || IsLeftover(key)
+		filled[key] = id != ""
 	}
 	type listed struct {
 		r  *api.Run
