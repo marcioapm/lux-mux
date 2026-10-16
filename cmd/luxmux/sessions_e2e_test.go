@@ -95,7 +95,8 @@ func TestSessionsSwitchAndBack(t *testing.T) {
 }
 
 // TestSessionsStepSkipsLocked: C-b ) and C-b ( go to the next and
-// previous session by name, past one another process has, with a notice.
+// previous session by name, wrapping past the last and the first, past
+// one another process has, with a notice.
 func TestSessionsStepSkipsLocked(t *testing.T) {
 	lux, env := e2eEnv(t)
 	dir := stateDirOf(env)
@@ -112,7 +113,7 @@ func TestSessionsStepSkipsLocked(t *testing.T) {
 	p.typ("echo in-s1\r")
 	p.wait("s1 text", has("\nin-s1"))
 	var seen []string
-	for _, k := range []string{")", ")", "(", "("} {
+	for _, k := range []string{")", ")", ")", "(", "("} {
 		before := p.scr.title()
 		mark := p.rawLen()
 		p.typ("\x02" + k)
@@ -124,7 +125,8 @@ func TestSessionsStepSkipsLocked(t *testing.T) {
 		}
 		p.wait(name+" restored", has("in-"+name))
 	}
-	if want := []string{"s2", "s4", "s2", "s1"}; !slices.Equal(seen, want) {
+	// s4 ) wraps to s1, s1 ( wraps back to s4.
+	if want := []string{"s2", "s4", "s1", "s4", "s2"}; !slices.Equal(seen, want) {
 		t.Fatalf("order %v, want %v", seen, want)
 	}
 	p.typ("\x02d")
@@ -188,6 +190,41 @@ func TestSessionsRenameAndRebuild(t *testing.T) {
 	if s, ok, _ := state.Load(dir, "renamed"); !ok || len(s.Windows) != 2 {
 		t.Fatalf("rebuilt file %+v", s)
 	}
+}
+
+// TestSessionsRenameCollision: C-b $ and the chooser's , onto an
+// existing session are refused with a message; that session's file and
+// this session's name stay as they were.
+func TestSessionsRenameCollision(t *testing.T) {
+	lux, env := e2eEnv(t)
+	dir := stateDirOf(env)
+	idT := makeSession(t, lux, env, "taken", "in-taken")
+	p := startLuxmux(t, env, "new -s mine")
+	p.wait("prompt", has("$"))
+	p.typ("\x02$")
+	p.wait("prompt for the name", has("rename session: mine"))
+	mark := p.rawLen()
+	p.typ("\x15taken\r")
+	p.wait("refusal", func(string) bool { return strings.Contains(p.rawSince(mark), "session taken: session exists") })
+	p.typ("\x02s")
+	p.wait("chooser", has("mine *"))
+	p.typ(",")
+	p.wait("rename prompt", has("rename session: mine_"))
+	p.typ("\x7f\x7f\x7f\x7ftaken\r")
+	p.wait("chooser refusal", has("rename: session taken: session exists"))
+	p.typ("\x1b")
+	p.wait("chooser closed", func(s string) bool { return !strings.Contains(s, "DEFAULT PROFILE") })
+	if p.scr.title() != "luxmux:mine [0] default" {
+		t.Fatalf("title %q", p.scr.title())
+	}
+	if s, ok, _ := state.Load(dir, "taken"); !ok || len(s.Windows) != 1 || s.Windows[0].RunID != idT {
+		t.Fatalf("taken's file after the refused renames: %+v", s)
+	}
+	if r, _ := state.Renames(dir); len(r) != 0 {
+		t.Fatalf("renames %v", r)
+	}
+	p.typ("\x02d")
+	p.exited()
 }
 
 // TestSessionsKillFromChooser: x in the session chooser, confirmed,

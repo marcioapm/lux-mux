@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"runtime"
@@ -303,9 +304,9 @@ func TestSwitchSessionAndBack(t *testing.T) {
 	})
 	h.detach()
 	h.goroutinesAtMost("no session goroutines after the detach", base)
-	if h.lux.Feeds() != 0 || h.lux.Streams(idA) != 0 || h.lux.Streams(idB) != 0 {
-		t.Fatalf("after detach: %d feeds, streams %d %d", h.lux.Feeds(), h.lux.Streams(idA), h.lux.Streams(idB))
-	}
+	h.waitFor("feeds and streams closed after detach", func() bool {
+		return h.lux.Feeds() == 0 && h.lux.Streams(idA) == 0 && h.lux.Streams(idB) == 0
+	})
 }
 
 // TestSwitchToLockedSessionStays: a target another process holds is
@@ -712,6 +713,85 @@ func TestKillSessionFromChooser(t *testing.T) {
 	list, err := h.con.Current().Sessions()
 	if err != nil || len(list) != 1 || list[0].Name != "a" || !list[0].Current {
 		t.Fatalf("sessions after the kill: %+v %v", list, err)
+	}
+	h.detach()
+}
+
+// TestRenameSessionCollision: renaming onto an existing session, or onto
+// the label of another renamed session's Runs, is refused, for the
+// session attached here and for another one; the other session's file
+// is untouched.
+func TestRenameSessionCollision(t *testing.T) {
+	h := newMulti(t)
+	idB := h.make("b", "B-SCREEN")
+	idC := h.make("c", "C-SCREEN")
+	h.attach("a")
+	h.on("a")
+	m := h.con.Current()
+	if err := m.RenameSession("c", "d"); err != nil {
+		t.Fatalf("rename c to d: %v", err)
+	}
+	for _, r := range [][2]string{{"a", "b"}, {"a", "d"}, {"b", "d"}, {"d", "b"}} {
+		if err := m.RenameSession(r[0], r[1]); !errors.Is(err, sessions.ErrTaken) {
+			t.Errorf("rename %s onto %s: %v", r[0], r[1], err)
+		}
+	}
+	for _, r := range [][2]string{{"a", "c"}, {"b", "c"}} {
+		if err := m.RenameSession(r[0], r[1]); err == nil || !strings.Contains(err.Error(), "label of session d's Runs") {
+			t.Errorf("rename %s onto d's label: %v", r[0], err)
+		}
+	}
+	for name, id := range map[string]string{"b": idB, "d": idC} {
+		if s, ok, _ := state.Load(h.dir, name); !ok || len(s.Windows) != 1 || s.Windows[0].RunID != id {
+			t.Fatalf("%s's file after the refused renames: %+v", name, s)
+		}
+	}
+	if r, _ := state.Renames(h.dir); len(r) != 1 || r["d"] != "c" {
+		t.Fatalf("renames %v", r)
+	}
+	if m.Session() != "a" {
+		t.Fatalf("session is %q", m.Session())
+	}
+	h.detach()
+}
+
+// TestSessionPreviewClosedOnMove: moving the chooser's highlight from
+// one previewed session to another closes the first preview's stream
+// while the chooser is still open.
+func TestSessionPreviewClosedOnMove(t *testing.T) {
+	h := newMulti(t)
+	idB := h.make("b", "B-SCREEN")
+	idC := h.make("c", "C-SCREEN")
+	h.attach("a")
+	h.on("a")
+	res := make(chan string, 1)
+	h.ui.sessionOpen = func(m *Mux) {
+		preview := func(name, want string) bool {
+			return fakelux.WaitFor(context.Background(), 5*time.Second, func() bool {
+				return strings.Contains(strings.Join(m.SessionPreview(name, 10, 80), "\n"), want)
+			})
+		}
+		if !preview("b", "B-SCREEN") || h.lux.Streams(idB) != 1 {
+			res <- "b's preview did not open"
+			return
+		}
+		if !preview("c", "C-SCREEN") {
+			res <- "c's preview did not open"
+			return
+		}
+		if !fakelux.WaitFor(context.Background(), 3*time.Second, func() bool { return h.lux.Streams(idB) == 0 }) {
+			res <- "b's preview stream still open after the highlight moved to c"
+			return
+		}
+		if n := h.lux.Streams(idC); n != 1 {
+			res <- fmt.Sprintf("%d streams of c", n)
+			return
+		}
+		res <- ""
+	}
+	h.type_("\x02s")
+	if msg := <-res; msg != "" {
+		t.Fatal(msg)
 	}
 	h.detach()
 }
