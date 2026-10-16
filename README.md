@@ -287,19 +287,30 @@ set. With neither, the key is the lux CLI's (`api_key`, `LUX_API_KEY`).
   lux the profiles name. A lux that does not answer is named on stderr;
   the other luxes' windows work, and its windows are added once it
   answers. In a session whose file has them, its windows show `endpoint
-  unreachable` until it does.
+  unreachable` until it does; a lux that answers 401 or 403 shows `endpoint
+  refused the key` instead.
+- A window whose key cannot be read now (its variable unset in this shell,
+  its file unreadable) waits, saying why, and attaches once it can. Closing
+  it, or `r`, keeps its Run (and the window) with a notice until the key is
+  back: the Run cannot be terminated without it.
 - `luxmux ls`, `kill-session` and `spares` go across every lux, and say
-  which one did not answer.
+  which one did not answer. Each lux gets 10 s to list; one that does not
+  answer costs a command that and no more. `kill-session` of a session with
+  no file exits non-zero when a lux it could not list may still hold Runs.
 - The chooser marks with `@` a window on a lux other than the lux CLI's,
   and names that lux above the preview.
 
 Security:
 
-- **A key is never written in `config.toml`**: a profile with `api_key` is
-  refused, pointing to `api_key_env` and `api_key_file`.
-- **`api_key_file` must be readable by you only** (mode `0600` or `0400`): a
-  file group or others may read is refused, with the `chmod` that fixes it.
-  Its first line is the key.
+- **A key is never written in `config.toml`**: `api_key` in a profile, or
+  at the top level as the lux CLI's own file has it, is refused, pointing to
+  `api_key_env` and `api_key_file`. An unknown key is named by its path and
+  line, without the line's text.
+- **`api_key_file` must be a regular file of yours, readable by you only**
+  (mode `0600` or `0400`): a file group or others may read is refused, with
+  the `chmod` that fixes it, as are another user's file, a directory and a
+  FIFO. A symlink is followed: its target is what is checked. Its first
+  line is the key.
 - **The key is never stored or shown**: the session file records a window's
   lux as its URL, tenant and the *name* of the variable or file the key
   comes from; luxmux writes no logs, and its notices, errors, labels and
