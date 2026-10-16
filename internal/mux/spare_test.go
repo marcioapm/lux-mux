@@ -557,9 +557,9 @@ func TestSpareSubmitWhenDetached(t *testing.T) {
 	if got := s.Spares[config.SpecKey(h.cfg.Profiles["dev"])]; got != spare {
 		t.Fatalf("session file spare %q, submitted %q", got, spare)
 	}
-	if st := h.lux.Run(spare).State; st != "running" {
-		t.Fatalf("spare %s", st)
-	}
+	// fakelux answers a submit before it starts the Run, so the spare can
+	// still be on its way to running when detach returns.
+	h.waitFor("spare running", func() bool { return h.lux.Run(spare).State == "running" })
 	submits := len(h.lux.Submits())
 	h.start(nil)
 	h.live(0)
