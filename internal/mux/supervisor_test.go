@@ -591,25 +591,43 @@ func TestHugeTerminalClamped(t *testing.T) {
 
 // TestRestoreBudgetReattaches: a restore attach whose stream falls more
 // than the host's budget behind (as lux-shim ends it) is attached again
-// with restore, and the screen is right afterwards.
+// with restore, and the screen is right afterwards. Output is written
+// until the host ends the attach, not a fixed amount: how much the mux
+// absorbs before the host's queue grows depends on scheduling. The
+// paced case keeps the host's writer level with the output, the
+// schedule a fixed amount lost to.
 func TestRestoreBudgetReattaches(t *testing.T) {
-	h := newHarness(t, cfgDefault, nil)
-	id := h.live(0)
-	n := len(attachesOf(h.lux, id))
-	// m.mu held: the stream's reader stops at its next frame, and the
-	// host queues output for it past its budget.
-	h.m.mu.Lock()
-	term := h.lux.Term(id)
-	chunk := bytes.Repeat([]byte("x"), 64<<10)
-	for range fakelux.RestoreBudget/len(chunk) + 64 {
-		term.Output(chunk)
+	for _, pace := range []time.Duration{0, 3 * time.Millisecond} {
+		t.Run(fmt.Sprintf("pace %v", pace), func(t *testing.T) {
+			h := newHarness(t, cfgDefault, nil)
+			id := h.live(0)
+			n := len(attachesOf(h.lux, id))
+			// m.mu held: the stream's reader stops at its next frame, and
+			// the host queues output for it past its budget.
+			h.m.mu.Lock()
+			term := h.lux.Term(id)
+			chunk := bytes.Repeat([]byte("x"), 64<<10)
+			full := false
+			for range 4096 { // at most 256 MiB
+				term.Output(chunk)
+				q := term.Queued()
+				if full && q == 0 {
+					break // the host ended the restore attach
+				}
+				full = full || q > fakelux.RestoreBudget-2*(len(chunk)+fakelux.EntryCost)
+				time.Sleep(pace)
+			}
+			h.m.mu.Unlock()
+			if !full {
+				t.Fatal("the host's queue never neared its budget")
+			}
+			h.waitFor("reattached", func() bool { return len(attachesOf(h.lux, id)) > n && h.lux.Streams(id) > 0 })
+			if a := attachesOf(h.lux, id); !a[len(a)-1].Restore {
+				t.Fatal("reattach without restore")
+			}
+			term.Output([]byte("\x1b[2J\x1b[HAFTER-BUDGET"))
+			h.waitScreen("screen right", h.contains("AFTER-BUDGET"))
+			h.detach()
+		})
 	}
-	h.m.mu.Unlock()
-	h.waitFor("reattached", func() bool { return len(attachesOf(h.lux, id)) > n && h.lux.Streams(id) > 0 })
-	if a := attachesOf(h.lux, id); !a[len(a)-1].Restore {
-		t.Fatal("reattach without restore")
-	}
-	term.Output([]byte("\x1b[2J\x1b[HAFTER-BUDGET"))
-	h.waitScreen("screen right", h.contains("AFTER-BUDGET"))
-	h.detach()
 }
