@@ -684,7 +684,7 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	h.on("alpha")
 	// The old name is the Runs' label: not free, and not attachable.
 	ctx := context.Background()
-	if err := sessions.CheckFree(ctx, h.cl, h.dir, "a", ""); err == nil {
+	if err := sessions.CheckFree(ctx, h.cl, h.dir, "a", "", false); err == nil {
 		t.Fatal("the old name is free")
 	}
 	if _, err := sessions.Label(h.dir, "a"); err == nil || !strings.Contains(err.Error(), "renamed to alpha") {
@@ -780,6 +780,48 @@ func TestRenameSessionCollision(t *testing.T) {
 	}
 	if m.Session() != "a" {
 		t.Fatalf("session is %q", m.Session())
+	}
+	h.detach()
+}
+
+// TestLockedCallersReuseAbandonedName: a renamed session's name whose
+// entry is abandoned (no file, no live Run, nobody attached) is free to
+// the callers that take its lock before the name check: a rename of
+// another session, a rename of the session attached here, and a switch
+// that creates a session, without an unlocked check pruning it first.
+func TestLockedCallersReuseAbandonedName(t *testing.T) {
+	h := newMulti(t)
+	idY := h.make("y", "Y-SCREEN")
+	for _, e := range [][2]string{{"p", "b"}, {"q", "c"}, {"r", "e"}} {
+		if err := state.SetRenamed(h.dir, e[0], e[1], e[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.attach("x")
+	h.on("x")
+	m := h.con.Current()
+	if err := m.RenameSession("y", "b"); err != nil {
+		t.Fatalf("rename y onto the abandoned b: %v", err)
+	}
+	if s, ok, _ := state.Load(h.dir, "b"); !ok || len(s.Windows) != 1 || s.Windows[0].RunID != idY {
+		t.Fatalf("b.json after the rename: %+v", s)
+	}
+	if err := m.RenameSession("x", "c"); err != nil {
+		t.Fatalf("rename x onto the abandoned c: %v", err)
+	}
+	if r, _ := state.Renames(h.dir); len(r) != 3 || r["b"] != "y" || r["c"] != "x" || r["e"] != "r" {
+		t.Fatalf("renames after the renames %v", r)
+	}
+	p := h.cfg.Profiles["default"]
+	if !m.startSwitch(&switchTarget{name: "e", create: true, defaultProfile: "default", first: &p, notice: "new session e"}) {
+		t.Fatal("switch to e did not start")
+	}
+	idE := h.on("e")
+	if r, _ := state.Renames(h.dir); len(r) != 2 || r["b"] != "y" || r["c"] != "x" {
+		t.Fatalf("renames after creating e: %v", r)
+	}
+	if l := h.lux.Run(idE).Labels[config.LabelSession]; l != "e" {
+		t.Fatalf("e's first Run is labelled %q", l)
 	}
 	h.detach()
 }

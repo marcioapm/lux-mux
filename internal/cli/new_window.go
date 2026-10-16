@@ -147,7 +147,9 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	label, err := sessions.LiveLabel(ctx, c, env.StateDir, o.Session)
+	// Its lock taken here, a renamed session whose Runs all ended is
+	// dropped and refused below, as attach does.
+	label, err := sessions.LiveLabel(ctx, c, env.StateDir, o.Session, !attached)
 	if err != nil {
 		return err
 	}

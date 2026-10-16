@@ -186,7 +186,7 @@ func (m *Mux) relock(name string) (func(), error) {
 // checked free and starts empty; an existing one is opened as attach does.
 func (m *Mux) openTarget(ctx context.Context, cfg *config.Config, t *switchTarget) (*state.Session, string, error) {
 	if t.create {
-		if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, t.name, ""); err != nil {
+		if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, t.name, "", true); err != nil {
 			return nil, "", err
 		}
 		return &state.Session{Name: t.name, DefaultProfile: t.defaultProfile}, t.name, nil
@@ -223,7 +223,7 @@ func (m *Mux) SwitchTo(name, notice string) bool {
 
 // CheckSessionName says whether a new session may be named name.
 func (m *Mux) CheckSessionName(ctx context.Context, name string) error {
-	return sessions.CheckFree(ctx, m.lux, m.opt.StateDir, name, "")
+	return sessions.CheckFree(ctx, m.lux, m.opt.StateDir, name, "", false)
 }
 
 // NewSession detaches this session and creates req's in its place,
@@ -231,7 +231,7 @@ func (m *Mux) CheckSessionName(ctx context.Context, name string) error {
 func (m *Mux) NewSession(req *NewSessionRequest) bool {
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 	defer cancel()
-	if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, req.Name, ""); err != nil {
+	if err := sessions.CheckFree(ctx, m.lux, m.opt.StateDir, req.Name, "", false); err != nil {
 		m.Notice("new session: " + err.Error())
 		return false
 	}
@@ -401,7 +401,7 @@ func (m *Mux) RenameSession(old, new string) error {
 		label, err = sessions.Label(m.opt.StateDir, old)
 	}
 	if err == nil {
-		err = sessions.CheckFree(ctx, m.lux, m.opt.StateDir, new, label)
+		err = sessions.CheckFree(ctx, m.lux, m.opt.StateDir, new, label, true)
 	}
 	if err != nil {
 		unlockNew()

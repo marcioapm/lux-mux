@@ -188,7 +188,7 @@ func newSession(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := sessions.CheckFree(ctx, c, env.StateDir, name, ""); errors.Is(err, sessions.ErrTaken) {
+	if err := sessions.CheckFree(ctx, c, env.StateDir, name, "", true); errors.Is(err, sessions.ErrTaken) {
 		return fmt.Errorf("%w: luxmux attach -t %s", err, name)
 	} else if err != nil {
 		return err

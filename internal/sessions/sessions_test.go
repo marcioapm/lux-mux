@@ -77,19 +77,19 @@ func TestRenameEntryEndsWithItsRuns(t *testing.T) {
 			f := newFixture(t)
 			id := f.renamed(withFile)
 			ctx := context.Background()
-			if err := CheckFree(ctx, f.c, f.dir, "a", ""); err == nil {
+			if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err == nil {
 				t.Fatal("the old name is free while its Runs live")
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "b", ""); !errors.Is(err, ErrTaken) {
+			if err := CheckFree(ctx, f.c, f.dir, "b", "", false); !errors.Is(err, ErrTaken) {
 				t.Fatalf("the new name while its Runs live: %v", err)
 			}
 			if err := f.c.Terminate(ctx, id); err != nil {
 				t.Fatal(err)
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "a", ""); err != nil {
+			if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err != nil {
 				t.Fatalf("the old name after its Runs ended: %v", err)
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "b", ""); err != nil {
+			if err := CheckFree(ctx, f.c, f.dir, "b", "", false); err != nil {
 				t.Fatalf("the new name after its Runs ended: %v", err)
 			}
 			if l, err := Label(f.dir, "a"); err != nil || l != "a" {
@@ -114,7 +114,7 @@ func TestRenameEntryKeptWhileAttached(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := CheckFree(ctx, f.c, f.dir, "a", ""); err == nil {
+	if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err == nil {
 		t.Fatal("the old name of a session attached elsewhere is free")
 	}
 	if r, _ := state.Renames(f.dir); r["b"] != "a" {
@@ -123,48 +123,68 @@ func TestRenameEntryKeptWhileAttached(t *testing.T) {
 }
 
 // TestEntryHeldHereDroppedOnlyByOpen: with its lock held by this process,
-// an ended renamed session's entry and file survive CheckFree and
-// LiveLabel; Open, attaching that name, drops them.
+// an ended renamed session's entry and file survive the unlocked
+// CheckFree and LiveLabel, and a locked call for its old name. Only a
+// caller that has just taken b's lock drops them: Open(b), or
+// CheckFree(b) with locked.
 func TestEntryHeldHereDroppedOnlyByOpen(t *testing.T) {
-	f := newFixture(t)
-	id := f.renamed(true)
-	ctx := context.Background()
-	if err := f.c.Terminate(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := state.Lock(f.dir, "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	kept := func(when string) {
-		t.Helper()
-		if r, _ := state.Renames(f.dir); r["b"] != "a" {
-			t.Fatalf("%s: renames %v", when, r)
-		}
-		if _, ok, _ := state.Load(f.dir, "b"); !ok {
-			t.Fatalf("%s: b.json is gone", when)
-		}
-	}
-	for _, n := range []string{"a", "b"} {
-		if err := CheckFree(ctx, f.c, f.dir, n, ""); err == nil {
-			t.Fatalf("CheckFree(%s) while b is held here", n)
-		}
-		kept("CheckFree(" + n + ")")
-	}
-	if l, err := LiveLabel(ctx, f.c, f.dir, "b"); err != nil || l != "a" {
-		t.Fatalf("LiveLabel(b): %q %v", l, err)
-	}
-	kept("LiveLabel(b)")
-	_, label, existed, err := Open(ctx, f.c, f.dir, f.cfg, "b")
-	if err != nil || existed || label != "b" {
-		t.Fatalf("open b: %q %v %v", label, existed, err)
-	}
-	if r, _ := state.Renames(f.dir); len(r) != 0 {
-		t.Fatalf("renames after Open: %v", r)
-	}
-	if _, ok, _ := state.Load(f.dir, "b"); ok {
-		t.Fatal("b.json left after Open")
+	for _, by := range []string{"Open", "CheckFree locked"} {
+		t.Run(by, func(t *testing.T) {
+			f := newFixture(t)
+			id := f.renamed(true)
+			ctx := context.Background()
+			if err := f.c.Terminate(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			unlock, err := state.Lock(f.dir, "b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			kept := func(when string) {
+				t.Helper()
+				if r, _ := state.Renames(f.dir); r["b"] != "a" {
+					t.Fatalf("%s: renames %v", when, r)
+				}
+				if _, ok, _ := state.Load(f.dir, "b"); !ok {
+					t.Fatalf("%s: b.json is gone", when)
+				}
+			}
+			for _, n := range []string{"a", "b"} {
+				if err := CheckFree(ctx, f.c, f.dir, n, "", false); err == nil {
+					t.Fatalf("CheckFree(%s) unlocked while b is held here", n)
+				}
+				kept("CheckFree(" + n + ")")
+			}
+			if l, err := LiveLabel(ctx, f.c, f.dir, "b", false); err != nil || l != "a" {
+				t.Fatalf("LiveLabel(b): %q %v", l, err)
+			}
+			kept("LiveLabel(b)")
+			// b's lock is not a's: the entry naming a as its label stays.
+			var re *RenamedError
+			if _, _, _, err := Open(ctx, f.c, f.dir, f.cfg, "a"); !errors.As(err, &re) {
+				t.Fatalf("open a: %v", err)
+			}
+			kept("Open(a)")
+			if err := CheckFree(ctx, f.c, f.dir, "a", "", true); err == nil {
+				t.Fatal("CheckFree(a) locked while b is held here")
+			}
+			kept("CheckFree(a) locked")
+			if by == "Open" {
+				_, label, existed, err := Open(ctx, f.c, f.dir, f.cfg, "b")
+				if err != nil || existed || label != "b" {
+					t.Fatalf("open b: %q %v %v", label, existed, err)
+				}
+			} else if err := CheckFree(ctx, f.c, f.dir, "b", "", true); err != nil {
+				t.Fatalf("CheckFree(b) locked: %v", err)
+			}
+			if r, _ := state.Renames(f.dir); len(r) != 0 {
+				t.Fatalf("renames after %s: %v", by, r)
+			}
+			if _, ok, _ := state.Load(f.dir, "b"); ok {
+				t.Fatalf("b.json left after %s", by)
+			}
+		})
 	}
 }
 
