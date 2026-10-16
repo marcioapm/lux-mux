@@ -515,6 +515,12 @@ func (s *Server) Start(id string) {
 	s.mu.Unlock()
 	t := s.NewTerminal(&run)
 	s.mu.Lock()
+	// A terminate while the terminal was made has already ended the Run.
+	if r.run.State == "terminated" {
+		s.mu.Unlock()
+		t.Exit()
+		return
+	}
 	if r.term != nil {
 		r.term.Exit()
 	}
