@@ -341,3 +341,45 @@ func TestRecordSpares(t *testing.T) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
 	}
 }
+
+// TestRebuildFromEndpoints: windows rebuilt from two endpoints' listings
+// record the endpoint each Run was listed on; an endpoint that could not
+// be listed adds nothing; a spare off the default endpoint gets a slot of
+// its own with its endpoint recorded.
+func TestRebuildFromEndpoints(t *testing.T) {
+	def := config.Endpoint{URL: "https://lux.example.com"}
+	other := config.Endpoint{URL: "https://lux2.example.com", Tenant: "example", KeyEnv: "EXAMPLE_LUX_API_KEY"}
+	down := config.Endpoint{URL: "https://down.example.com"}
+	spec := func(r *api.Run) *api.Run { r.Labels[config.LabelSpec] = "k"; return r }
+	ls := []Listing{
+		{Endpoint: def, Runs: []*api.Run{run("run_1", "work", "a", "running", 10, false), spec(run("run_s1", "work", "a", "running", 15, true))}},
+		{Endpoint: other, Runs: []*api.Run{run("run_2", "work", "b", "running", 20, false), spec(run("run_s2", "work", "b", "running", 25, true))}},
+		{Endpoint: down, Err: errors.New("unreachable")},
+	}
+	s := RebuildFrom("work", ls, def, nil)
+	if len(s.Windows) != 2 || *s.Windows[0].Endpoint != def || *s.Windows[1].Endpoint != other {
+		t.Fatalf("windows %+v", s.Windows)
+	}
+	slot := config.SpareSlot("k", other, def)
+	if !reflect.DeepEqual(s.Spares, map[string]string{"k": "run_s1", slot: "run_s2"}) || s.SpareEndpoints[slot] != other || len(s.SpareEndpoints) != 1 {
+		t.Fatalf("spares %v endpoints %v", s.Spares, s.SpareEndpoints)
+	}
+}
+
+// TestReconcileKeepsDownEndpoint: windows and spares on an endpoint that
+// could not be listed are kept; those on the endpoints that answered are
+// reconciled.
+func TestReconcileKeepsDownEndpoint(t *testing.T) {
+	def := config.Endpoint{URL: "https://lux.example.com"}
+	down := config.Endpoint{URL: "https://down.example.com"}
+	s := &Session{Windows: []Window{{RunID: "a"}, {RunID: "b", Endpoint: &down}, {RunID: "gone"}},
+		Spares: map[string]string{"k": "s1", "k@x": "s2"}, SpareEndpoints: map[string]config.Endpoint{"k@x": down},
+		Claimed: []string{"b"}}
+	s.ReconcileUp(map[string]string{"a": "running"}, def, func(e config.Endpoint) bool { return e == down })
+	if len(s.Windows) != 2 || s.Windows[0].RunID != "a" || s.Windows[1].RunID != "b" {
+		t.Fatalf("windows %+v", s.Windows)
+	}
+	if !reflect.DeepEqual(s.Spares, map[string]string{"k@x": "s2"}) || !reflect.DeepEqual(s.Claimed, []string{"b"}) {
+		t.Fatalf("spares %v claimed %v", s.Spares, s.Claimed)
+	}
+}

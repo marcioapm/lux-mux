@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 
 	"github.com/coder/websocket"
 	"github.com/marcioapm/lux/api"
@@ -26,6 +27,46 @@ func New(cfg api.Config) (*Client, error) {
 		return nil, errors.New("not signed in to lux: set url and api_key in the lux CLI's config.toml, or LUX_URL and LUX_API_KEY")
 	}
 	return &Client{C: api.FromConfig(cfg)}, nil
+}
+
+// Endpoints makes and keeps one client per endpoint. Base is the lux CLI
+// configuration (api.LoadConfig()); lookup finds api_key_env variables.
+type Endpoints struct {
+	base   api.Config
+	lookup func(string) (string, bool)
+	mu     sync.Mutex
+	byEP   map[config.Endpoint]*Client
+}
+
+// NewEndpoints is the client set over base.
+func NewEndpoints(base api.Config, lookup func(string) (string, bool)) *Endpoints {
+	return &Endpoints{base: base, lookup: lookup, byEP: map[config.Endpoint]*Client{}}
+}
+
+// Base is the lux CLI configuration the endpoints fall back to.
+func (e *Endpoints) Base() api.Config { return e.base }
+
+// Default is the lux CLI configuration's own endpoint.
+func (e *Endpoints) Default() config.Endpoint { return config.DefaultEndpoint(e.base) }
+
+// Of is the endpoint a profile's Runs live on.
+func (e *Endpoints) Of(p config.Profile) config.Endpoint { return p.Endpoint(e.base) }
+
+// Client is ep's client, made on first use. Its error names the endpoint
+// and where its key was looked for, never a key.
+func (e *Endpoints) Client(ep config.Endpoint) (*Client, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c := e.byEP[ep]; c != nil {
+		return c, nil
+	}
+	cfg, err := ep.Config(e.base, e.lookup)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{C: api.FromConfig(cfg)}
+	e.byEP[ep] = c
+	return c, nil
 }
 
 // Submit creates a Run.

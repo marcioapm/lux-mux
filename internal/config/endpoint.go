@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -103,13 +104,23 @@ func (e Endpoint) KeySource() string {
 // String is Label and KeySource: what errors name e by.
 func (e Endpoint) String() string { return e.Label() + " (key: " + e.KeySource() + ")" }
 
+// SpareSlot is the session's warm-spare slot for a spec key on ep: the
+// spec key itself on the default endpoint def, else the key and ep's ID,
+// so equal specs on two luxes keep a spare each.
+func SpareSlot(specKey string, ep, def Endpoint) string {
+	if specKey == "" || ep == def {
+		return specKey
+	}
+	return specKey + "@" + ep.ID()
+}
+
 // Config is the client configuration for e: the key from KeyEnv when the
 // environment has it, else from KeyFile, else (neither set) base's.
 // Errors name where the key was looked for, never a value.
 func (e Endpoint) Config(base api.Config, lookup func(string) (string, bool)) (api.Config, error) {
 	cfg := api.Config{URL: e.URL, Tenant: e.Tenant}
 	if e.URL == "" {
-		return cfg, fmt.Errorf("lux: no url for %s: set lux_url in the profile, url in the lux CLI's config.toml, or LUX_URL", e.Label())
+		return cfg, errors.New("not signed in to lux: no url: set lux_url in the profile, url in the lux CLI's config.toml, or LUX_URL")
 	}
 	switch {
 	case e.KeyEnv != "":

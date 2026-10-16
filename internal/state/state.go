@@ -29,6 +29,18 @@ type Window struct {
 	// Spec is the profile the Run was made from, kept so a relaunch or a
 	// resume needing its secrets works after the configuration changed.
 	Spec *config.Profile `json:"spec,omitempty"`
+	// Endpoint is the lux the Run lives on: URL, tenant and the name of
+	// its key's source, never the key. Nil (files from before endpoints):
+	// the lux CLI configuration's.
+	Endpoint *config.Endpoint `json:"endpoint,omitempty"`
+}
+
+// EndpointOr is w's endpoint, def when it has none recorded.
+func (w Window) EndpointOr(def config.Endpoint) config.Endpoint {
+	if w.Endpoint != nil {
+		return *w.Endpoint
+	}
+	return def
 }
 
 // Session is $XDG_STATE_HOME/luxmux/<session>.json.
@@ -44,9 +56,15 @@ type Session struct {
 	// Claimed are spare Runs that became windows: their luxmux-spare label
 	// stays, so this is how they are told from the spare still waiting.
 	Claimed []string `json:"claimed,omitempty"`
-	// Spares maps a spec key (config.SpecKey) to its waiting warm spare's
-	// Run id.
+	// Spares maps a warm-spare slot (config.SpareSlot) to its waiting
+	// spare's Run id.
 	Spares map[string]string `json:"spares,omitempty"`
+	// SpareEndpoints is the endpoint of each slot in Spares that is not
+	// the lux CLI configuration's.
+	SpareEndpoints map[string]config.Endpoint `json:"spareEndpoints,omitempty"`
+	// Unlisted are endpoints the session's Runs could not be listed on
+	// when it was rebuilt: their windows are added once one answers.
+	Unlisted []config.Endpoint `json:"unlisted,omitempty"`
 	// Recent images and repositories typed in the dialog, newest first.
 	RecentImages []string `json:"recentImages,omitempty"`
 	RecentRepos  []string `json:"recentRepos,omitempty"`
@@ -360,15 +378,57 @@ var waitingSpare = map[string]bool{"running": true, "submitted": true, "schedule
 // named after its profile. A Run whose spec lux returns gets that spec
 // as its window's (profiles: the configuration's, by name).
 func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]config.Profile) *Session {
+	return rebuild(name, label, []Listing{{Runs: runs}}, nil, profiles)
+}
+
+// Listing is what one endpoint listed for a session; Err set: it could
+// not be listed.
+type Listing struct {
+	Endpoint config.Endpoint
+	Runs     []*api.Run
+	Err      error
+}
+
+// RebuildFrom is RebuildLabelled over every endpoint's listing: each window
+// records the endpoint its Run was listed on, and each spare's slot is
+// config.SpareSlot of its spec on that endpoint (def: the lux CLI
+// configuration's). A Run two endpoints list (one lux, two key sources)
+// is taken from the first. Listings that failed add nothing.
+func RebuildFrom(session string, ls []Listing, def config.Endpoint, profiles map[string]config.Profile) *Session {
+	return rebuild(session, session, ls, &def, profiles)
+}
+
+func rebuild(name, label string, ls []Listing, def *config.Endpoint, profiles map[string]config.Profile) *Session {
 	s := &Session{Name: name}
-	live := make([]*api.Run, 0, len(runs))
-	for _, r := range runs {
-		if r.Labels[config.LabelSession] != label || !Live(r.State) {
+	live := []*api.Run{}
+	epOf := map[string]config.Endpoint{}
+	for _, l := range ls {
+		if l.Err != nil {
+			if def != nil {
+				s.Unlisted = append(s.Unlisted, l.Endpoint)
+			}
 			continue
 		}
-		live = append(live, r)
+		for _, r := range l.Runs {
+			if r.Labels[config.LabelSession] != label || !Live(r.State) {
+				continue
+			}
+			if _, dup := epOf[r.ID]; dup {
+				continue
+			}
+			epOf[r.ID] = l.Endpoint
+			live = append(live, r)
+		}
 	}
 	sort.SliceStable(live, func(i, j int) bool { return live[i].CreatedAt.Before(live[j].CreatedAt) })
+	window := func(id, prof string) Window {
+		w := Window{RunID: id, Name: prof, Profile: prof}
+		if def != nil {
+			ep := epOf[id]
+			w.Endpoint = &ep
+		}
+		return w
+	}
 	for _, r := range live {
 		prof := r.Labels[config.LabelProfile]
 		if r.Labels[config.LabelSpare] == "true" {
@@ -382,14 +442,23 @@ func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]co
 			if key == "" {
 				key = prof
 			}
+			if def != nil {
+				key = config.SpareSlot(key, epOf[r.ID], *def)
+				if ep := epOf[r.ID]; ep != *def {
+					if s.SpareEndpoints == nil {
+						s.SpareEndpoints = map[string]config.Endpoint{}
+					}
+					s.SpareEndpoints[key] = ep
+				}
+			}
 			if prev, ok := s.Spares[key]; ok {
 				s.Claimed = append(s.Claimed, prev)
-				s.Windows = append(s.Windows, Window{RunID: prev, Name: prof, Profile: prof})
+				s.Windows = append(s.Windows, window(prev, prof))
 			}
 			s.Spares[key] = r.ID
 			continue
 		}
-		s.Windows = append(s.Windows, Window{RunID: r.ID, Name: prof, Profile: prof})
+		s.Windows = append(s.Windows, window(r.ID, prof))
 	}
 	sortWindowsByCreation(s, live)
 	byID := map[string]*api.Run{}
@@ -398,7 +467,9 @@ func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]co
 	}
 	for i, w := range s.Windows {
 		if r := byID[w.RunID]; r != nil && r.Spec.Image.Ref != "" {
-			s.Windows[i] = WindowFromRun(r, profiles[w.Profile])
+			nw := WindowFromRun(r, profiles[w.Profile])
+			nw.Endpoint = w.Endpoint
+			s.Windows[i] = nw
 		}
 	}
 	return s
@@ -494,23 +565,43 @@ func sortWindowsByCreation(s *Session, runs []*api.Run) {
 // (known maps a Run id to its state; ids it lacks are gone), keeping
 // Active and Last pointing at the same windows where they survive.
 func (s *Session) Reconcile(known map[string]string) {
+	s.ReconcileUp(known, config.Endpoint{}, nil)
+}
+
+// ReconcileUp is Reconcile when some endpoints could not be listed: the
+// windows and spares on an endpoint down reports (def is a window's
+// endpoint when it records none) are kept as they are.
+func (s *Session) ReconcileUp(known map[string]string, def config.Endpoint, down func(config.Endpoint) bool) {
+	isDown := func(ep config.Endpoint) bool { return down != nil && down(ep) }
+	keep := func(id string) bool { st, ok := known[id]; return ok && Live(st) }
 	active, last := s.at(s.Active), s.at(s.Last)
 	kept := s.Windows[:0]
+	held := map[string]bool{}
 	for _, w := range s.Windows {
-		if st, ok := known[w.RunID]; ok && Live(st) {
+		if keep(w.RunID) || isDown(w.EndpointOr(def)) {
 			kept = append(kept, w)
+			held[w.RunID] = true
 		}
 	}
 	s.Windows = kept
 	s.Active, s.Last = s.index(active), s.index(last)
 	for p, id := range s.Spares {
-		if st, ok := known[id]; !ok || !Live(st) {
+		ep, ok := s.SpareEndpoints[p]
+		if !ok {
+			ep = def
+		}
+		if !keep(id) && !isDown(ep) {
 			delete(s.Spares, p)
+		}
+	}
+	for p := range s.SpareEndpoints {
+		if _, ok := s.Spares[p]; !ok {
+			delete(s.SpareEndpoints, p)
 		}
 	}
 	claimed := s.Claimed[:0]
 	for _, id := range s.Claimed {
-		if st, ok := known[id]; ok && Live(st) {
+		if keep(id) || held[id] {
 			claimed = append(claimed, id)
 		}
 	}
