@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,10 +67,25 @@ func sessionHost() *fakeSessionHost {
 	}}
 }
 
+// skeys types ks, running what each starts to its end, as bubbletea would.
 func skeys(c *SessionChooser, ks ...string) {
 	for _, k := range ks {
-		c.Key(k)
+		settle(c, c.Key(k))
 	}
+}
+
+// settle runs cmd and what its result leads to.
+func settle(c *SessionChooser, cmd tea.Cmd) {
+	for cmd != nil {
+		cmd = c.Handle(cmd())
+	}
+}
+
+// loadedChooser is a chooser whose first listing came.
+func loadedChooser(h SessionHost, rows, cols int) *SessionChooser {
+	c := NewSessionChooser(h, rows, cols)
+	settle(c, c.Load())
+	return c
 }
 
 // TestSessionChooserColumnsAndPreview: one row per session with its
@@ -77,7 +94,7 @@ func skeys(c *SessionChooser, ks ...string) {
 // highlight, and a session attached elsewhere is not previewed.
 func TestSessionChooserColumnsAndPreview(t *testing.T) {
 	h := sessionHost()
-	c := NewSessionChooser(h, 24, 80)
+	c := loadedChooser(h, 24, 80)
 	if s, _ := c.Selected(); s.Name != "main" {
 		t.Fatalf("starts on %q", s.Name)
 	}
@@ -111,7 +128,7 @@ func TestSessionChooserColumnsAndPreview(t *testing.T) {
 // profile as typed; Enter switches to the highlighted session, and is
 // refused for one attached elsewhere; Enter on the current one closes.
 func TestSessionChooserFilterAndSwitch(t *testing.T) {
-	c := NewSessionChooser(sessionHost(), 24, 80)
+	c := loadedChooser(sessionHost(), 24, 80)
 	skeys(c, "/", "o", "p")
 	if v := c.Visible(); len(v) != 1 || v[0].Name != "web" {
 		t.Fatalf("filter op: %+v", v)
@@ -133,12 +150,12 @@ func TestSessionChooserFilterAndSwitch(t *testing.T) {
 		t.Fatalf("enter on api: done %v switch %q", c.Done, c.Switch)
 	}
 
-	c = NewSessionChooser(sessionHost(), 24, 80)
+	c = loadedChooser(sessionHost(), 24, 80)
 	skeys(c, "enter")
 	if !c.Done || c.Switch != "" {
 		t.Fatalf("enter on the current session: done %v switch %q", c.Done, c.Switch)
 	}
-	c = NewSessionChooser(sessionHost(), 24, 80)
+	c = loadedChooser(sessionHost(), 24, 80)
 	skeys(c, "q")
 	if !c.Done || c.Switch != "" {
 		t.Fatal("q closes without a switch")
@@ -151,7 +168,7 @@ func TestSessionChooserFilterAndSwitch(t *testing.T) {
 // refusal is shown.
 func TestSessionChooserRenameAndKill(t *testing.T) {
 	h := sessionHost()
-	c := NewSessionChooser(h, 24, 80)
+	c := loadedChooser(h, 24, 80)
 	skeys(c, "k", ",")
 	if !strings.Contains(plain(c.View()), "rename session: api_") {
 		t.Fatalf("rename prompt:\n%s", plain(c.View()))
@@ -179,7 +196,7 @@ func TestSessionChooserRenameAndKill(t *testing.T) {
 		t.Fatal("a kill closed the chooser")
 	}
 
-	c = NewSessionChooser(h, 24, 80)
+	c = loadedChooser(h, 24, 80)
 	skeys(c, "x")
 	if c.mode == modeConfirmKill || !strings.Contains(plain(c.View()), "cannot be killed from itself") {
 		t.Fatalf("x on the current session:\n%s", plain(c.View()))
@@ -195,11 +212,140 @@ func TestSessionChooserRenameAndKill(t *testing.T) {
 
 	h = sessionHost()
 	h.killErr = errors.New("terminate failed")
-	c = NewSessionChooser(h, 24, 80)
+	c = loadedChooser(h, 24, 80)
 	skeys(c, "k", "x", "y")
 	if !strings.Contains(plain(c.View()), "kill: terminate failed") {
 		t.Fatalf("host refusal:\n%s", plain(c.View()))
 	}
+}
+
+// slowHost is a session host whose lux calls (the listing, a kill) take
+// delay; it may be called from command goroutines.
+type slowHost struct {
+	mu    sync.Mutex
+	f     *fakeSessionHost
+	delay time.Duration
+	lists atomic.Int32
+}
+
+func (s *slowHost) Sessions() ([]mux.SessionInfo, error) {
+	time.Sleep(s.delay)
+	s.lists.Add(1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.Sessions()
+}
+
+func (s *slowHost) SessionPreview(name string, rows, cols int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.SessionPreview(name, rows, cols)
+}
+
+func (s *slowHost) RenameSession(old, new string) error {
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.RenameSession(old, new)
+}
+
+func (s *slowHost) KillSession(name string) error {
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.KillSession(name)
+}
+
+// TestSessionChooserNeverWaitsForLux: with a host that takes 400 ms per
+// listing and kill, the chooser takes each key and tick, and draws, in
+// well under 50 ms: the listing (on open and every 2 s) and the kill run
+// as commands, as bubbletea runs them, off its event loop. Until the
+// first listing comes it says it is loading; a kill says it is running.
+func TestSessionChooserNeverWaitsForLux(t *testing.T) {
+	h := &slowHost{f: sessionHost(), delay: 400 * time.Millisecond}
+	p := &sessionProgram{c: NewSessionChooser(h, 24, 80)}
+	msgs := make(chan tea.Msg, 16)
+	var run func(cmd tea.Cmd)
+	run = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		go func() {
+			switch m := cmd().(type) {
+			case tea.BatchMsg:
+				for _, c := range m {
+					run(c)
+				}
+			case tickMsg, nil:
+				// Ticks are sent below, at a pace of the test's own.
+			default:
+				msgs <- m
+			}
+		}()
+	}
+	var worst time.Duration
+	step := func(msg tea.Msg) string {
+		start := time.Now()
+		_, cmd := p.Update(msg)
+		out := plain(p.View())
+		worst = max(worst, time.Since(start))
+		run(cmd)
+		return out
+	}
+	drain := func() {
+		for {
+			select {
+			case m := <-msgs:
+				step(m)
+			default:
+				return
+			}
+		}
+	}
+	start := time.Now()
+	run(p.Init())
+	if out := step(tea.WindowSizeMsg{Width: 80, Height: 24}); !strings.Contains(out, "loading sessions…") {
+		t.Fatalf("before the first listing:\n%s", out)
+	}
+	if !fakeWait(2*time.Second, func() bool { drain(); return len(p.c.all) == 3 }) {
+		t.Fatal("the first listing did not come")
+	}
+	if s, _ := p.c.Selected(); s.Name != "main" {
+		t.Fatalf("starts on %q", s.Name)
+	}
+	// Keys and ticks for 1.5 s: the 2 s refresh starts a listing among
+	// them, and a kill runs.
+	k := func(s string) tea.Msg { return runes(s) }
+	step(k("k"))
+	step(k("x"))
+	if out := step(k("y")); !strings.Contains(out, "killing api…") {
+		t.Fatalf("kill in flight:\n%s", out)
+	}
+	for i := 0; time.Since(start) < 2500*time.Millisecond; i++ {
+		step(tickMsg{})
+		step(k([]string{"j", "k"}[i%2]))
+		drain()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !fakeWait(2*time.Second, func() bool { drain(); return len(p.c.all) == 2 && p.c.busy == "" }) {
+		t.Fatalf("after the kill: %+v busy %q", p.c.all, p.c.busy)
+	}
+	if h.lists.Load() < 2 {
+		t.Fatalf("%d listings", h.lists.Load())
+	}
+	if worst > 50*time.Millisecond {
+		t.Fatalf("a key, tick or draw took %v", worst)
+	}
+}
+
+// fakeWait polls cond every 5 ms for at most d.
+func fakeWait(d time.Duration, cond func() bool) bool {
+	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return cond()
 }
 
 // TestSessionChooserNewOpensDialog: n opens the new-session dialog over
@@ -207,7 +353,7 @@ func TestSessionChooserRenameAndKill(t *testing.T) {
 // the chooser with its request.
 func TestSessionChooserNewOpensDialog(t *testing.T) {
 	dh := newHost(t)
-	p := &sessionProgram{c: NewSessionChooser(sessionHost(), 40, 100), newDialog: func(rows, cols int) *Dialog {
+	p := &sessionProgram{c: loadedChooser(sessionHost(), 40, 100), newDialog: func(rows, cols int) *Dialog {
 		return NewSessionDialogModel(context.Background(), dh, rows, cols, nil)
 	}}
 	// feed delivers msgs and what their commands lead to; spinner ticks

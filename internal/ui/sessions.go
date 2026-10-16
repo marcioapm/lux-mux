@@ -24,7 +24,8 @@ const elsewhereNote = "attached elsewhere — preview unavailable"
 
 // SessionChooser is the session chooser's model: the window chooser's
 // look and keys over sessions, the highlighted one's shown window
-// previewed below the list.
+// previewed below the list. What asks lux (the list, a rename, a kill)
+// runs as a bubbletea command: keys and redraws never wait for it.
 type SessionChooser struct {
 	host   SessionHost
 	all    []mux.SessionInfo
@@ -38,6 +39,14 @@ type SessionChooser struct {
 	rows int
 	cols int
 	now  func() time.Time
+	// loading: a listing is in flight; loaded: one arrived; stale: the
+	// last one failed, and the list shown is older; again: a change was
+	// made while one was in flight.
+	loading, loaded, stale, again bool
+	// busy names the rename or kill in flight ("": none).
+	busy string
+	// selectNext is the session to highlight once the next listing comes.
+	selectNext string
 	// Switch is the session to switch to once Done ("": none); WantNew:
 	// n was pressed, the new-session dialog is due.
 	Switch  string
@@ -45,33 +54,92 @@ type SessionChooser struct {
 	Done    bool
 }
 
-// NewSessionChooser starts on the current session.
-func NewSessionChooser(h SessionHost, rows, cols int) *SessionChooser {
-	c := &SessionChooser{host: h, rows: rows, cols: cols, now: time.Now}
-	c.reload()
-	for i, s := range c.all {
-		if s.Current {
-			c.cursor = i
-		}
-	}
-	return c
+// sessionsMsg is a listing of the sessions.
+type sessionsMsg struct {
+	list []mux.SessionInfo
+	err  error
 }
 
-// reload reads the sessions again, the highlight staying on the same one.
-func (c *SessionChooser) reload() {
-	cur, had := c.Selected()
-	all, err := c.host.Sessions()
-	if err != nil {
-		c.msg = "sessions: " + err.Error()
-		return
+// sessionOpMsg is the end of a rename or kill: err, prefixed with what,
+// is shown; selectName is highlighted after the listing it is followed by.
+type sessionOpMsg struct {
+	what       string
+	err        error
+	selectName string
+}
+
+// NewSessionChooser starts empty; the command Load returns lists the
+// sessions, the current one highlighted.
+func NewSessionChooser(h SessionHost, rows, cols int) *SessionChooser {
+	return &SessionChooser{host: h, rows: rows, cols: cols, now: time.Now}
+}
+
+// Load lists the sessions in the background. With a listing in flight it
+// returns nil, and another is started when that one comes: it may have
+// been read before a change this one is for.
+func (c *SessionChooser) Load() tea.Cmd {
+	if c.loading {
+		c.again = true
+		return nil
 	}
-	c.all = all
-	if had {
-		for i, s := range c.Visible() {
-			if s.Name == cur.Name {
-				c.cursor = i
-			}
+	c.loading, c.again = true, false
+	h := c.host
+	return func() tea.Msg {
+		all, err := h.Sessions()
+		return sessionsMsg{all, err}
+	}
+}
+
+// Handle applies a listing or the end of a rename or kill, and returns
+// what to run next.
+func (c *SessionChooser) Handle(msg tea.Msg) tea.Cmd {
+	switch m := msg.(type) {
+	case sessionsMsg:
+		c.loading = false
+		if m.err != nil {
+			c.stale = true
+			c.msg = "sessions: " + m.err.Error()
+		} else {
+			c.apply(m.list)
 		}
+		if c.again {
+			return c.Load()
+		}
+	case sessionOpMsg:
+		c.busy = ""
+		if m.err != nil {
+			c.msg = m.what + ": " + m.err.Error()
+		}
+		if m.selectName != "" {
+			c.filter = ""
+			c.selectNext = m.selectName
+		}
+		return c.Load()
+	}
+	return nil
+}
+
+// apply takes a listing, the highlight staying on the same session: the
+// current one on the first, a renamed one under its new name once the
+// listing has it.
+func (c *SessionChooser) apply(all []mux.SessionInfo) {
+	cur, had := c.Selected()
+	c.all, c.stale = all, false
+	want := ""
+	if had {
+		want = cur.Name
+	}
+	for _, s := range all {
+		switch {
+		case c.selectNext != "" && s.Name == c.selectNext:
+			want, c.selectNext = s.Name, ""
+		case !c.loaded && s.Current && c.selectNext == "":
+			want = s.Name
+		}
+	}
+	c.loaded = true
+	if want != "" {
+		c.selectName(want)
 	}
 	c.clampCursor()
 }
@@ -106,8 +174,9 @@ func (c *SessionChooser) Selected() (mux.SessionInfo, bool) {
 	return v[c.cursor], true
 }
 
-// Key handles one key, by its bubbletea name.
-func (c *SessionChooser) Key(k string) {
+// Key handles one key, by its bubbletea name, and returns the command it
+// starts (a rename or a kill), if any.
+func (c *SessionChooser) Key(k string) tea.Cmd {
 	c.msg = ""
 	switch c.mode {
 	case modeFilter:
@@ -128,17 +197,19 @@ func (c *SessionChooser) Key(k string) {
 			}
 		}
 		c.clampCursor()
-		return
+		return nil
 	case modeRename:
+		var cmd tea.Cmd
 		switch k {
 		case "enter":
 			if s, ok := c.Selected(); ok && c.input != "" && c.input != s.Name {
-				if err := c.host.RenameSession(s.Name, c.input); err != nil {
-					c.msg = "rename: " + err.Error()
-				} else {
-					c.filter = ""
-					c.reload()
-					c.selectName(c.input)
+				old, new, h := s.Name, c.input, c.host
+				c.busy = "renaming " + old + "…"
+				cmd = func() tea.Msg {
+					if err := h.RenameSession(old, new); err != nil {
+						return sessionOpMsg{what: "rename", err: err}
+					}
+					return sessionOpMsg{what: "rename", selectName: new}
 				}
 			}
 			c.mode = modeList
@@ -153,16 +224,15 @@ func (c *SessionChooser) Key(k string) {
 				c.input += k
 			}
 		}
-		return
+		return cmd
 	case modeConfirmKill:
-		if s, ok := c.Selected(); ok && (k == "y" || k == "Y") {
-			if err := c.host.KillSession(s.Name); err != nil {
-				c.msg = "kill: " + err.Error()
-			}
-			c.reload()
-		}
 		c.mode = modeList
-		return
+		if s, ok := c.Selected(); ok && (k == "y" || k == "Y") {
+			name, h := s.Name, c.host
+			c.busy = "killing " + name + "…"
+			return func() tea.Msg { return sessionOpMsg{what: "kill", err: h.KillSession(name)} }
+		}
+		return nil
 	}
 	switch k {
 	case "up", "k", "down", "j", "home", "g", "end", "G":
@@ -171,7 +241,7 @@ func (c *SessionChooser) Key(k string) {
 		if s, ok := c.Selected(); ok && !s.Current {
 			if s.Elsewhere {
 				c.msg = fmt.Sprintf("session %s is attached elsewhere", s.Name)
-				return
+				return nil
 			}
 			c.Switch = s.Name
 		}
@@ -182,26 +252,25 @@ func (c *SessionChooser) Key(k string) {
 		c.mode = modeFilter
 	case "n":
 		c.WantNew = true
-	case ",":
-		if s, ok := c.Selected(); ok {
-			if s.Elsewhere {
-				c.msg = fmt.Sprintf("session %s is attached elsewhere: rename it there", s.Name)
-				return
-			}
+	case ",", "x":
+		s, ok := c.Selected()
+		switch {
+		case !ok:
+		case c.busy != "":
+			c.msg = "wait: " + c.busy
+		case k == "," && s.Elsewhere:
+			c.msg = fmt.Sprintf("session %s is attached elsewhere: rename it there", s.Name)
+		case k == ",":
 			c.mode, c.input = modeRename, s.Name
-		}
-	case "x":
-		if s, ok := c.Selected(); ok {
-			switch {
-			case s.Current:
-				c.msg = "this is the session attached here: it cannot be killed from itself"
-			case s.Elsewhere:
-				c.msg = fmt.Sprintf("session %s is attached elsewhere: detach it there first", s.Name)
-			default:
-				c.mode = modeConfirmKill
-			}
+		case s.Current:
+			c.msg = "this is the session attached here: it cannot be killed from itself"
+		case s.Elsewhere:
+			c.msg = fmt.Sprintf("session %s is attached elsewhere: detach it there first", s.Name)
+		default:
+			c.mode = modeConfirmKill
 		}
 	}
+	return nil
 }
 
 func (c *SessionChooser) selectName(name string) {
@@ -301,11 +370,18 @@ func (c *SessionChooser) View() string {
 		status = fmt.Sprintf("kill session %s (terminates its %d windows' Runs)? (y/N)", s.Name, s.Windows)
 	case c.msg != "":
 		status = c.msg
+	case c.busy != "":
+		status = c.busy
+	case !c.loaded:
+		status = "loading sessions…"
 	default:
 		status = "↑↓/jk move  enter switch  / filter  n new  , rename  x kill  esc close"
 		if c.filter != "" {
 			status = "[" + c.filter + "] " + status
 		}
+	}
+	if c.stale && c.mode == modeList && c.msg == "" {
+		status = "(list out of date) " + status
 	}
 	status = fit(status, c.cols)
 	switch {
@@ -315,6 +391,7 @@ func (c *SessionChooser) View() string {
 		status = palette.warning.Render(status)
 	case c.msg != "":
 		status = palette.err.Render(status)
+	case c.busy != "" || !c.loaded || c.stale:
 	default:
 		status = keyHints(status)
 	}
@@ -334,9 +411,14 @@ type sessionProgram struct {
 	ticks int
 }
 
-func (p *sessionProgram) Init() tea.Cmd { return tick() }
+func (p *sessionProgram) Init() tea.Cmd { return tea.Batch(tick(), p.c.Load()) }
 
 func (p *sessionProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case sessionsMsg, sessionOpMsg:
+		// Under the dialog too: the list is current when it closes.
+		return p, p.c.Handle(msg)
+	}
 	if p.d != nil {
 		if _, ok := msg.(tickMsg); ok {
 			return p, tick()
@@ -353,36 +435,36 @@ func (p *sessionProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Cancelled: back to the list.
 			p.d = nil
-			p.c.reload()
-			return p, nil
+			return p, p.c.Load()
 		}
 		return p, cmd
 	}
+	var cmd tea.Cmd
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		k := m.String()
 		if m.Type == tea.KeySpace {
 			k = " "
 		}
-		p.c.Key(k)
+		cmd = p.c.Key(k)
 		if p.c.WantNew {
 			p.c.WantNew = false
 			p.d = p.newDialog(p.c.rows, p.c.cols)
-			return p, p.d.Init()
+			return p, tea.Batch(cmd, p.d.Init())
 		}
 	case tea.WindowSizeMsg:
 		p.c.rows, p.c.cols = m.Height, m.Width
 	case tickMsg:
 		// The preview every tick; the list, which asks lux, every 2 s.
 		if p.ticks++; p.ticks%4 == 0 {
-			p.c.reload()
+			return p, tea.Batch(tick(), p.c.Load())
 		}
 		return p, tick()
 	}
 	if p.c.Done {
 		return p, tea.Quit
 	}
-	return p, nil
+	return p, cmd
 }
 
 func (p *sessionProgram) View() string {
