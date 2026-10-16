@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,8 @@ func (f *fakeSessionHost) RenameSession(old, new string) error {
 			f.list[i].Name = new
 		}
 	}
+	// As Mux.Sessions: sorted by name.
+	sort.Slice(f.list, func(i, j int) bool { return f.list[i].Name < f.list[j].Name })
 	return nil
 }
 
@@ -216,6 +219,76 @@ func TestSessionChooserRenameAndKill(t *testing.T) {
 	skeys(c, "k", "x", "y")
 	if !strings.Contains(plain(c.View()), "kill: terminate failed") {
 		t.Fatalf("host refusal:\n%s", plain(c.View()))
+	}
+}
+
+// TestSessionChooserRenameMovesHighlight: after a rename to a name that
+// sorts to another row, the renamed session stays highlighted.
+func TestSessionChooserRenameMovesHighlight(t *testing.T) {
+	c := loadedChooser(sessionHost(), 24, 80)
+	skeys(c, "k", ",", "backspace", "backspace", "backspace", "z", "z", "enter")
+	if s, _ := c.Selected(); s.Name != "zz" {
+		t.Fatalf("highlight on %q after renaming api to zz, list %+v", s.Name, c.all)
+	}
+}
+
+// TestSessionChooserRenameDuringListing: a rename that ends while a
+// listing read before it is in flight starts no second listing then; once
+// that listing comes, the chooser lists again and highlights the new name.
+func TestSessionChooserRenameDuringListing(t *testing.T) {
+	c := loadedChooser(sessionHost(), 24, 80)
+	early := c.Load()()
+	skeys(c, "k", ",", "backspace", "backspace", "backspace", "z", "e", "d")
+	if got := c.Handle(c.Key("enter")()); got != nil {
+		t.Fatal("a second listing started while one is in flight")
+	}
+	settle(c, c.Handle(early))
+	if s, _ := c.Selected(); s.Name != "zed" {
+		t.Fatalf("highlight on %q after the rename, list %+v", s.Name, c.all)
+	}
+}
+
+// errHost is a session host whose listing fails while err is set.
+type errHost struct {
+	*fakeSessionHost
+	err error
+}
+
+func (h *errHost) Sessions() ([]mux.SessionInfo, error) {
+	if h.err != nil {
+		return nil, h.err
+	}
+	return h.fakeSessionHost.Sessions()
+}
+
+// TestSessionChooserStaleList: a failed refresh keeps the last list,
+// marked out of date.
+func TestSessionChooserStaleList(t *testing.T) {
+	h := &errHost{fakeSessionHost: sessionHost()}
+	c := loadedChooser(h, 24, 80)
+	h.err = errors.New("lux down")
+	settle(c, c.Load())
+	c.msg = ""
+	if out := plain(c.View()); !strings.Contains(out, "(list out of date) ") || !strings.Contains(out, "api") {
+		t.Fatalf("view:\n%s", out)
+	}
+}
+
+// TestSessionChooserBusyRefuses: x while a kill is in flight starts no
+// second operation and says what is running.
+func TestSessionChooserBusyRefuses(t *testing.T) {
+	c := loadedChooser(sessionHost(), 24, 80)
+	skeys(c, "k", "x")
+	if c.Key("y") == nil {
+		t.Fatal("no kill command")
+	}
+	c.Key("j")
+	c.Key("j")
+	if c.Key("x") != nil || c.mode == modeConfirmKill || !strings.Contains(plain(c.View()), "wait: killing api…") {
+		t.Fatalf("x during a kill:\n%s", plain(c.View()))
+	}
+	if c.Key(",") != nil || c.mode == modeRename {
+		t.Fatalf(", during a kill:\n%s", plain(c.View()))
 	}
 }
 
