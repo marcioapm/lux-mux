@@ -410,9 +410,12 @@ func (m *Mux) attachOnce(ctx context.Context, lux *luxapi.Client, w *Window, run
 			return end, why, true
 		}
 		if d.Restored {
-			if quiet {
+			switch {
+			case quiet:
 				quiet = false
 				m.restored(w)
+			case raw:
+				m.rawRestored(w)
 			}
 			return 0, "", false
 		}
@@ -533,6 +536,17 @@ func (m *Mux) restored(w *Window) {
 	defer m.mu.Unlock()
 	if !w.closed && m.activeLocked() == w {
 		m.repaintLocked()
+	}
+}
+
+// rawRestored draws the bottom-row overlay again once a snapshot written
+// straight to the terminal is in: the snapshot cleared whatever notice
+// or prompt was drawn before or during it.
+func (m *Mux) rawRestored(w *Window) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !w.closed && m.showingLocked(w) && m.shown == w && m.overlayLineLocked(w) != "" {
+		m.drawOverlayLocked()
 	}
 }
 

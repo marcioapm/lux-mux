@@ -107,6 +107,35 @@ func TestExternalLeftoverNotReadopted(t *testing.T) {
 	}
 }
 
+// TestLeftoverNoticeOutlivesRestore: the attach's cannot-terminate notice
+// for a leftover, shown before the active window's snapshot is written to
+// the terminal, is drawn again once the snapshot is in.
+func TestLeftoverNoticeOutlivesRestore(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	submitOn(t, x.b, x.cfg.Profiles["remote"], "remote", "far")
+	x.waitFor("adopted", func() bool { return x.nwindows() == 2 })
+	x.liveOnB(1)
+	x.b.FailTerminates(http.StatusServiceUnavailable)
+	x.m.mu.Lock()
+	w := x.m.windows[1]
+	x.m.mu.Unlock()
+	x.m.markDead(w, "ended for the test")
+	x.m.relaunchOrResume(w)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on"))
+	x.liveOnB(1)
+	x.detach()
+
+	// Window 0's attach is held past the leftover's terminate tries
+	// (Backoff 5ms up to MaxBackoff 50ms: about 75ms), so the notice is
+	// up before its snapshot reaches the terminal.
+	x.lux.AttachHook = func(string) { time.Sleep(500 * time.Millisecond) }
+	x.start(nil)
+	x.live(0)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on"))
+	x.detach()
+}
+
 // TestAdoptRunSkipsRecordedSpare: adoptRun makes no window of a Run the
 // session records as a leftover, and does make one of a Run it does not.
 func TestAdoptRunSkipsRecordedSpare(t *testing.T) {
