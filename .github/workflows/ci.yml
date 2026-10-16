@@ -24,3 +24,12 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+  mux-norace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: mux without race instrumentation
+        run: go test -count=2 -timeout 300s ./internal/mux

@@ -52,4 +52,13 @@ image = "` + DefaultImage + `"
 # labels = { team = "example" }
 # secrets = ["NPM_TOKEN"]   # environment variables in the Run
 # secrets_from = "~/.config/luxmux/app.env"   # values: this .env file, else the environment
+
+# Several repositories, cloned side by side; the shell starts in the
+# first. name defaults from the URL, path to /workspace/repos/<name>; a
+# repository's git_credential overrides the profile's. Not together with
+# repository/branch/ref.
+# [profiles.stack]
+# image = "ghcr.io/example/dev:latest"
+# git_credential = "GITHUB_TOKEN"
+# repositories = [{ url = "https://github.com/example/api.git", branch = "main" }, { url = "https://github.com/example/web.git", name = "web", path = "/workspace/web" }]
 `

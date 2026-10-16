@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -13,24 +14,34 @@ import (
 
 // DialogValues are what the new-window dialog edits, as typed.
 type DialogValues struct {
-	Base       string // the profile it started from
-	Image      string
-	Pool       string
-	Size       string // a shaped pool's size
-	CPUs       string // unshaped pools
-	Memory     string
-	Disk       string
-	Repository string
-	Branch     string
-	WarmSpare  bool
-	SaveAs     string
+	Base   string // the profile it started from
+	Image  string
+	Pool   string
+	Size   string // a shaped pool's size
+	CPUs   string // unshaped pools
+	Memory string
+	Disk   string
+	// Repos are the repository rows, in order; a row without a URL is
+	// none.
+	Repos     []RepoRow
+	WarmSpare bool
+	SaveAs    string
 }
 
-// ValuesFrom fills the dialog from a profile. The warm spare box starts
+// RepoRow is one repository row of the dialog.
+type RepoRow struct{ URL, Branch string }
+
+// ValuesFrom fills the dialog from a profile: a row per repository, and
+// one empty row for a profile without any. The warm spare box starts
 // off whatever the profile says: a spare is billed while it waits.
 func ValuesFrom(name string, p config.Profile) DialogValues {
-	v := DialogValues{Base: name, Image: p.Image, Pool: p.Pool, Size: p.Size, Memory: p.Memory, Disk: p.Disk,
-		Repository: p.Repository, Branch: p.GitRef()}
+	v := DialogValues{Base: name, Image: p.Image, Pool: p.Pool, Size: p.Size, Memory: p.Memory, Disk: p.Disk}
+	for _, r := range p.RepositoryList() {
+		v.Repos = append(v.Repos, RepoRow{URL: r.URL, Branch: r.RepoRef()})
+	}
+	if len(v.Repos) == 0 {
+		v.Repos = []RepoRow{{}}
+	}
 	if p.CPUs != 0 {
 		v.CPUs = strconv.FormatFloat(p.CPUs, 'f', -1, 64)
 	}
@@ -88,6 +99,9 @@ func FieldErrors(err error) map[string][]string {
 // fieldOf is the field a profile check's message is about, by the name it
 // starts with.
 func fieldOf(msg string) string {
+	if strings.HasPrefix(msg, "repositories") {
+		return FieldRepository
+	}
 	for _, f := range []string{FieldImage, FieldSize, FieldCPUs, FieldMemory, FieldDisk, FieldRepository, FieldBranch} {
 		if strings.HasPrefix(msg, f) {
 			return f
@@ -137,15 +151,19 @@ func (v DialogValues) apply(base config.Profile, shaped bool) (config.Profile, [
 		p.Memory = strings.TrimSpace(v.Memory)
 		p.Disk = strings.TrimSpace(v.Disk)
 	}
-	repo := strings.TrimSpace(v.Repository)
-	if repo != p.Repository {
-		// Another repository: the base's credential was for its own.
-		p.GitCredential = ""
+	p.Repository, p.Branch, p.Ref, p.Repositories = "", "", "", nil
+	repos, rowErrs := v.repositories(base)
+	errs = append(errs, rowErrs...)
+	switch {
+	case len(repos) == 1 && repos[0].Name == "" && repos[0].Path == "" && repos[0].GitCredential == "":
+		p.Repository, p.Branch = repos[0].URL, repos[0].Branch
+	case len(repos) > 0:
+		p.Repositories = repos
 	}
-	p.Repository = repo
-	p.Branch, p.Ref = strings.TrimSpace(v.Branch), ""
-	if p.Repository == "" {
-		p.Branch, p.GitCredential = "", ""
+	if !sameURLs(repos, base.RepositoryList()) {
+		// The base's credential was for its own repositories: those kept
+		// carry it on their row (repositories), new ones get none.
+		p.GitCredential = ""
 	}
 	p.WarmSpare = v.WarmSpare
 	if v.SaveAs != "" && !config.NameRe.MatchString(v.SaveAs) {
@@ -161,6 +179,45 @@ func (v DialogValues) apply(base config.Profile, shaped bool) (config.Profile, [
 		}
 	}
 	return p, errs
+}
+
+// repositories are the rows with a URL, in order, as profile entries. A
+// row whose URL is one of base's keeps that entry's name, path and
+// credential (the profile's, made explicit); its branch is the row's.
+func (v DialogValues) repositories(base config.Profile) ([]config.Repository, []error) {
+	var out []config.Repository
+	var errs []error
+	baseRepos := base.RepositoryList()
+	for i, row := range v.Repos {
+		url, branch := strings.TrimSpace(row.URL), strings.TrimSpace(row.Branch)
+		if url == "" {
+			if branch != "" {
+				errs = append(errs, &FieldError{FieldRepository, fmt.Errorf("repository %d: a branch needs a URL", i+1)})
+			}
+			continue
+		}
+		r := config.Repository{URL: url}
+		if j := slices.IndexFunc(baseRepos, func(b config.Repository) bool { return b.URL == url }); j >= 0 {
+			r = baseRepos[j]
+			r.GitCredential = base.Credential(r)
+		}
+		r.Branch, r.Ref = branch, ""
+		out = append(out, r)
+	}
+	if sameURLs(out, baseRepos) {
+		// Unchanged repositories keep the profile's own credential form.
+		for i := range out {
+			if out[i].GitCredential == base.GitCredential {
+				out[i].GitCredential = ""
+			}
+		}
+	}
+	return out, errs
+}
+
+// sameURLs reports whether a and b are the same repositories, in order.
+func sameURLs(a, b []config.Repository) bool {
+	return slices.EqualFunc(a, b, func(x, y config.Repository) bool { return x.URL == y.URL })
 }
 
 // Shaped reports whether the pool named name has sizes, and lists them.

@@ -47,12 +47,42 @@ through profile `secrets` and allow the required provider hosts in `egress`.
 | Command | |
 | --- | --- |
 | `luxmux` | attach the default session (`main`), or create it |
-| `luxmux new [-s NAME]` | create a session and attach it |
+| `luxmux new [-s NAME] [-p PROFILE] [overrides]` | create a session and attach it; `-p` is its default profile |
+| `luxmux new-window [-t NAME] [-n WINDOW] [-p PROFILE] [overrides]` | add a window to a session, attached or not |
 | `luxmux attach [-t NAME]` | attach a session |
 | `luxmux ls` | list sessions: windows, running Runs, spares |
 | `luxmux kill-session -t NAME [-y]` | terminate the session's Runs (after asking) and forget it |
 | `luxmux spares [--rm]` | list waiting warm spares; `--rm` terminates them |
 | `luxmux config init [--force]` | write the example configuration |
+
+`new` and `new-window` take a profile (`-p`) and overrides of it for that
+window:
+
+| Override | |
+| --- | --- |
+| `--repo URL[#BRANCH]` | a repository, repeatable; replaces the profile's repositories |
+| `--branch B` \| `--ref R` | the branch or ref of the window's only repository (the profile's or one `--repo`) |
+| `--image I`, `--pool P` | |
+| `--size S` \| `--cpus N --memory M --disk D` | either replaces the other |
+| `--secret NAME` | one more secret, repeatable; its value comes from where the profile's do |
+| `--workdir W` | the shell's working directory |
+
+```sh
+luxmux new -s api -p dev --repo https://github.com/example/api.git#feature-x
+luxmux new-window -t api -n web --repo https://github.com/example/web.git
+```
+
+The window is checked with lux's dry run first: if lux refuses it, its
+answer is printed and luxmux exits non-zero. One lux accepts but has no
+capacity for right now is made anyway, after a warning, and waits for it.
+
+`new -p` makes that profile the session's **default profile**, which
+`C-b c` uses (without `-p`, `C-b c` uses `default_profile`). `new-window`
+adds to session `main` unless given `-t`, from the session's default
+profile unless given `-p`. If a luxmux has the session attached, it adopts
+the new window from lux's event feed and shows a notice; the window you
+are looking at stays. If none has it, `new-window` records the window in
+the session's file, and the next attach shows it.
 
 Detaching leaves every Run running. A shell's `exit` ends its Run (it is
 terminated) and closes its window; the last window's exit ends the session.
@@ -63,7 +93,7 @@ The prefix is `C-b` (configurable). Press it twice to send it to the shell.
 
 | After the prefix | |
 | --- | --- |
-| `c` | new window from the default profile, no questions |
+| `c` | new window from the session's default profile, no questions |
 | `C` | new window through the dialog |
 | `n` / `p` | next / previous window |
 | `0`–`9` | select window |
@@ -89,7 +119,7 @@ them off in your terminal, and showing the window again turns its own
 back on.
 
 **The chooser** (`w`) lists windows with their state, image, size,
-repository@branch and age; arrows or `j`/`k` move, Enter switches, `/`
+repository@branch (the first, and `+N` for N more) and age; arrows or `j`/`k` move, Enter switches, `/`
 filters as you type, `,` renames, `x` kills (with confirmation), Esc or `q`
 closes. The lower part previews the highlighted window's screen.
 
@@ -136,9 +166,28 @@ egress = ["github.com", "registry.npmjs.org"]   # lux denies egress by default
 warm_spare = false
 ```
 
+For several repositories in one window, give a list instead:
+
+```toml
+[profiles.stack]
+image = "ghcr.io/example/dev:latest"
+git_credential = "GITHUB_TOKEN"
+repositories = [
+  { url = "https://github.com/example/api.git", branch = "main" },
+  { url = "https://github.com/example/web.git", ref = "v2", name = "web", path = "/workspace/web" },
+]
+```
+
+Each entry takes `url`, `branch` or `ref`, `name` (default: from the URL)
+and `path` (default: `/workspace/repos/<name>`), and `git_credential` when
+it is not the profile's. Names must differ, and each checkout needs a
+directory of its own: two paths that are equal, or one inside the other,
+are a configuration error. `repository`, `branch` and `ref` are the
+one-repository shorthand: a profile has one form or the other.
+
 Each window's Run is a generic tty workload running the profile's shell,
-with a state volume at `/workspace`; the repository is cloned to
-`/workspace/repos/<name>` and is the shell's working directory. For
+with a state volume at `/workspace`; the repositories are cloned there, and
+the first one's checkout is the shell's working directory. For
 luxmux's default image (`ghcr.io/marcioapm/luxmux`, any tag), the Run also
 has a state volume at `/home/agent`, the image's `agent` HOME, so agent
 configuration and sessions survive moves too. Other images get it only with
@@ -151,8 +200,11 @@ with the submit and never written anywhere by luxmux.
 
 **The dialog** (`C`) starts from a profile and lets you edit the image,
 pool, size (the pool's sizes, read from lux; cpus/memory/disk on an
-unshaped pool), repository and branch, offers the warm spare (off by
-default), and can save the result as a new profile. It is checked with
+unshaped pool), the repositories (a URL and branch per row; `+ add
+repository` adds a row, Ctrl-X removes the one you are on), offers the warm
+spare (off by default) and to make the window's profile the session's
+default for `C-b c` (off by default), and can save the result as a new
+profile. It is checked with
 lux's dry run first, and anything that would keep it from starting now is
 shown before you create it.
 
@@ -249,9 +301,13 @@ Run is also labelled `luxmux-session=<session>` and
 `luxmux-profile=<profile>` (and `app=luxmux`), so when that file is gone —
 another machine, a cleaned home directory — `luxmux attach -t NAME`
 rebuilds the session from lux: its non-terminated Runs, ordered by
-creation. That rebuild is lossy: window names become their profile names,
-and of several spares of one spec the newest is taken to be the waiting
-one.
+creation, each with its Run's spec (all its repositories included). A
+window's size, cpus, memory and disk come from what it asked
+(`luxmux-resources`, e.g. `cpus=4`, or lux's `sizing.requested` on a
+shaped pool), never from the defaults lux fills in. That
+rebuild is lossy: window names become their profile names (or the name
+`new-window -n` gave), the session's default profile is forgotten, and of
+several spares of one spec the newest is taken to be the waiting one.
 
 One luxmux process attaches a session at a time: a second `luxmux attach`
 of an attached session fails, naming the process that has it.

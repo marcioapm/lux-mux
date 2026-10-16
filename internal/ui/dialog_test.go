@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -138,6 +139,8 @@ func press(d *Dialog, ks ...string) {
 			msg = tea.KeyMsg{Type: tea.KeyCtrlS}
 		case "ctrl+u":
 			msg = tea.KeyMsg{Type: tea.KeyCtrlU}
+		case "ctrl+x":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlX}
 		default:
 			for _, r := range k {
 				_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -164,11 +167,107 @@ func to(t *testing.T, d *Dialog, s stop) {
 
 func plain(s string) string { return ansi.Strip(s) }
 
+// TestDialogRepositoryRows: "+ add repository" adds a row and goes to it,
+// Ctrl-X removes the focused one, the last row is emptied rather than
+// removed (and means none), and the rows are what is submitted, in order.
+func TestDialogRepositoryRows(t *testing.T) {
+	h := newHost(t)
+	d := open(t, h, 40, 100)
+	to(t, d, stAddRepo)
+	press(d, "enter")
+	if d.repos != 2 || d.focus != repoURL(1) {
+		t.Fatalf("add: %d rows, focus %v", d.repos, d.focus)
+	}
+	press(d, "https://example.com/web.git", "tab", "dev")
+	to(t, d, stAddRepo)
+	press(d, "space", "https://example.com/third.git")
+	want := []RepoRow{{"https://example.com/app.git", "main"}, {"https://example.com/web.git", "dev"}, {"https://example.com/third.git", ""}}
+	if got := d.values().Repos; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows %+v", got)
+	}
+	out := plain(d.View())
+	for _, s := range []string{"Repository 2", "Repository 3", "https://example.com/web.git", "+ add repository"} {
+		if !strings.Contains(out, s) {
+			t.Fatalf("view lacks %q:\n%s", s, out)
+		}
+	}
+	// Ctrl-X on the second row's branch removes that row.
+	to(t, d, repoURL(1)+1)
+	press(d, "ctrl+x")
+	want = []RepoRow{want[0], want[2]}
+	if got := d.values().Repos; !reflect.DeepEqual(got, want) || d.focus != repoURL(1) {
+		t.Fatalf("after ctrl-x: %+v, focus %v", got, d.focus)
+	}
+	// An edited row survives a profile change.
+	to(t, d, stProfile)
+	press(d, "enter", "o", "p", "s", "enter")
+	if got := d.values().Repos; !reflect.DeepEqual(got, want) {
+		t.Fatalf("profile change replaced edited rows: %+v", got)
+	}
+	press(d, "ctrl+s")
+	if d.Request == nil {
+		t.Fatalf("not created: %s", d.status)
+	}
+	sp, err := config.RunSpec(d.Request.Profile, config.Target{}, nil)
+	if err != nil || len(sp.Git.Repositories) != 2 || sp.Git.Repositories[0].Name != "app" || sp.Git.Repositories[0].Ref != "main" ||
+		sp.Git.Repositories[1].Name != "third" || sp.Workload.Workdir != "/workspace/repos/app" {
+		t.Fatalf("spec %+v %v", sp.Git, err)
+	}
+
+	// Removing every row leaves one empty row: no repository.
+	d = open(t, newHost(t), 40, 100)
+	to(t, d, stAddRepo)
+	press(d, "enter", "ctrl+x")
+	to(t, d, stRepo)
+	press(d, "ctrl+x", "ctrl+x")
+	if d.repos != 1 || !reflect.DeepEqual(d.values().Repos, []RepoRow{{}}) {
+		t.Fatalf("rows %d %+v", d.repos, d.values().Repos)
+	}
+	press(d, "ctrl+s")
+	if d.Request == nil || len(d.Request.Profile.RepositoryList()) != 0 || d.Request.Profile.GitCredential != "" {
+		t.Fatalf("request %+v", d.Request)
+	}
+	// Ctrl-X off the rows does nothing.
+	d = open(t, newHost(t), 40, 100)
+	to(t, d, stImage)
+	press(d, "ctrl+x")
+	if d.repos != 1 || d.values().Repos[0].URL == "" {
+		t.Fatal("ctrl-x outside the rows changed them")
+	}
+}
+
+// TestDialogSessionDefaultCheckbox: off by default; space toggles it and
+// the request carries it.
+func TestDialogSessionDefaultCheckbox(t *testing.T) {
+	d := open(t, newHost(t), 40, 100)
+	if d.useAsDefault || !strings.Contains(plain(d.View()), "[ ]  use as this session's default profile") {
+		t.Fatalf("checked at first:\n%s", plain(d.View()))
+	}
+	to(t, d, stDefault)
+	press(d, "space")
+	if !d.useAsDefault || !strings.Contains(plain(d.View()), "[x]  use as this session's default profile") {
+		t.Fatal("space did not check it")
+	}
+	press(d, "space")
+	if d.useAsDefault {
+		t.Fatal("space did not uncheck it")
+	}
+	press(d, "space", "ctrl+s")
+	if d.Request == nil || !d.Request.UseAsDefault || d.Request.ProfileName != "dev" {
+		t.Fatalf("request %+v", d.Request)
+	}
+	d = open(t, newHost(t), 40, 100)
+	press(d, "ctrl+s")
+	if d.Request == nil || d.Request.UseAsDefault {
+		t.Fatalf("unchecked request %+v", d.Request)
+	}
+}
+
 func TestDialogStartsFromDefaultProfile(t *testing.T) {
 	h := newHost(t)
 	d := open(t, h, 30, 100)
 	v := d.values()
-	if v.Base != "dev" || v.Image != "ubuntu:24.04" || v.Pool != "m" || v.Size != "m-2" || v.Repository != "https://example.com/app.git" || v.Branch != "main" || v.WarmSpare {
+	if v.Base != "dev" || v.Image != "ubuntu:24.04" || v.Pool != "m" || v.Size != "m-2" || !reflect.DeepEqual(v.Repos, []RepoRow{{"https://example.com/app.git", "main"}}) || v.WarmSpare {
 		t.Fatalf("values %+v", v)
 	}
 	out := plain(d.View())
@@ -183,7 +282,7 @@ func TestDialogStartsFromDefaultProfile(t *testing.T) {
 
 func TestDialogNavigationWraps(t *testing.T) {
 	d := open(t, newHost(t), 30, 100)
-	want := []stop{stImage, stPool, stSize, stRepo, stBranch, stSpare, stSaveAs, stCreate, stCancel, stProfile}
+	want := []stop{stImage, stPool, stSize, stRepo, stBranch, stAddRepo, stSpare, stDefault, stSaveAs, stCreate, stCancel, stProfile}
 	for i, s := range want {
 		press(d, "tab")
 		if d.focus != s {
@@ -253,10 +352,10 @@ func TestDialogProfileChangeRefillsUneditedFields(t *testing.T) {
 	if v.Base != "ops" {
 		t.Fatalf("profile %q", v.Base)
 	}
-	if v.Repository != "https://example.com/mine.git" {
-		t.Fatalf("edited repository replaced: %q", v.Repository)
+	if v.Repos[0].URL != "https://example.com/mine.git" {
+		t.Fatalf("edited repository replaced: %q", v.Repos[0].URL)
 	}
-	if v.Image != "alpine:3" || v.Pool != "plain" || v.CPUs != "2" || v.Memory != "4Gi" || v.Branch != "" {
+	if v.Image != "alpine:3" || v.Pool != "plain" || v.CPUs != "2" || v.Memory != "4Gi" || v.Repos[0].Branch != "main" {
 		t.Fatalf("unedited fields not refilled: %+v", v)
 	}
 	if out := plain(d.View()); !strings.Contains(out, "OPS_KEY") || strings.Contains(out, "API_TOKEN") {
@@ -264,7 +363,7 @@ func TestDialogProfileChangeRefillsUneditedFields(t *testing.T) {
 	}
 	// Back to dev: the profile itself was not an edit.
 	press(d, "enter", "d", "e", "v", "enter")
-	if v := d.values(); v.Image != "ubuntu:24.04" || v.Pool != "m" || v.Repository != "https://example.com/mine.git" {
+	if v := d.values(); v.Image != "ubuntu:24.04" || v.Pool != "m" || v.Repos[0].URL != "https://example.com/mine.git" {
 		t.Fatalf("back to dev: %+v", v)
 	}
 }
@@ -372,7 +471,7 @@ func TestDialogRefusalKeepsValuesAndMarksField(t *testing.T) {
 	if !strings.Contains(out, "lux refuses it: image.ref: no such image (invalid_spec)") {
 		t.Fatalf("status:\n%s", out)
 	}
-	if v := d.values(); v.Branch != "feature" || v.Image != "ubuntu:24.04" {
+	if v := d.values(); v.Repos[0].Branch != "feature" || v.Image != "ubuntu:24.04" {
 		t.Fatalf("values lost: %+v", v)
 	}
 	// Fixed, it is checked again and created.
@@ -381,6 +480,97 @@ func TestDialogRefusalKeepsValuesAndMarksField(t *testing.T) {
 	press(d, "ctrl+u", "ubuntu:22.04", "ctrl+s")
 	if !d.Done || d.Request == nil || d.Request.Profile.Image != "ubuntu:22.04" || d.Request.Profile.Branch != "feature" {
 		t.Fatalf("request %+v", d.Request)
+	}
+}
+
+// hostWith is a dialog host on the configuration src.
+func hostWith(t *testing.T, src string) *fakeDialogHost {
+	t.Helper()
+	cfg, err := config.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fakeDialogHost{cfg: cfg, pools: testPools()}
+}
+
+// TestDialogRepositoryPathCollision: a row whose checkout would land in
+// another's directory is marked on the rows, with luxmux's message, and
+// nothing goes to the dry run.
+func TestDialogRepositoryPathCollision(t *testing.T) {
+	h := hostWith(t, `default_profile = "p"
+[profiles.p]
+image = "alpine"
+repositories = [{ url = "https://example.com/api.git", path = "/workspace/repos/web" }]
+`)
+	d := open(t, h, 40, 120)
+	to(t, d, stAddRepo)
+	press(d, "enter", "https://example.com/web.git", "ctrl+s")
+	if d.Done || len(h.validated) != 0 {
+		t.Fatal("colliding paths went to the dry run")
+	}
+	want := "repositories[1]: path /workspace/repos/web is also repositories[0]'s"
+	if !strings.Contains(d.errs[stRepo], want) {
+		t.Fatalf("errors %v", d.errs)
+	}
+	if out := boxText(d.View()); !strings.Contains(out, "✗ "+want) {
+		t.Fatalf("not shown on the rows:\n%s", plain(d.View()))
+	}
+}
+
+// boxText is the text inside the dialog's box, its lines joined by one
+// space: a wrapped message reads as one.
+func boxText(view string) string {
+	var parts []string
+	for _, l := range strings.Split(plain(view), "\n") {
+		if i, j := strings.Index(l, "│"), strings.LastIndex(l, "│"); i >= 0 && j > i {
+			if s := strings.TrimSpace(l[i+len("│") : j]); s != "" {
+				parts = append(parts, s)
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// TestDialogRowKeepsBaseEntry: a row whose URL is one of the base
+// profile's keeps that entry's name, path and credential; created
+// unchanged, the spec is the profile's.
+func TestDialogRowKeepsBaseEntry(t *testing.T) {
+	h := hostWith(t, `default_profile = "p"
+[profiles.p]
+image = "alpine"
+pool = "plain"
+git_credential = "GH"
+repositories = [
+  { url = "https://example.com/api.git", name = "server", path = "/workspace/api", git_credential = "API_KEY" },
+  { url = "https://example.com/web.git", path = "/workspace/web" },
+]
+`)
+	d := open(t, h, 40, 120)
+	press(d, "ctrl+s")
+	if d.Request == nil {
+		t.Fatalf("not created: %s %v", d.status, d.errs)
+	}
+	got, err := config.RunSpec(d.Request.Profile, config.Target{Session: "s", Profile: "p"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := config.RunSpec(h.cfg.Profiles["p"], config.Target{Session: "s", Profile: "p"}, nil)
+	if !reflect.DeepEqual(got.Git, want.Git) || got.Workload.Workdir != "/workspace/api" || !reflect.DeepEqual(got.Secrets, want.Secrets) {
+		t.Fatalf("git %+v workdir %q secrets %+v\nwant %+v", got.Git, got.Workload.Workdir, got.Secrets, want.Git)
+	}
+	if got.Git.Repositories[0].Name != "server" || got.Git.Repositories[0].Credential != "API_KEY" || got.Git.Repositories[1].Credential != "GH" {
+		t.Fatalf("entries %+v", got.Git.Repositories)
+	}
+	// A changed branch keeps the rest of the entry.
+	d = open(t, h, 40, 120)
+	to(t, d, stBranch)
+	press(d, "dev", "ctrl+s")
+	if d.Request == nil {
+		t.Fatalf("not created: %s", d.status)
+	}
+	got, _ = config.RunSpec(d.Request.Profile, config.Target{Session: "s", Profile: "p"}, nil)
+	if r := got.Git.Repositories[0]; r.Name != "server" || r.Path != "/workspace/api" || r.Credential != "API_KEY" || r.Ref != "dev" {
+		t.Fatalf("edited row %+v", r)
 	}
 }
 
@@ -470,7 +660,7 @@ func TestDialogSuggestions(t *testing.T) {
 	}
 	to(t, d, stRepo)
 	press(d, "ctrl+u", "https://example.com/r", "right")
-	if got := d.values().Repository; got != "https://example.com/recent.git" {
+	if got := d.values().Repos[0].URL; got != "https://example.com/recent.git" {
 		t.Fatalf("→ accepts the suggestion: %q", got)
 	}
 }

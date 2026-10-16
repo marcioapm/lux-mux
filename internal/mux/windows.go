@@ -20,6 +20,9 @@ type NewWindowRequest struct {
 	Profile     config.Profile
 	// SaveAs, when set, saves Profile under this name in the configuration.
 	SaveAs string
+	// UseAsDefault makes the window's profile (SaveAs, else ProfileName)
+	// the session's default.
+	UseAsDefault bool
 }
 
 // ChooseResult is what the chooser did. Its renames and kills happen
@@ -131,6 +134,7 @@ func (m *Mux) relaunch(w *Window) {
 		w.cancel = nil
 	}
 	delete(m.byRun, old)
+	m.considered[old] = true
 	m.dropClaimedLocked(old)
 	w.RunID = ""
 	w.phase = phaseStarting
@@ -323,6 +327,12 @@ func (m *Mux) openNewDialog() {
 		} else {
 			m.addProfile(req.SaveAs, req.Profile)
 		}
+	}
+	if req.UseAsDefault {
+		m.mu.Lock()
+		m.sess.DefaultProfile = name
+		m.saveLocked()
+		m.mu.Unlock()
 	}
 	m.newWindowFrom(name, req.Profile, "", false)
 }

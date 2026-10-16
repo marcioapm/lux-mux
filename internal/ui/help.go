@@ -14,7 +14,7 @@ import (
 
 // opWords says what each command does, for the help.
 var opWords = map[string]string{
-	config.OpNew:       "new window (default profile)",
+	config.OpNew:       "new window (the session's default profile)",
 	config.OpNewDialog: "new window (dialog)",
 	config.OpNext:      "next window",
 	config.OpPrev:      "previous window",

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // The test binary is luxmux itself when LUXMUX_E2E_MAIN is set: the
@@ -281,6 +283,211 @@ func (p *proc) restored() {
 	}
 	if tio.Lflag&unix.ICANON == 0 || tio.Lflag&unix.ECHO == 0 {
 		p.t.Fatalf("pty left in raw mode: lflag %#x", tio.Lflag)
+	}
+}
+
+// TestCLIProfilesAndExternalWindows: luxmux new with a profile and
+// overrides, C-b c on the session's default profile, new-window while
+// attached (adopted) and while detached (recorded), in a pty against a
+// fake luxd.
+func TestCLIProfilesAndExternalWindows(t *testing.T) {
+	lux, env := e2eEnv(t)
+	yes := true
+	lux.SetPools([]api.Pool{{Name: "m", IsDefault: &yes, Sizes: []api.PoolSize{
+		{Name: "m-1", CPUs: 1, Memory: 2 << 30, Disk: 10 << 30},
+		{Name: "m-4", CPUs: 4, Memory: 8 << 30, Disk: 40 << 30, Default: true},
+	}}})
+	env = append(env, "LUXMUX_E2E_EXTRA=v")
+	var cfgHome, stateHome string
+	for _, s := range env {
+		if strings.HasPrefix(s, "XDG_CONFIG_HOME=") {
+			cfgHome = strings.TrimPrefix(s, "XDG_CONFIG_HOME=")
+		}
+		if strings.HasPrefix(s, "XDG_STATE_HOME=") {
+			stateHome = strings.TrimPrefix(s, "XDG_STATE_HOME=")
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(cfgHome, "luxmux"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `default_profile="base"
+[profiles.base]
+image="alpine"
+[profiles.dev]
+image="debian"
+repositories=[{url="https://example.com/api.git",path="/workspace/api"},{url="https://example.com/web.git",path="/workspace/web"}]
+`
+	if err := os.WriteFile(filepath.Join(cfgHome, "luxmux", "config.toml"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, env, "new -s profiles -p dev --image ubuntu --repo https://example.com/x.git#feature --size m-1 --secret LUXMUX_E2E_EXTRA")
+	p.wait("prompt", has("$"))
+	sp := lux.Submits()[0]
+	wantRepos := []api.Repository{{Name: "x", URL: "https://example.com/x.git", Ref: "feature"}}
+	if sp.Labels[config.LabelProfile] != "dev" || sp.Image.Ref != "ubuntu" || sp.Git == nil || !reflect.DeepEqual(sp.Git.Repositories, wantRepos) ||
+		sp.Resources.Size != "m-1" || sp.Workload.Workdir != "/workspace/repos/x" ||
+		!reflect.DeepEqual(sp.Secrets, []api.Secret{{Name: "LUXMUX_E2E_EXTRA", As: "env", Value: "v"}}) {
+		t.Fatalf("first window's submit %+v", sp)
+	}
+	// The session's default is the profile, without the overrides.
+	p.typ("\x02c")
+	p.wait("default profile window", func(string) bool { return p.scr.title() == "luxmux:profiles [1] dev" })
+	p.wait("second prompt", has("$"))
+	if got := lux.Submits()[1]; got.Labels[config.LabelProfile] != "dev" || got.Image.Ref != "debian" || len(got.Git.Repositories) != 2 ||
+		got.Git.Repositories[0].Path != "/workspace/api" || got.Git.Repositories[1].Path != "/workspace/web" || got.Workload.Workdir != "/workspace/api" {
+		t.Fatal(got)
+	}
+	before := p.scr.title()
+	q := startLuxmux(t, env, "new-window -t profiles -n external -p base")
+	q.exited()
+	p.wait("adoption notice", has("window 2 added: external"))
+	if p.scr.title() != before {
+		t.Fatalf("adoption switched: %q", p.scr.title())
+	}
+	p.typ("\x022")
+	p.wait("external window selectable", func(string) bool { return p.scr.title() == "luxmux:profiles [2] external" })
+	p.typ("\x02d")
+	p.exited()
+	q = startLuxmux(t, env, "new-window -t profiles -n offline")
+	q.exited()
+	sess, ok, err := state.Load(filepath.Join(stateHome, "luxmux"), "profiles")
+	if err != nil || !ok || len(sess.Windows) != 4 || sess.Windows[3].Name != "offline" || sess.DefaultProfile != "dev" {
+		t.Fatalf("state %+v %v", sess, err)
+	}
+	p = startLuxmux(t, env, "attach -t profiles")
+	p.wait("reattached", has("$"))
+	p.typ("\x023")
+	p.wait("offline window on attach", func(string) bool { return p.scr.title() == "luxmux:profiles [3] offline" })
+	p.typ("\x02d")
+	p.exited()
+}
+
+// TestNewWindowCPUsSurviveRebuild: luxmux new-window -p dev --cpus 4 on
+// an unshaped pool while the session is detached; with the session's file
+// gone, attach rebuilds the window from lux, which stores its defaults
+// and no sizing: the window keeps cpus 4 and nothing else.
+func TestNewWindowCPUsSurviveRebuild(t *testing.T) {
+	lux, env := e2eEnv(t)
+	var cfgHome, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgHome = dir
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(cfgHome, "luxmux"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile=\"dev\"\n[profiles.dev]\nimage=\"alpine\"\n"
+	if err := os.WriteFile(filepath.Join(cfgHome, "luxmux", "config.toml"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, env, "new -s sized")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	q := startLuxmux(t, env, "new-window -t sized -n big -p dev --cpus 4")
+	q.exited()
+	big := lux.RunIDs()[1]
+	if r := lux.Run(big); r.Spec.Resources.CPUs != 4 || r.Spec.Resources.Memory == 0 || r.Sizing != nil {
+		t.Fatalf("lux stored resources %+v sizing %+v, want cpus 4 with luxd's defaults and no sizing", r.Spec.Resources, r.Sizing)
+	}
+	if err := state.Remove(stateDir, "sized"); err != nil {
+		t.Fatal(err)
+	}
+	p = startLuxmux(t, env, "attach -t sized")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("rebuilt window", func(string) bool { return p.scr.title() == "luxmux:sized [1] big" })
+	p.typ("\x02d")
+	p.exited()
+	s, ok, err := state.Load(stateDir, "sized")
+	if err != nil || !ok || len(s.Windows) != 2 || s.Windows[1].RunID != big || s.Windows[1].Spec == nil {
+		t.Fatalf("state %+v %v", s, err)
+	}
+	if got := *s.Windows[1].Spec; got.CPUs != 4 || got.Memory != "" || got.Disk != "" || got.Size != "" {
+		t.Fatalf("rebuilt window's spec %+v, want cpus 4 only", got)
+	}
+}
+
+// TestNewMissingSecretRefused: luxmux new with a --secret whose value is
+// nowhere exits 1 in a terminal, with no Run and no session file.
+func TestNewMissingSecretRefused(t *testing.T) {
+	lux, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s nosecret --secret LUXMUX_E2E_NOPE")
+	if code := p.exitCode(); code != 1 || !strings.Contains(p.scr.text(), "secret values not found") {
+		t.Fatalf("exit %d\n%s", code, p.scr.text())
+	}
+	if n := len(lux.RunIDs()); n != 0 {
+		t.Fatalf("%d Runs", n)
+	}
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			if _, ok, _ := state.Load(filepath.Join(dir, "luxmux"), "nosecret"); ok {
+				t.Fatal("a session file was written")
+			}
+		}
+	}
+}
+
+// TestAttachRecordsThenForgetsKilled: a Run new-window made while the
+// session was attached elsewhere, never adopted there, is a window on the
+// next attach; killed with C-b &, it stays gone on the attach after,
+// though lux still has it stopping for its terminate.
+func TestAttachRecordsThenForgetsKilled(t *testing.T) {
+	lux, env := e2eEnv(t)
+	var stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	p := startLuxmux(t, env, "new -s rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	// Another process holds the session: new-window leaves the record
+	// to it, and it goes away without adopting.
+	unlock, err := state.Lock(stateDir, "rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := startLuxmux(t, env, "new-window -t rec -n ext")
+	q.exited()
+	unlock()
+	ext := lux.RunIDs()[1]
+	if s, _, _ := state.Load(stateDir, "rec"); len(s.Windows) != 1 {
+		t.Fatalf("new-window wrote the file of an attached session: %+v", s.Windows)
+	}
+
+	p = startLuxmux(t, env, "attach -t rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("recorded window", func(string) bool { return p.scr.title() == "luxmux:rec [1] ext" })
+	// Recorded on attach, it was the session's from the start: not a
+	// window the attached process added (and announced) later.
+	if strings.Contains(p.rawSince(0), "added: ext") {
+		t.Fatal("the Run was adopted after the attach, not recorded by it")
+	}
+	lux.SetHoldTerminate(true)
+	p.typ("\x02&")
+	p.wait("confirm", has("(y/N)"))
+	p.typ("y")
+	p.wait("window killed", func(string) bool { return strings.HasPrefix(p.scr.title(), "luxmux:rec [0]") })
+	if st := lux.Run(ext).State; st != "stopping" {
+		t.Fatalf("killed Run %s", st)
+	}
+	p.typ("\x02d")
+	p.exited()
+
+	p = startLuxmux(t, env, "attach -t rec")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	if s, _, _ := state.Load(stateDir, "rec"); len(s.Windows) != 1 || s.Windows[0].RunID == ext {
+		t.Fatalf("the killed window came back: %+v", s.Windows)
 	}
 }
 

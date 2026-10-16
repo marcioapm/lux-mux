@@ -106,6 +106,10 @@ func (s *Server) End(id, state, reason string) {
 	s.setStage(r, state)
 }
 
+// FinishTerminate ends a Run HoldTerminate left stopping: its workload
+// stops and it is terminated.
+func (s *Server) FinishTerminate(id string) { s.End(id, "terminated", "terminated") }
+
 // RefuseSnapshot marks the Run's snapshot report refused with no snapshot
 // to fall back on, as luxd does when a host's report fails its checks: it
 // is no longer resumable.

@@ -15,6 +15,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 	"github.com/marcioapm/lux-mux/internal/screen"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
@@ -865,6 +866,13 @@ func (m *Mux) followEvents() {
 			if e.RunID == nil {
 				return
 			}
+			// The feed is the tenant's and carries no labels: only a Run
+			// just submitted may be new-window's (discoverWindows finds
+			// those the feed missed). luxd announces a submit with an
+			// event of type submitted, never with a state event.
+			if e.Type == luxapi.EventSubmitted {
+				m.considerRun(*e.RunID)
+			}
 			m.event(*e.RunID, e.Event)
 		})
 		if m.ctx.Err() != nil {
@@ -879,6 +887,109 @@ func (m *Mux) followEvents() {
 		}
 		bo = min(2*bo, m.opt.MaxBackoff)
 	}
+}
+
+// discoverWindows lists the session's Runs at the start and every
+// discoverEvery: the feed starts from when it connects, and is down
+// between reconnects, so a Run new-window made then is found here. The
+// listing carries each Run's labels, state and spec, so a Run is adopted
+// from it without reading it again.
+func (m *Mux) discoverWindows() {
+	defer m.wg.Done()
+	tick := time.NewTicker(m.opt.discoverEvery)
+	defer tick.Stop()
+	for {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		runs, err := m.lux.ListSession(ctx, m.opt.Session)
+		cancel()
+		if err == nil {
+			m.pruneConsidered(runs)
+			for _, r := range runs {
+				if state.Adoptable(r, m.opt.Session) && m.markConsidered(r.ID) {
+					m.adoptRun(r)
+				}
+			}
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// pruneConsidered keeps only the considered ids the session's listing
+// still has: a Run lux no longer lists cannot be adopted, and an id from
+// the feed that is not this session's need not be remembered.
+func (m *Mux) pruneConsidered(runs []*api.Run) {
+	listed := make(map[string]bool, len(runs))
+	for _, r := range runs {
+		listed[r.ID] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.considered {
+		if !listed[id] {
+			delete(m.considered, id)
+		}
+	}
+}
+
+// markConsidered marks a Run no window has as looked at; false when a
+// window has it or it was looked at already.
+func (m *Mux) markConsidered(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byRun[id] != nil || m.considered[id] || m.ctx.Err() != nil {
+		return false
+	}
+	m.considered[id] = true
+	return true
+}
+
+// considerRun reads a Run the feed says was just submitted, once, and
+// adopts it when it is new-window's for this session. Labels never
+// change, so a Run found to be anything else is not read again; one whose
+// read fails is left to the listing.
+func (m *Mux) considerRun(id string) {
+	if !m.markConsidered(id) {
+		return
+	}
+	m.wg.Add(1)
+	m.goSafe(func() {
+		defer m.wg.Done()
+		ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
+		r, err := m.lux.Get(ctx, id)
+		cancel()
+		if err != nil {
+			m.mu.Lock()
+			delete(m.considered, id)
+			m.mu.Unlock()
+			return
+		}
+		if state.Adoptable(r, m.opt.Session) {
+			m.adoptRun(r)
+		}
+	})
+}
+
+// adoptRun appends a window for r, a Run new-window made for this
+// session, with a notice; the window shown does not change.
+func (m *Mux) adoptRun(r *api.Run) {
+	cfg := m.config()
+	sw := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil {
+		return
+	}
+	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec)
+	w.RunID = r.ID
+	m.windows = append(m.windows, w)
+	m.byRun[r.ID] = w
+	m.startSupervisor(w)
+	m.saveLocked()
+	m.setNoticeLocked(fmt.Sprintf("window %d added: %s", len(m.windows)-1, w.Name))
 }
 
 func (m *Mux) event(runID string, e api.Event) {

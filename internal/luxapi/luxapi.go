@@ -152,6 +152,11 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// EventSubmitted is the type of the event luxd records for a submitted
+// Run (lux internal/server/api.go, submitRun): the Run is inserted already
+// submitted, so no state event says so.
+const EventSubmitted = "submitted"
+
 // Feed follows the tenant's event feed from after (0: from now), calling
 // fn for each event until ctx ends, the stream does, or fn fails.
 func (c *Client) Feed(ctx context.Context, after int64, fn func(api.FeedEvent)) error {

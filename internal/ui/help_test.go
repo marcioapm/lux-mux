@@ -32,7 +32,7 @@ func TestHelpSectionsAndConfiguredKeys(t *testing.T) {
 	h := NewHelp(cfg, func(int, int) []string { return []string{"$ shell behind"} }, 60, 100)
 	out := plain(h.View())
 	for _, want := range []string{"Keys", "Windows", "Session", "Prefix", "Direct bindings", "In dialogs",
-		"C-a c", "new window (default profile)", "C-a C", "new window (dialog)", "C-a n", "C-a p", "C-a 0-9",
+		"C-a c", "new window (the session's default profile)", "C-a C", "new window (dialog)", "C-a n", "C-a p", "C-a 0-9",
 		"C-a l", "C-a '", "C-a w", "window chooser", "C-a ,", "rename window", "C-a &", "kill window",
 		"C-a d", "detach", "C-a ?", "C-a C-a", "send C-a to the window",
 		"M-n", "next window", "M-1", "select window 1",

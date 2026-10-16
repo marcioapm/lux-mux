@@ -6,6 +6,28 @@ import (
 
 // TestSpecKeyFields: SpecKey differs whenever the Run a profile makes
 // differs, and only then.
+func TestSpecKeyRepositories(t *testing.T) {
+	p := Profile{Image: "alpine", Repositories: []Repository{{URL: "https://example.com/api.git"}, {URL: "https://example.com/web.git"}}}
+	key := SpecKey(p)
+	for name, change := range map[string]func(*Profile){
+		"url":        func(p *Profile) { p.Repositories[1].URL = "https://example.com/other.git" },
+		"branch":     func(p *Profile) { p.Repositories[1].Branch = "dev" },
+		"path":       func(p *Profile) { p.Repositories[1].Path = "/workspace/web" },
+		"name":       func(p *Profile) { p.Repositories[1].Name = "client" },
+		"credential": func(p *Profile) { p.Repositories[1].GitCredential = "TOKEN" },
+		"order":      func(p *Profile) { p.Repositories[0], p.Repositories[1] = p.Repositories[1], p.Repositories[0] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := p
+			q.Repositories = append([]Repository{}, p.Repositories...)
+			change(&q)
+			if got := SpecKey(q); got == "" || got == key {
+				t.Fatalf("key %q", got)
+			}
+		})
+	}
+}
+
 func TestSpecKeyFields(t *testing.T) {
 	base := Profile{
 		Image: "alpine", Pool: "p1", CPUs: 2, Memory: "1GiB", Disk: "10GiB",
@@ -89,6 +111,46 @@ func TestSpecKeyStableForCustomImages(t *testing.T) {
 	} {
 		if got := SpecKey(p); got != want {
 			t.Errorf("SpecKey(%+v) = %s, want the 0.1.0 key %s", p, got, want)
+		}
+	}
+}
+
+// TestResourcesLabel: a window's Run is labelled with the resources its
+// profile asks, in a form ApplyResourcesLabel reads back to the same
+// SpecKey, and not labelled when it asks none.
+func TestResourcesLabel(t *testing.T) {
+	for _, tc := range []struct {
+		p    Profile
+		want string
+	}{
+		{Profile{Image: "alpine"}, ""},
+		{Profile{Image: "alpine", CPUs: 4}, "cpus=4"},
+		{Profile{Image: "alpine", CPUs: 0.5, Memory: "8GiB", Disk: "1500Mi"}, "cpus=0.5,memory=8Gi,disk=1500Mi"},
+		{Profile{Image: "alpine", Memory: "1000"}, "memory=1000"},
+		{Profile{Image: "alpine", Size: "large"}, "size=large"},
+	} {
+		for _, spare := range []bool{false, true} {
+			sp, err := RunSpec(tc.p, Target{Session: "s", Profile: "p", Spare: spare}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := sp.Labels[LabelResources]
+			if got != tc.want || ok != (tc.want != "") {
+				t.Errorf("%+v spare %v: label %q (present %v), want %q", tc.p, spare, got, ok, tc.want)
+			}
+		}
+		if tc.want == "" {
+			continue
+		}
+		back := Profile{Image: "alpine", CPUs: 9, Size: "other"}
+		if !ApplyResourcesLabel(&back, tc.want) || SpecKey(back) != SpecKey(tc.p) {
+			t.Errorf("%q read back as %+v", tc.want, back)
+		}
+	}
+	for _, bad := range []string{"cpus", "cpus=x", "cpus=-1", "memory=lots", "gpus=1", "cpus=4,"} {
+		p := Profile{Image: "alpine", CPUs: 2}
+		if ApplyResourcesLabel(&p, bad) || p.CPUs != 2 {
+			t.Errorf("%q accepted: %+v", bad, p)
 		}
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/marcioapm/lux/api"
+
+	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
 // SecretsLostReason is luxd's stateReason for a Run stopped because no
@@ -73,6 +75,9 @@ type Server struct {
 	InputHook func(runID string, data []byte)
 	// SubmitHook, if set, runs before each submit is answered.
 	SubmitHook func()
+	// Refuse, when set, is what every submit and dry run is refused
+	// with (422 invalid_spec).
+	Refuse string
 	// AttachHook, if set, runs before each attach to a running Run is
 	// accepted: a slow attach.
 	AttachHook func(runID string)
@@ -84,10 +89,16 @@ type Server struct {
 	// TerminateHook, if set, runs before each terminate request is
 	// handled.
 	TerminateHook func(runID string)
+	// HoldTerminate leaves a running Run that is terminated stopping
+	// (reason terminate) until FinishTerminate, as luxd does until the
+	// Run's runner has stopped it.
+	HoldTerminate bool
 
 	// failing: every attach to the Run is ended with this error as its
 	// first frame (FailAttaches).
 	failing map[string]string
+	// failGets: GETs of these Runs are answered 503 (FailGets).
+	failGets map[string]bool
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
 }
@@ -121,6 +132,30 @@ func (s *Server) SetGetHook(f func(runID string)) {
 	s.mu.Lock()
 	s.GetHook = f
 	s.mu.Unlock()
+}
+
+// SetHold sets Hold while the server is serving.
+func (s *Server) SetHold(on bool) {
+	s.mu.Lock()
+	s.Hold = on
+	s.mu.Unlock()
+}
+
+// SetHoldTerminate sets HoldTerminate while the server is serving.
+func (s *Server) SetHoldTerminate(on bool) {
+	s.mu.Lock()
+	s.HoldTerminate = on
+	s.mu.Unlock()
+}
+
+// FailGets makes each GET of Run id fail with 503 (on) or not.
+func (s *Server) FailGets(id string, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failGets == nil {
+		s.failGets = map[string]bool{}
+	}
+	s.failGets[id] = on
 }
 
 type fakeRun struct {
@@ -206,12 +241,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// event records an event of a Run, with the lock held.
+// Where a submitted Run's pool came from: the submitted event's poolFrom
+// (lux internal/server/api.go, poolFromSpec and the others).
+const (
+	PoolFromSpec     = "spec"
+	PoolFromTenant   = "tenant-default"
+	PoolFromFallback = "fallback"
+)
+
+// Actor is the submitted event's by: luxd's principal, here the fake's
+// one API key.
+const Actor = "key_test"
+
+// event records an event of a Run, with the lock held. As luxd's addEvent,
+// an event of epoch 0 (before any placement) carries no epoch.
 func (s *Server) event(r *api.Run, typ string, data map[string]any) {
 	id := r.ID
-	ep := r.Epoch
-	s.events = append(s.events, api.FeedEvent{Event: api.Event{ID: int64(len(s.events) + 1), Epoch: &ep, Type: typ, Data: data, Time: time.Now()}, RunID: &id})
+	var ep *int
+	if r.Epoch > 0 {
+		e := r.Epoch
+		ep = &e
+	}
+	s.events = append(s.events, api.FeedEvent{Event: api.Event{ID: int64(len(s.events) + 1), Epoch: ep, Type: typ, Data: data, Time: time.Now()}, RunID: &id})
 	s.cond.Broadcast()
+}
+
+// resolvePool is the pool a submit names, else the default of SetPools'
+// pools, else "default", where it came from, and whether it is one of
+// SetPools' (luxd's resolvePool; known: the pool has an id).
+func (s *Server) resolvePool(name string) (_ api.Pool, from string, known bool) {
+	for _, p := range s.pools {
+		if name != "" && p.Name == name {
+			return p, PoolFromSpec, true
+		}
+		if name == "" && p.IsDefault != nil && *p.IsDefault {
+			return p, PoolFromTenant, true
+		}
+	}
+	if name == "" {
+		return api.Pool{Name: "default"}, PoolFromFallback, false
+	}
+	return api.Pool{Name: name}, PoolFromSpec, false
 }
 
 func (s *Server) setState(r *fakeRun, state, reason string) {
@@ -226,7 +296,7 @@ func (s *Server) setState(r *fakeRun, state, reason string) {
 
 func (s *Server) setStage(r *fakeRun, stage string) {
 	r.run.Stage = stage
-	s.event(r.run, "stage", map[string]any{"stage": stage, "epoch": r.run.Epoch})
+	s.event(r.run, "stage", map[string]any{"stage": stage, "since": time.Now().UTC(), "epoch": r.run.Epoch})
 }
 
 func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
@@ -235,15 +305,43 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "bad_request", err.Error())
 		return
 	}
-	if sp.Image.Ref == "" {
-		writeErr(w, 422, "invalid_spec", "image.ref is required")
+	s.mu.Lock()
+	refuse := s.Refuse
+	s.mu.Unlock()
+	if refuse != "" {
+		writeErr(w, 422, "invalid_spec", refuse)
 		return
 	}
-	if s.SubmitHook != nil && req.URL.Query().Get("validateOnly") != "true" {
+	// luxd's order: Normalize, then (validateOnly) the pool and size, or
+	// (a submit) the secret values, then the pool and size.
+	validateOnly := req.URL.Query().Get("validateOnly") == "true"
+	norm, e := normalized(sp)
+	if e != nil {
+		e.write(w)
+		return
+	}
+	if !validateOnly {
+		if e := missingSecrets(sp); e != nil {
+			e.write(w)
+			return
+		}
+	}
+	s.mu.Lock()
+	pool, from, known := s.resolvePool(sp.Placement.Pool)
+	s.mu.Unlock()
+	// luxd stores the normalized spec, secret values and size split off;
+	// the size is resolved from the resources as submitted.
+	stored, _, _ := norm.SplitSecrets()
+	sizing, e := resolveSize(pool, sp.Resources, &stored.Resources)
+	if e != nil {
+		e.write(w)
+		return
+	}
+	if s.SubmitHook != nil && !validateOnly {
 		s.SubmitHook()
 	}
-	if req.URL.Query().Get("validateOnly") == "true" {
-		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: sp.Placement.Pool}
+	if validateOnly {
+		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: pool.Name}
 		if sp.Placement.Pool == "busy" {
 			ans.WouldStartNow = false
 			ans.Blockers = []api.AdmissionBlocker{{Code: "not_enough_spare", Hosts: 2}}
@@ -254,7 +352,8 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	s.seq++
 	id := fmt.Sprintf("run_%04d", s.seq)
-	run := &api.Run{ID: id, Name: sp.Name, Labels: sp.Labels, Spec: sp, CreatedAt: time.Now().Add(time.Duration(s.seq) * time.Millisecond), Pool: sp.Placement.Pool}
+	run := &api.Run{ID: id, Name: sp.Name, Labels: sp.Labels, Spec: stored, CreatedAt: time.Now().Add(time.Duration(s.seq) * time.Millisecond),
+		Pool: pool.Name, Sizing: sizing}
 	for _, sec := range sp.Secrets {
 		run.Secrets = append(run.Secrets, api.SecretRef{Name: sec.Name})
 	}
@@ -265,7 +364,15 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 	s.runs[id] = fr
 	s.order = append(s.order, id)
 	s.submits = append(s.submits, sp)
-	s.setState(fr, "submitted", "")
+	run.State = "submitted"
+	ev := map[string]any{"by": Actor, "pool": pool.Name, "poolFrom": from}
+	if known {
+		ev["poolOwner"] = "tenant"
+	}
+	if sizing != nil {
+		ev["size"] = sizing.Resolved.Size
+	}
+	s.event(run, luxapi.EventSubmitted, ev)
 	s.setStage(fr, "waiting")
 	hold := s.Hold
 	ans := *run
@@ -356,6 +463,11 @@ func (s *Server) get(w http.ResponseWriter, req *http.Request) {
 	}
 	s.mu.Lock()
 	r := s.runs[req.PathValue("id")]
+	if s.failGets[req.PathValue("id")] {
+		s.mu.Unlock()
+		writeErr(w, 503, "unavailable", "luxd is unavailable")
+		return
+	}
 	var c api.Run
 	if r != nil {
 		c = *r.run
@@ -391,6 +503,18 @@ func (s *Server) terminate(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	s.terms = append(s.terms, id)
+	if s.HoldTerminate && r.run.State == "running" {
+		// luxd: a live placement is asked to stop; the Run stays
+		// stopping, reason terminate, until its runner stopped it.
+		r.run.State, r.run.StateReason, r.run.StageReason = "stopping", "terminate", "terminate"
+		r.run.Resumable = false
+		s.event(r.run, "state", map[string]any{"state": "stopping", "reason": "terminate"})
+		s.setStage(r, "stopping")
+		c := *r.run
+		s.mu.Unlock()
+		writeJSON(w, 202, c)
+		return
+	}
 	if r.run.State != "terminated" {
 		s.setState(r, "terminated", "terminate")
 		s.setStage(r, "terminated")

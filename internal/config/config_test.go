@@ -11,6 +11,105 @@ import (
 	"github.com/marcioapm/lux/api"
 )
 
+// TestRepositoriesMapping: both forms map to git.repositories in order,
+// with each repository's ref, name, path and credential (its own, else
+// the profile's), the shell starting in the first checkout.
+func TestRepositoriesMapping(t *testing.T) {
+	for _, c := range []struct {
+		name, src string
+		repos     []api.Repository
+		workdir   string
+		secrets   []api.Secret
+	}{
+		{"shorthand", `repository = "https://example.com/team/API.git"
+branch = "main"
+git_credential = "TOKEN"`,
+			[]api.Repository{{Name: "api", URL: "https://example.com/team/API.git", Ref: "main", Credential: "TOKEN"}},
+			"/workspace/repos/api", []api.Secret{{Name: "TOKEN"}}},
+		{"shorthand ref", `repository = "https://example.com/api.git"
+ref = "v1.2"`,
+			[]api.Repository{{Name: "api", URL: "https://example.com/api.git", Ref: "v1.2"}},
+			"/workspace/repos/api", nil},
+		{"list", `git_credential = "TOKEN"
+secrets = ["NPM"]
+repositories = [
+  { url = "https://example.com/api.git", branch = "main" },
+  { url = "https://example.com/web.git", ref = "v2", name = "client", path = "/workspace/client", git_credential = "WEB_TOKEN" },
+  { url = "https://example.com/lib.git" },
+]`,
+			[]api.Repository{
+				{Name: "api", URL: "https://example.com/api.git", Ref: "main", Credential: "TOKEN"},
+				{Name: "client", URL: "https://example.com/web.git", Ref: "v2", Path: "/workspace/client", Credential: "WEB_TOKEN"},
+				{Name: "lib", URL: "https://example.com/lib.git", Credential: "TOKEN"},
+			},
+			"/workspace/repos/api", []api.Secret{{Name: "NPM", As: "env"}, {Name: "TOKEN"}, {Name: "WEB_TOKEN"}}},
+		{"list first has a path", `repositories = [{ url = "https://example.com/api.git", path = "/workspace/src/api" }, { url = "https://example.com/web.git" }]`,
+			[]api.Repository{{Name: "api", URL: "https://example.com/api.git", Path: "/workspace/src/api"}, {Name: "web", URL: "https://example.com/web.git"}},
+			"/workspace/src/api", nil},
+		{"workdir set", `workdir = "/workspace"
+repositories = [{ url = "https://example.com/api.git" }]`,
+			[]api.Repository{{Name: "api", URL: "https://example.com/api.git"}}, "/workspace", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Parse([]byte("[profiles.p]\nimage = \"alpine\"\n" + c.src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp, err := RunSpec(cfg.Profiles["p"], Target{Session: "s", Profile: "p"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sp.Git == nil || !reflect.DeepEqual(sp.Git.Repositories, c.repos) {
+				t.Fatalf("repositories %+v\nwant %+v", sp.Git, c.repos)
+			}
+			if sp.Workload.Workdir != c.workdir || !reflect.DeepEqual(sp.Secrets, c.secrets) {
+				t.Fatalf("workdir %q secrets %+v", sp.Workload.Workdir, sp.Secrets)
+			}
+		})
+	}
+}
+
+// TestRepositoriesInvalid: both forms together, and what lux would refuse
+// in a list, are configuration errors that say what to change.
+func TestRepositoriesInvalid(t *testing.T) {
+	for name, c := range map[string]struct{ src, want string }{
+		"both forms": {`repository = "https://example.com/a.git"
+repositories = [{ url = "https://example.com/b.git" }]`, "set either repositories or the repository/branch/ref shorthand, not both"},
+		"list and branch": {`branch = "main"
+repositories = [{ url = "https://example.com/b.git" }]`, "not both"},
+		"no url":         {`repositories = [{ branch = "main" }]`, "repositories[0]: url is required"},
+		"duplicate name": {`repositories = [{ url = "https://example.com/a/app.git" }, { url = "https://example.com/b/app.git" }]`, `repositories[1]: name "app" is taken`},
+		"bad name":       {`repositories = [{ url = "https://example.com/a.git", name = "Bad Name" }]`, `repositories[0]: name "Bad Name"`},
+		"path outside":   {`repositories = [{ url = "https://example.com/a.git", path = "/tmp/a" }]`, "repositories[0]: path must be under /workspace"},
+		"path escapes":   {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/../etc" }]`, "path must be under /workspace"},
+		"branch and ref": {`repositories = [{ url = "https://example.com/a.git", branch = "a", ref = "b" }]`, "repositories[0]: branch and ref"},
+		"credential":     {`repositories = [{ url = "https://example.com/a.git", git_credential = "no-dash" }]`, `invalid name "no-dash"`},
+		"unknown key":    {`repositories = [{ url = "https://example.com/a.git", push = false }]`, "push"},
+		"same path": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/x/" }]`,
+			"repositories[1]: path /workspace/x is also repositories[0]'s"},
+		"another's default path": {`repositories = [{ url = "https://example.com/a.git" }, { url = "https://example.com/b.git", path = "/workspace/repos/a" }]`,
+			"repositories[1]: path /workspace/repos/a is also repositories[0]'s"},
+		"nested in an earlier": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/x/y" }]`,
+			"repositories[1]: path /workspace/x/y and repositories[0]'s /workspace/x are one inside the other"},
+		"holding a later default": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/repos" }, { url = "https://example.com/b.git" }]`,
+			"repositories[1]: path /workspace/repos/b and repositories[0]'s /workspace/repos are one inside the other"},
+		"holding an earlier": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x/y" }, { url = "https://example.com/b.git", path = "/workspace/x" }]`,
+			"repositories[1]: path /workspace/x and repositories[0]'s /workspace/x/y are one inside the other"},
+		"the workspace itself": {`repositories = [{ url = "https://example.com/a.git", path = "/workspace" }]`, "path must be under /workspace"},
+		"a sibling prefix":     {`repositories = [{ url = "https://example.com/a.git", path = "/workspace2/a" }]`, "path must be under /workspace"},
+	} {
+		_, err := Parse([]byte("[profiles.p]\nimage = \"alpine\"\n" + c.src))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
+	// Distinct directories, one name a prefix of the other's, are fine.
+	if _, err := Parse([]byte("[profiles.p]\nimage = \"alpine\"\n" +
+		`repositories = [{ url = "https://example.com/a.git", path = "/workspace/x" }, { url = "https://example.com/b.git", path = "/workspace/xy" }, { url = "https://example.com/c.git" }]`)); err != nil {
+		t.Errorf("distinct paths: %v", err)
+	}
+}
+
 func TestParseDefaults(t *testing.T) {
 	c, err := Parse(nil)
 	if err != nil {
@@ -150,7 +249,7 @@ func TestExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uncommented example: %v\n%s", err, b.String())
 	}
-	if full.Profiles["app"].Repository == "" || len(full.Keys.Direct) != 4 {
+	if full.Profiles["app"].Repository == "" || len(full.Profiles["stack"].Repositories) != 2 || len(full.Keys.Direct) != 4 {
 		t.Fatalf("uncommented example: %+v", full)
 	}
 }
@@ -191,7 +290,7 @@ func TestRunSpec(t *testing.T) {
 	}
 	want := api.RunSpec{
 		Name:   "luxmux-work",
-		Labels: map[string]string{"app": "luxmux", "luxmux-session": "work", "luxmux-profile": "app", "team": "x"},
+		Labels: map[string]string{"app": "luxmux", "luxmux-session": "work", "luxmux-profile": "app", "team": "x", "luxmux-resources": "size=m-2-arm64"},
 		Image:  api.Image{Ref: "ghcr.io/example/dev:1"},
 		Workload: api.Workload{Adapter: "generic", TTY: true, Command: DefaultShell,
 			Workdir: "/workspace/repos/my-app"},

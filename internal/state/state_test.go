@@ -20,7 +20,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("missing file: ok=%v err=%v", ok, err)
 	}
 	s := &Session{
-		Name: "work",
+		Name: "work", DefaultProfile: "app",
 		Windows: []Window{{RunID: "run_a", Name: "editor", Profile: "default"},
 			{RunID: "run_b", Name: "logs", Profile: "app", Spec: &config.Profile{Image: "alpine", Secrets: []string{"X"}}}},
 		Active: 1, Last: 0,
@@ -59,6 +59,150 @@ func run(id, session, profile, state string, at int, spare bool) *api.Run {
 	return r
 }
 
+// TestSessionDefaultProfile: a session's default profile is kept in its
+// file, and a file from before it has none.
+func TestSessionDefaultProfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, &Session{Name: "a", DefaultProfile: "dev"}); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok, err := Load(dir, "a"); err != nil || !ok || s.DefaultProfile != "dev" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if err := os.WriteFile(Path(dir, "old"), []byte(`{"name":"old","windows":[],"active":0,"last":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok, err := Load(dir, "old"); err != nil || !ok || s.DefaultProfile != "" {
+		t.Fatalf("%+v %v", s, err)
+	}
+}
+
+// TestRebuildSpecFromRun: a rebuilt window's spec is its Run's, over the
+// configured profile it names: every repository, in order, with lux's
+// defaults (name, path, ref HEAD) taken back out so its SpecKey is the
+// profile's; a window name new-window gave is kept.
+func TestRebuildSpecFromRun(t *testing.T) {
+	prof := config.Profile{Image: "alpine", GitCredential: "TOKEN", SecretsFrom: "/somewhere.env", Labels: map[string]string{"team": "x"},
+		Repositories: []config.Repository{{URL: "https://example.com/api.git", Branch: "main"}, {URL: "https://example.com/web.git", Name: "client", Path: "/workspace/web"}}}
+	sp, err := config.RunSpec(prof, config.Target{Session: "work", Profile: "dev"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As luxd stores it.
+	for i := range sp.Git.Repositories {
+		r := &sp.Git.Repositories[i]
+		if r.Ref == "" {
+			r.Ref = "HEAD"
+		}
+		if r.Path == "" {
+			r.Path = "/workspace/repos/" + r.Name
+		}
+	}
+	r := run("run_1", "work", "dev", "running", 1, false)
+	r.Spec = sp
+	r.Labels[config.LabelWindow] = "named"
+	s := Rebuild("work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
+	if len(s.Windows) != 1 || s.Windows[0].Name != "named" || s.Windows[0].Profile != "dev" || s.Windows[0].Spec == nil {
+		t.Fatalf("%+v", s.Windows)
+	}
+	got := *s.Windows[0].Spec
+	if !reflect.DeepEqual(got.Repositories, []config.Repository{{URL: "https://example.com/api.git", Ref: "main"},
+		{URL: "https://example.com/web.git", Name: "client", Path: "/workspace/web"}}) {
+		t.Fatalf("repositories %+v", got.Repositories)
+	}
+	if config.SpecKey(got) != config.SpecKey(prof) || got.SecretsFrom != prof.SecretsFrom {
+		t.Fatalf("rebuilt spec %+v\nprofile %+v", got, prof)
+	}
+	// A Run listed without its spec keeps the profile name only.
+	bare := run("run_2", "work", "dev", "running", 2, false)
+	if s := Rebuild("work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
+		t.Fatalf("%+v", s.Windows[0])
+	}
+}
+
+// TestRebuildSizedRun: a Run of a sized profile comes back from luxd with
+// the size resolved into cpus, memory and disk and no size in its spec;
+// what was asked is in sizing.requested. The window's spec is the
+// profile's again, size and not resources, so its SpecKey matches.
+func TestRebuildSizedRun(t *testing.T) {
+	prof := config.Profile{Image: "alpine", Pool: "m", Size: "m-2"}
+	sp, err := config.RunSpec(prof, config.Target{Session: "work", Profile: "dev"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.Resources = api.Resources{CPUs: 2, Memory: 4 << 30, Disk: 20 << 30}
+	r := run("run_1", "work", "dev", "running", 1, false)
+	r.Spec = sp
+	r.Sizing = &api.RunSizing{Requested: &api.SizeRequest{Size: "m-2"}, Resolved: &api.SizeResolved{Size: "m-2", CPUs: 2, Memory: 4 << 30, Disk: 20 << 30}}
+	got := WindowFromRun(r, prof).Spec
+	if got.Size != "m-2" || got.CPUs != 0 || got.Memory != "" || got.Disk != "" || config.SpecKey(*got) != config.SpecKey(prof) {
+		t.Fatalf("rebuilt %+v", got)
+	}
+}
+
+// TestRebuildDefaultedResources: luxd stores resources for every Run,
+// its defaults where the submit set none, so they are never read back.
+// What the window asked comes from sizing.requested (shaped pools), else
+// the luxmux-resources label, else the profile's own values.
+func TestRebuildDefaultedResources(t *testing.T) {
+	cpus, mem := 4.0, api.Bytes(16<<30)
+	defaulted := api.Resources{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 4096}
+	with := func(f func(*api.Resources)) api.Resources { r := defaulted; f(&r); return r }
+	cpus4 := with(func(r *api.Resources) { r.CPUs = 4 })
+	unsized := config.Profile{Image: "alpine"}
+	for _, tc := range []struct {
+		name   string
+		prof   config.Profile
+		stored api.Resources
+		label  string // "": none
+		sizing *api.RunSizing
+		want   config.Profile
+	}{
+		{"unshaped, unsized", unsized, defaulted, "", nil, unsized},
+		{"unshaped, sized in config", config.Profile{Image: "alpine", CPUs: 4}, cpus4, "cpus=4", nil, config.Profile{Image: "alpine", CPUs: 4}},
+		{"unshaped, unsized profile, cpus asked by the window", unsized, cpus4, "cpus=4", nil, config.Profile{Image: "alpine", CPUs: 4}},
+		{"unshaped, label with every resource", config.Profile{Image: "alpine", CPUs: 1}, api.Resources{CPUs: 0.5, Memory: 1 << 30, Disk: 40 << 30, Pids: 4096},
+			"cpus=0.5,memory=1Gi,disk=40Gi", nil, config.Profile{Image: "alpine", CPUs: 0.5, Memory: "1Gi", Disk: "40Gi"}},
+		{"no label, no sizing: the profile's, not the stored", unsized, cpus4, "", nil, unsized},
+		{"no label, no sizing, sized profile", config.Profile{Image: "alpine", CPUs: 4, Memory: "1Gi"}, defaulted, "", nil,
+			config.Profile{Image: "alpine", CPUs: 4, Memory: "1Gi"}},
+		{"shaped, default size", unsized, defaulted, "", &api.RunSizing{Requested: &api.SizeRequest{}}, unsized},
+		{"shaped, cpus and memory asked", unsized, defaulted, "",
+			&api.RunSizing{Requested: &api.SizeRequest{CPUs: &cpus, Memory: &mem}}, config.Profile{Image: "alpine", CPUs: 4, Memory: "17179869184"}},
+		{"shaped: sizing.requested over the label", unsized, defaulted, "size=large",
+			&api.RunSizing{Requested: &api.SizeRequest{CPUs: &cpus}}, config.Profile{Image: "alpine", CPUs: 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, err := config.RunSpec(tc.prof, config.Target{Session: "work", Profile: "dev"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp.Resources = tc.stored
+			r := run("run_1", "work", "dev", "running", 1, false)
+			if tc.label != "" {
+				r.Labels[config.LabelResources] = tc.label
+			}
+			r.Spec, r.Sizing = sp, tc.sizing
+			got := *WindowFromRun(r, tc.prof).Spec
+			if got.Size != tc.want.Size {
+				t.Errorf("size %q, want %q", got.Size, tc.want.Size)
+			}
+			if got.CPUs != tc.want.CPUs {
+				t.Errorf("cpus %v, want %v", got.CPUs, tc.want.CPUs)
+			}
+			if got.Memory != tc.want.Memory {
+				t.Errorf("memory %q, want %q", got.Memory, tc.want.Memory)
+			}
+			if got.Disk != tc.want.Disk {
+				t.Errorf("disk %q, want %q", got.Disk, tc.want.Disk)
+			}
+			if config.SpecKey(got) != config.SpecKey(tc.want) {
+				t.Errorf("SpecKey of %+v differs from %+v's", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRebuild(t *testing.T) {
 	runs := []*api.Run{
 		run("run_3", "work", "app", "running", 30, false),
@@ -68,7 +212,7 @@ func TestRebuild(t *testing.T) {
 		run("run_2", "work", "app", "stopped", 20, true), // an older spare: claimed
 		run("run_4", "work", "app", "running", 40, true), // the newest spare: waiting
 	}
-	s := Rebuild("work", runs)
+	s := Rebuild("work", runs, nil)
 	var ids []string
 	for _, w := range s.Windows {
 		ids = append(ids, w.RunID)
@@ -96,7 +240,7 @@ func TestRebuildBySpec(t *testing.T) {
 		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
 		run("run_e", "work", "legacy", "running", 50, true),
 	}
-	s := Rebuild("work", runs)
+	s := Rebuild("work", runs, nil)
 	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)

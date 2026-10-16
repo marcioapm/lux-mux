@@ -63,7 +63,7 @@ func TestRestoreAttachWithoutSnapshotIsStrict(t *testing.T) {
 func TestSnapshotFramedAsShim(t *testing.T) {
 	s := New()
 	defer s.Close()
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(`{"image":{"ref":"alpine"}}`))
+	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestSnapshotFramedAsShim(t *testing.T) {
 func TestAttachOverMaxSize(t *testing.T) {
 	s := New()
 	defer s.Close()
-	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(`{"image":{"ref":"alpine"}}`))
+	resp, err := http.Post(s.URL+"/v1/runs", "application/json", strings.NewReader(minimalSpec))
 	if err != nil {
 		t.Fatal(err)
 	}
