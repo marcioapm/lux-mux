@@ -73,7 +73,7 @@ func (m *Mux) launch(w *Window) {
 		w.poke()
 		return
 	}
-	lux, err := m.clientOf(w.Endpoint)
+	lux, err := m.eps.Client(w.Endpoint)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
@@ -212,7 +212,7 @@ func (m *Mux) goEndLeftover(ep config.Endpoint, id string) {
 		}
 		// The session's end may have taken it already.
 		if m.sess.Spares[leftoverPrefix+id] == id {
-			m.dropSpareLocked(leftoverPrefix + id)
+			m.sess.DropSpare(leftoverPrefix + id)
 			m.persistLocked()
 		}
 	})
@@ -223,9 +223,10 @@ func (m *Mux) goEndLeftover(ep config.Endpoint, id string) {
 func (m *Mux) terminateLeftovers() {
 	m.mu.Lock()
 	left := map[string]config.Endpoint{}
+	def := m.eps.Default()
 	for slot, id := range m.sess.Spares {
 		if strings.HasPrefix(slot, leftoverPrefix) {
-			left[id] = m.spareEndpointLocked(slot)
+			left[id] = m.sess.SpareEndpoint(slot, def)
 			m.considerLocked(left[id], id)
 		}
 	}
@@ -252,7 +253,7 @@ func (m *Mux) relaunch(w *Window) {
 	m.mu.Unlock()
 	// A client once made is kept, so the launch below gets this one.
 	if old != "" {
-		if _, err := m.clientOf(w.Endpoint); err != nil {
+		if _, err := m.eps.Client(w.Endpoint); err != nil {
 			m.Notice(cannotTerminate(w.Endpoint, err))
 			return
 		}
@@ -316,7 +317,7 @@ func (m *Mux) claimSpare(w *Window) string {
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
-			m.dropSpareLocked(slot)
+			m.sess.DropSpare(slot)
 			m.saveLocked()
 		}
 	}
@@ -329,7 +330,7 @@ func (m *Mux) claimSpare(w *Window) string {
 	if id == "" {
 		return ""
 	}
-	lux, err := m.clientOf(w.Endpoint)
+	lux, err := m.eps.Client(w.Endpoint)
 	if err != nil {
 		// Kept for when the key can be read again.
 		m.mu.Lock()
@@ -361,20 +362,6 @@ func (m *Mux) claimSpare(w *Window) string {
 // spareSlotOf is the slot of profile p's spare: its spec on its endpoint.
 func (m *Mux) spareSlotOf(p config.Profile) string {
 	return config.SpareSlot(config.SpecKey(p), m.eps.Of(p), m.eps.Default())
-}
-
-// spareEndpointLocked is the endpoint slot's spare lives on.
-func (m *Mux) spareEndpointLocked(slot string) config.Endpoint {
-	if ep, ok := m.sess.SpareEndpoints[slot]; ok {
-		return ep
-	}
-	return m.eps.Default()
-}
-
-// dropSpareLocked forgets slot's spare.
-func (m *Mux) dropSpareLocked(slot string) {
-	delete(m.sess.Spares, slot)
-	delete(m.sess.SpareEndpoints, slot)
 }
 
 // replaceSpare submits a new spare for slot when a configured profile
@@ -447,7 +434,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	// the default lux's too, which may be another at the next attach.
 	m.sess.SetSpare(slot, "", ep)
 	m.mu.Unlock()
-	lux, err := m.clientOf(ep)
+	lux, err := m.eps.Client(ep)
 	var run *api.Run
 	if err == nil {
 		var secrets map[string]string
@@ -476,7 +463,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	}
 	defer m.mu.Unlock()
 	if err != nil {
-		m.dropSpareLocked(slot)
+		m.sess.DropSpare(slot)
 		if m.ctx.Err() == nil {
 			m.setNoticeLocked(fmt.Sprintf("warm spare for %s: %s", name, luxapi.Describe(err)))
 		}
@@ -592,7 +579,7 @@ func (m *Mux) Validate(ctx context.Context, name string, p config.Profile) (*api
 	if err != nil {
 		return nil, err
 	}
-	lux, err := m.clientOf(m.eps.Of(p))
+	lux, err := m.eps.Client(m.eps.Of(p))
 	if err != nil {
 		return nil, err
 	}

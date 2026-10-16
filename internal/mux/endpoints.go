@@ -61,7 +61,7 @@ func (m *Mux) followEvents(ep config.Endpoint) {
 	bo := m.opt.Backoff
 	for m.ctx.Err() == nil {
 		start := time.Now()
-		if lux, err := m.clientOf(ep); err == nil {
+		if lux, err := m.eps.Client(ep); err == nil {
 			_ = lux.Feed(m.ctx, after, func(e api.FeedEvent) {
 				after = e.ID
 				if e.RunID == nil {
@@ -105,7 +105,7 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 	first, adopted := true, false
 	for {
 		var runs []*api.Run
-		lux, err := m.clientOf(ep)
+		lux, err := m.eps.Client(ep)
 		if err == nil {
 			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 			runs, err = lux.ListSession(ctx, m.opt.Session)
@@ -132,7 +132,7 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 		}
 		wait := m.opt.discoverEvery
 		m.mu.Lock()
-		if m.unlistedLocked(ep) {
+		if slices.Contains(m.sess.Unlisted, ep) {
 			wait = min(bo, wait)
 			bo = min(2*bo, m.opt.MaxBackoff)
 		}
@@ -149,33 +149,28 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 // is one the session's rebuild could not list, as the rebuild would have.
 func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 	m.mu.Lock()
-	if !m.unlistedLocked(ep) {
-		m.mu.Unlock()
+	unlisted := slices.Contains(m.sess.Unlisted, ep)
+	m.mu.Unlock()
+	if !unlisted {
 		return
 	}
-	m.mu.Unlock()
 	cfg := m.config()
 	rb := state.RebuildFrom(m.opt.Session, []state.Listing{{Endpoint: ep, Runs: runs}}, m.eps.Default(), cfg.Profiles)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.unlistedLocked(ep) || m.ending || m.ctx.Err() != nil {
+	if !slices.Contains(m.sess.Unlisted, ep) || m.ending || m.ctx.Err() != nil {
 		return
 	}
-	m.sess.Unlisted = deleteEndpoint(m.sess.Unlisted, ep)
+	m.sess.Unlisted = slices.DeleteFunc(m.sess.Unlisted, func(e config.Endpoint) bool { return e == ep })
+	if len(m.sess.Unlisted) == 0 {
+		m.sess.Unlisted = nil
+	}
 	added := 0
 	for _, sw := range rb.Windows {
 		if m.byRun[sw.RunID] != nil || m.considered[sw.RunID] {
 			continue
 		}
-		spec := cfg.Profiles[sw.Profile]
-		if sw.Spec != nil {
-			spec = *sw.Spec
-		}
-		w := m.newWindow(sw.Name, sw.Profile, spec, ep)
-		w.RunID = sw.RunID
-		m.windows = append(m.windows, w)
-		m.byRun[w.RunID] = w
-		m.startSupervisor(w)
+		m.startSupervisor(m.addWindowLocked(sw, cfg.Profiles, ep))
 		added++
 	}
 	m.sess.Claimed = append(m.sess.Claimed, rb.Claimed...)
@@ -238,28 +233,6 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 	for _, id := range extra {
 		m.retire(ep, id)
 	}
-}
-
-func (m *Mux) unlistedLocked(ep config.Endpoint) bool {
-	for _, e := range m.sess.Unlisted {
-		if e == ep {
-			return true
-		}
-	}
-	return false
-}
-
-func deleteEndpoint(l []config.Endpoint, ep config.Endpoint) []config.Endpoint {
-	out := l[:0]
-	for _, e := range l {
-		if e != ep {
-			out = append(out, e)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // pruneConsidered keeps only the considered ids of ep that ep's listing
@@ -340,10 +313,7 @@ func (m *Mux) adoptRun(ep config.Endpoint, r *api.Run) {
 	if m.sess.RecordsSpare(r.ID) {
 		return
 	}
-	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec, ep)
-	w.RunID = r.ID
-	m.windows = append(m.windows, w)
-	m.byRun[r.ID] = w
+	w := m.addWindowLocked(sw, cfg.Profiles, ep)
 	m.startSupervisor(w)
 	m.saveLocked()
 	m.setNoticeLocked(fmt.Sprintf("window %d added: %s", len(m.windows)-1, w.Name))

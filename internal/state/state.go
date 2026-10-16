@@ -585,11 +585,7 @@ func (s *Session) ReconcileUp(known map[string]string, def config.Endpoint, down
 	s.Windows = kept
 	s.Active, s.Last = s.index(active), s.index(last)
 	for p, id := range s.Spares {
-		ep, ok := s.SpareEndpoints[p]
-		if !ok {
-			ep = def
-		}
-		if !keep(id) && !isDown(ep) {
+		if !keep(id) && !isDown(s.SpareEndpoint(p, def)) {
 			delete(s.Spares, p)
 		}
 	}
@@ -633,6 +629,21 @@ func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
 	}
 	s.Spares[slot] = id
 	s.SpareEndpoints[slot] = ep
+}
+
+// DropSpare forgets slot's spare and its endpoint.
+func (s *Session) DropSpare(slot string) {
+	delete(s.Spares, slot)
+	delete(s.SpareEndpoints, slot)
+}
+
+// SpareEndpoint is the endpoint slot's spare lives on; def when the file
+// records none for it.
+func (s *Session) SpareEndpoint(slot string, def config.Endpoint) config.Endpoint {
+	if ep, ok := s.SpareEndpoints[slot]; ok {
+		return ep
+	}
+	return def
 }
 
 // RecordsSpare reports whether id is the Run of one of s's spare slots,

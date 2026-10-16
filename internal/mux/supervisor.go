@@ -67,7 +67,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 	// A key that cannot be read now (its variable unset in this shell, its
 	// file unreadable) says nothing of the Run: the window waits, as for a
 	// lux that does not answer, and never ends on it.
-	lux, err := m.clientOf(w.Endpoint)
+	lux, err := m.eps.Client(w.Endpoint)
 	for err != nil {
 		m.setWaiting(w, err.Error())
 		wait(bo)
@@ -75,7 +75,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 		if ctx.Err() != nil {
 			return
 		}
-		lux, err = m.clientOf(w.Endpoint)
+		lux, err = m.eps.Client(w.Endpoint)
 	}
 	bo = m.opt.Backoff
 	// exitedEpoch is the epoch whose last stream ended with the shim's

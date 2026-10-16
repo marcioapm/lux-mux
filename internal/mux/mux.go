@@ -263,19 +263,11 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	// (adoptSpares).
 	for slot, id := range sess.Spares {
 		if id == "" {
-			delete(sess.Spares, slot)
-			delete(sess.SpareEndpoints, slot)
+			sess.DropSpare(slot)
 		}
 	}
 	for _, sw := range sess.Windows {
-		spec := opt.Config.Profiles[sw.Profile]
-		if sw.Spec != nil {
-			spec = *sw.Spec
-		}
-		w := m.newWindow(sw.Name, sw.Profile, spec, sw.EndpointOr(def))
-		w.RunID = sw.RunID
-		m.windows = append(m.windows, w)
-		m.byRun[w.RunID] = w
+		m.addWindowLocked(sw, opt.Config.Profiles, sw.EndpointOr(def))
 	}
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
@@ -287,6 +279,21 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 		}
 	}
 	return m, nil
+}
+
+// addWindowLocked appends the window sw records, with its Run, on ep; its
+// spec is sw's, else its profile's in profiles. Its supervisor is not
+// started.
+func (m *Mux) addWindowLocked(sw state.Window, profiles map[string]config.Profile, ep config.Endpoint) *Window {
+	spec := profiles[sw.Profile]
+	if sw.Spec != nil {
+		spec = *sw.Spec
+	}
+	w := m.newWindow(sw.Name, sw.Profile, spec, ep)
+	w.RunID = sw.RunID
+	m.windows = append(m.windows, w)
+	m.byRun[w.RunID] = w
+	return w
 }
 
 // clampSize bounds a terminal size to what lux attaches with and its
@@ -339,9 +346,6 @@ func (m *Mux) Pools(ctx context.Context, p config.Profile) ([]api.Pool, error) {
 	}
 	return c.Pools(ctx)
 }
-
-// clientOf is ep's client.
-func (m *Mux) clientOf(ep config.Endpoint) (*luxapi.Client, error) { return m.eps.Client(ep) }
 
 // Terminal is where dialogs draw, in order with everything else written
 // to the terminal, and its size.
@@ -1030,9 +1034,10 @@ func (m *Mux) endSession() {
 		id   string
 	}
 	spares := make([]spare, 0, len(m.sess.Spares))
+	def := m.eps.Default()
 	for slot, id := range m.sess.Spares {
 		if id != "" {
-			spares = append(spares, spare{slot, m.spareEndpointLocked(slot), id})
+			spares = append(spares, spare{slot, m.sess.SpareEndpoint(slot, def), id})
 		}
 	}
 	m.sess.Spares, m.sess.SpareEndpoints = nil, nil
@@ -1085,7 +1090,7 @@ func cannotTerminate(ep config.Endpoint, err error) string {
 // the caller must keep it recorded: ep has no client, lux refused the key
 // (401/403, not retried), or lux did not answer or failed every try.
 func (m *Mux) terminate(ep config.Endpoint, id string) error {
-	c, err := m.clientOf(ep)
+	c, err := m.eps.Client(ep)
 	if err != nil {
 		return err
 	}
