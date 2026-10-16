@@ -190,6 +190,12 @@ func TestMigrateObsoleteSparePreservesOwnedRuns(t *testing.T) {
 	s.SetSpare(state.LeftoverPrefix+"existing", "existing", ep)
 	h.start(s)
 	h.live(0)
+	// Startup ends recorded leftovers in the background; wait for that, or
+	// its late drop would take the leftover re-inserted below.
+	h.waitFor("startup leftover cleanup", func() bool {
+		_, ok := h.spares()[state.LeftoverPrefix+"existing"]
+		return !ok
+	})
 	// Insert an existing leftover after startup's normal cleanup, then migrate alone.
 	h.m.mu.Lock()
 	h.m.sess.SetSpare(state.LeftoverPrefix+"existing", "existing", ep)
