@@ -17,23 +17,13 @@ import (
 )
 
 // submitWindow checks p's spec with lux's dry run, then submits it as a
-// window of session. external labels the Run as made outside the attached
-// process (new-window), which is what an attached luxmux adopts.
-func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profile, name string, p config.Profile, external bool) (state.Window, error) {
-	label := func(sp *api.RunSpec) {
-		if external {
-			sp.Labels[config.LabelExternal] = "true"
-		}
-		if name != "" {
-			sp.Labels[config.LabelWindow] = name
-		}
-	}
+// window of session that an attached luxmux adopts.
+func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profile, name string, p config.Profile) (state.Window, error) {
 	t := config.Target{Session: session, Profile: profile}
-	sp, err := config.RunSpec(p, t, nil)
+	sp, err := externalSpec(p, t, name, nil)
 	if err != nil {
 		return state.Window{}, err
 	}
-	label(&sp)
 	if err := validate(ctx, env, c, sp); err != nil {
 		return state.Window{}, err
 	}
@@ -41,10 +31,9 @@ func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profi
 	if err != nil {
 		return state.Window{}, err
 	}
-	if sp, err = config.RunSpec(p, t, values); err != nil {
+	if sp, err = externalSpec(p, t, name, values); err != nil {
 		return state.Window{}, err
 	}
-	label(&sp)
 	run, err := c.Submit(ctx, sp)
 	if err != nil {
 		return state.Window{}, fmt.Errorf("submit: %s", luxapi.Describe(err))
@@ -53,6 +42,20 @@ func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profi
 		name = profile
 	}
 	return state.Window{RunID: run.ID, Name: name, Profile: profile, Spec: &p}, nil
+}
+
+// externalSpec is RunSpec labelled as made outside the attached process,
+// which is what an attached luxmux adopts, and with -n's window name.
+func externalSpec(p config.Profile, t config.Target, name string, secrets map[string]string) (api.RunSpec, error) {
+	sp, err := config.RunSpec(p, t, secrets)
+	if err != nil {
+		return sp, err
+	}
+	sp.Labels[config.LabelExternal] = "true"
+	if name != "" {
+		sp.Labels[config.LabelWindow] = name
+	}
+	return sp, nil
 }
 
 // dryRun checks the spec a window of profile p would be submitted with.
@@ -162,7 +165,7 @@ func newWindow(env Env, o windowFlags) error {
 	if err != nil {
 		return err
 	}
-	w, err := submitWindow(ctx, env, c, o.Session, profile, o.Name, p, true)
+	w, err := submitWindow(ctx, env, c, o.Session, profile, o.Name, p)
 	if err != nil {
 		return err
 	}

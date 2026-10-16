@@ -87,14 +87,12 @@ func run(env Env, args []string) error {
 		if err != nil {
 			return err
 		}
-		n := o.Session
-		if n == "" {
-			var err error
-			if n, err = freeName(env); err != nil {
+		if o.Session == "" {
+			if o.Session, err = freeName(env); err != nil {
 				return err
 			}
 		}
-		return newSessionWith(env, n, o)
+		return newSession(env, o)
 	case "new-window":
 		o, err := parseWindowFlags("new-window", args[1:], env.Stderr)
 		if err != nil {
@@ -185,11 +183,10 @@ func freeName(env Env) (string, error) {
 	}
 }
 
-func newSession(env Env, name string) error {
-	return newSessionWith(env, name, windowFlags{})
-}
-
-func newSessionWith(env Env, name string, o windowFlags) error {
+// newSession creates session o.Session with a first window of o's
+// profile and overrides, and attaches it.
+func newSession(env Env, o windowFlags) error {
+	name := o.Session
 	if err := checkName(name); err != nil {
 		return err
 	}
@@ -236,7 +233,7 @@ func newSessionWith(env Env, name string, o windowFlags) error {
 	}
 	// Only -p pins the session's default; without it C-b c follows
 	// default_profile.
-	return runMuxFirst(env, c, &state.Session{Name: name, DefaultProfile: o.Profile}, &p)
+	return runMux(env, c, &state.Session{Name: name, DefaultProfile: o.Profile}, &p)
 }
 
 // attach attaches name: its file, else rebuilt from its Runs' labels.
@@ -281,7 +278,7 @@ func attach(env Env, name string, create bool) error {
 	if len(sess.Windows) == 0 && !create && !ok {
 		return fmt.Errorf("no session %s: luxmux new -s %s", name, name)
 	}
-	return runMux(env, c, sess)
+	return runMux(env, c, sess, nil)
 }
 
 // lockSession makes this process the session's only one until unlock.
@@ -293,14 +290,10 @@ func lockSession(env Env, name string) (func(), error) {
 	return unlock, err
 }
 
-// runMux puts the terminal in raw mode and runs the session.
-func runMux(env Env, c *luxapi.Client, sess *state.Session) error {
-	return runMuxFirst(env, c, sess, nil)
-}
-
-// runMuxFirst is runMux whose first window, in a session that has none,
-// is made from first (nil: the session's default profile).
-func runMuxFirst(env Env, c *luxapi.Client, sess *state.Session, first *config.Profile) error {
+// runMux puts the terminal in raw mode and runs the session. Its first
+// window, in a session that has none, is made from first (nil: the
+// session's default profile).
+func runMux(env Env, c *luxapi.Client, sess *state.Session, first *config.Profile) error {
 	cfg, err := loadConfig(env)
 	if err != nil {
 		return err
