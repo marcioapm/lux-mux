@@ -2,6 +2,7 @@ package fakelux
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -168,12 +169,21 @@ func TestStoresNormalizedSpec(t *testing.T) {
 	if err != nil || len(listed) != 1 {
 		t.Fatalf("listing %v %v", listed, err)
 	}
-	for _, run := range []*api.Run{got, listed[0]} {
-		res, repo := run.Spec.Resources, run.Spec.Git.Repositories[0]
-		if res.CPUs != 2 || res.Memory != 8<<30 || res.Disk != 20<<30 || res.Pids != 4096 ||
-			repo.Ref != "HEAD" || repo.Path != "/workspace/repos/a" ||
-			len(run.Spec.Secrets) != 1 || run.Spec.Secrets[0].Value != "" || run.Spec.Secrets[0].As != "none" || !run.Spec.Secrets[0].RunnerOnly || run.Sizing != nil {
-			t.Fatalf("stored %+v sizing %+v", run.Spec, run.Sizing)
+	wantRes := api.Resources{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 4096, DiskGrace: api.OptionalDuration{Set: true}}
+	wantRepo := api.Repository{Name: "a", URL: "https://example.com/a.git", Ref: "HEAD", Path: "/workspace/repos/a", Credential: "TOKEN"}
+	wantSecrets := []api.Secret{{Name: "TOKEN", As: "none", RunnerOnly: true}}
+	for i, run := range []*api.Run{got, listed[0]} {
+		if !reflect.DeepEqual(run.Spec.Resources, wantRes) {
+			t.Errorf("run %d: resources %+v, want luxd's defaults %+v", i, run.Spec.Resources, wantRes)
+		}
+		if run.Spec.Git == nil || !reflect.DeepEqual(run.Spec.Git.Repositories, []api.Repository{wantRepo}) {
+			t.Errorf("run %d: git %+v, want %+v", i, run.Spec.Git, wantRepo)
+		}
+		if !reflect.DeepEqual(run.Spec.Secrets, wantSecrets) {
+			t.Errorf("run %d: secrets %+v, want %+v (no value)", i, run.Spec.Secrets, wantSecrets)
+		}
+		if run.Sizing != nil {
+			t.Errorf("run %d: sizing %+v on an unshaped pool", i, run.Sizing)
 		}
 	}
 }
