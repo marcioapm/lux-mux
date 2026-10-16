@@ -229,6 +229,22 @@ func TestKillSessionAcrossEndpoints(t *testing.T) {
 	}
 }
 
+// TestAttachWithEndpointDown: attach of a session whose file is gone and
+// whose only Runs are on a lux that does not answer makes no window in
+// their place, and says which lux failed.
+func TestAttachWithEndpointDown(t *testing.T) {
+	env, a, b, _, errb := twoLuxEnv(t)
+	submitTo(t, b, "far", "remote")
+	b.SetDown(true)
+	if code := Main(env, []string{"attach", "-t", "far"}); code == 0 || !strings.Contains(errb.String(), "endpoint unreachable") ||
+		!strings.Contains(errb.String(), "try again") {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if len(a.Submits()) != 0 {
+		t.Fatal("a window made in place of the unreachable ones")
+	}
+}
+
 // TestKeyFileModeRefusedByCLI: a profile whose api_key_file others may
 // read is refused with the fix, the key not shown.
 func TestKeyFileModeRefusedByCLI(t *testing.T) {

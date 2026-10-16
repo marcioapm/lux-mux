@@ -276,7 +276,12 @@ func attach(env Env, name string, create bool) error {
 	} else {
 		sess = state.RebuildFrom(name, ls, eps.Default(), cfg.Profiles)
 	}
-	if len(sess.Windows) == 0 && len(sess.Unlisted) == 0 && !create && !ok {
+	if len(sess.Windows) == 0 && !create && !ok {
+		if len(sess.Unlisted) > 0 {
+			// Its windows may be on a lux that did not answer: none is
+			// made in their place.
+			return fmt.Errorf("no session %s on the luxes that answered; try again when the others do", name)
+		}
 		return fmt.Errorf("no session %s: luxmux new -s %s", name, name)
 	}
 	return runMux(env, eps, sess, name, unlock, nil)
