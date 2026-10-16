@@ -393,6 +393,34 @@ func TestSwitchTargetHangsStays(t *testing.T) {
 	h.detach()
 }
 
+// TestSwitchTimedOutSkipsRefresh: when the target's open timed out, the
+// session switched back to is not re-read from lux (which hangs on it
+// too) but reattached from its saved state, well within two
+// switchOpenWaits.
+func TestSwitchTimedOutSkipsRefresh(t *testing.T) {
+	h := newMulti(t)
+	h.opts = func(o *Options) { o.switchOpenWait = 1500 * time.Millisecond }
+	h.make("b", "B-SCREEN")
+	h.attach("a")
+	h.on("a")
+	h.rt.set(func(req *http.Request) error {
+		if listing(req, "b") || listing(req, "a") {
+			return hang(req)
+		}
+		return nil
+	})
+	m := h.con.Current()
+	mark := len(h.term.rawBytes())
+	start := time.Now()
+	m.startSwitch(&switchTarget{name: "b"})
+	h.stayedOn(m, "a", mark, "session b: ")
+	if d := time.Since(start); d > 2500*time.Millisecond {
+		t.Fatalf("back on a after %v: the refresh waited on lux too", d)
+	}
+	h.rt.set(nil)
+	h.detach()
+}
+
 // TestSwitchLuxRefusesStays: with lux refusing every listing, a failed
 // switch does not need lux to go back: the session is reattached from
 // the state it saved, with a notice, and luxmux goes on.
@@ -482,7 +510,8 @@ func TestSwitchToVanishedSessionStays(t *testing.T) {
 
 // TestSwitchRelocksAfterBriefHold: a failed switch retries this
 // session's lock while another process holds it for a moment (luxmux
-// new-window -t), instead of ending luxmux.
+// new-window -t), instead of ending luxmux. The 150 ms hold outlasts
+// relockTries tries without relockEvery between them.
 func TestSwitchRelocksAfterBriefHold(t *testing.T) {
 	h := newMulti(t)
 	h.attach("a")
@@ -497,7 +526,7 @@ func TestSwitchRelocksAfterBriefHold(t *testing.T) {
 			return
 		}
 		held.Store(true)
-		time.AfterFunc(60*time.Millisecond, unlock)
+		time.AfterFunc(150*time.Millisecond, unlock)
 	}
 	m.mu.Unlock()
 	mark := len(h.term.rawBytes())
