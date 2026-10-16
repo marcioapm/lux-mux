@@ -59,6 +59,10 @@ image = "` + DefaultImage + `"
 # labels = { team = "example" }
 # secrets = ["NPM_TOKEN"]   # environment variables in the Run
 # secrets_from = "~/.config/luxmux/app.env"   # values: this .env file, else the environment
+# Run in the window before its prompt: on the Run's first start, and on
+# each later placement (a move, a drain, a resume).
+# on_start = 'cd "$LUXMUX_REPO_DIR" && make deps'
+# on_resume = 'cd "$LUXMUX_REPO_DIR" && make warm'
 
 # Several repositories, cloned side by side; the shell starts in the
 # first. name defaults from the URL, path to /workspace/repos/<name>; a

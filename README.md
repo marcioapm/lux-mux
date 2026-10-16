@@ -67,6 +67,7 @@ window:
 | `--size S` \| `--cpus N --memory M --disk D` | either replaces the other |
 | `--secret NAME` | one more secret, repeatable; its value comes from where the profile's do |
 | `--workdir W` | the shell's working directory |
+| `--on-start C`, `--on-resume C` | the window's start and resume commands (see [below](#start-and-resume-commands-and-window-facts)) |
 
 ```sh
 luxmux new -s api -p dev --repo https://github.com/example/api.git#feature-x
@@ -221,6 +222,8 @@ persist_home = false           # /home/agent on a state volume; default: true on
 egress = ["github.com", "registry.npmjs.org"]   # lux denies egress by default
 # unrestricted_network = true
 warm_spare = false
+on_start = 'cd "$LUXMUX_REPO_DIR" && make deps'   # the Run's first start
+on_resume = 'cd "$LUXMUX_REPO_DIR" && make warm'  # each later placement
 ```
 
 For several repositories in one window, give a list instead:
@@ -331,6 +334,73 @@ Security:
   lux as its URL, tenant and the *name* of the variable or file the key
   comes from; luxmux writes no logs, and its notices, errors, labels and
   screens name a lux the same way. A URL with credentials in it is refused.
+
+## Start and resume commands, and window facts
+
+A profile can run a command in the window before its prompt:
+
+```toml
+[profiles.app]
+repository = "https://github.com/example/app.git"
+branch = "feature-x"
+secrets = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
+on_start  = 'cd "$LUXMUX_REPO_DIR" && claude "Continue the work on $LUXMUX_BRANCH"'
+on_resume = 'cd "$LUXMUX_REPO_DIR" && claude --continue'
+```
+
+- `on_start` runs once, on the Run's first start. `on_resume` runs on each
+  later placement: a move, a drain, a resume. Neither runs when luxmux
+  attaches again to the same shell (a reconnect, a new luxmux process),
+  because no process starts then.
+- Both run in the window's shell process, as `sh -c "$command"`, so their
+  output is on the screen and in its scrollback. They see the profile's
+  `env` and secrets, and every variable below. A command that exits
+  non-zero prints one line (`luxmux: on_start exited with status N;
+  starting the shell`), and the shell starts as usual.
+- The dialog has an `on start` and an `on resume` field, saved by "save as
+  profile". `luxmux new` and `new-window` take `--on-start` and
+  `--on-resume`.
+
+The window's command is a small POSIX `sh` start wrapper that ends by
+exec'ing the shell, either the profile's `shell` or `bash -l` (`sh -l` when
+the image has no bash). lux's `init.script` is not used: its output goes
+to the Run's log, not the window, and a failing init fails the Run. A
+profile without commands gets the wrapper too, for the variables. It prints
+nothing, and the shell starts as before. Start and resume are told apart
+by a marker on the state volume, `/workspace/.luxmux/started`.
+
+With `warm_spare`, a spare's Run starts before any window takes it, so
+`on_start` runs in the spare (that is what makes it warm). Its output is in
+the spare's screen, and the window that takes it shows it on attach; it
+does not run again. The commands are part of the spare's spec key, so a
+spare is only taken by a window with the same commands.
+
+| Variable | |
+| --- | --- |
+| `LUXMUX_SESSION` | the session's lux label: the name its Runs were made under (a renamed session keeps its original name here) |
+| `LUXMUX_PROFILE`, `LUXMUX_IMAGE`, `LUXMUX_POOL`, `LUXMUX_SIZE` | as asked (`LUXMUX_SIZE` only on a shaped pool) |
+| `LUXMUX_REPOSITORY`, `LUXMUX_BRANCH`, `LUXMUX_REPO_NAME`, `LUXMUX_REPO_DIR` | the first repository; `LUXMUX_BRANCH` as asked, empty for the remote's HEAD |
+| `LUXMUX_WORKDIR` | the shell's working directory |
+| `LUXMUX_REPOSITORIES` | one `name<TAB>url<TAB>branch<TAB>path` line per repository |
+| `LUXMUX_CPU` | the cgroup's CPU quota (`2`, `0.5`); empty when unlimited or unknown |
+| `LUXMUX_MEMORY` | the cgroup's memory limit in bytes; empty when unlimited or unknown |
+| `LUXMUX_DISK` | the size of the `/workspace` volume in bytes |
+| `LUXMUX_BRANCH_CHECKED_OUT` | the branch checked out in `LUXMUX_REPO_DIR` (a short sha when detached); empty without a checkout or git |
+| `LUXMUX_START` | `start` on the Run's first start, `resume` after |
+| `LUXMUX_RUN_ID` | the Run's id (`LUX_RUN_ID`) |
+| `LUXMUX_WINDOW` | the window's name: in the env file only (see below) |
+
+The first group is in the Run's spec, so it survives moves. The wrapper
+computes `LUXMUX_CPU` through `LUXMUX_RUN_ID` on every placement.
+All of them are written to `/workspace/.luxmux/env` (mode 0644, replaced
+atomically, shell-quoted), so `lux exec`, nested shells and agents can
+`source` it. `LUXMUX_WINDOW` is in that file only. A spare has no window
+until one takes it, and a window can be renamed (`C-b ,`), so a value in
+the spec, or in a running shell's environment, would be wrong. luxmux
+writes the name with lux's exec API when the window attaches and when it
+is renamed (best effort, 5 s each; one that fails is tried again at the
+next attach). Secrets are never in these variables or in the file, and a
+profile cannot name a secret or an `env` entry after one of them.
 
 ## Moves and reconnects
 
