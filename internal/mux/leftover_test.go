@@ -3,6 +3,7 @@ package mux
 import (
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,10 +127,19 @@ func TestLeftoverNoticeOutlivesRestore(t *testing.T) {
 	x.liveOnB(1)
 	x.detach()
 
-	// Window 0's attach is held past the leftover's terminate tries
-	// (Backoff 5ms up to MaxBackoff 50ms: about 75ms), so the notice is
-	// up before its snapshot reaches the terminal.
-	x.lux.AttachHook = func(string) { time.Sleep(500 * time.Millisecond) }
+	// Window 0's attach is held until the leftover's cannot-terminate
+	// notice is up, so the notice is drawn before its snapshot reaches the
+	// terminal.
+	x.lux.AttachHook = func(string) {
+		for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+			x.m.mu.Lock()
+			up := strings.Contains(x.m.notice, "cannot terminate on")
+			x.m.mu.Unlock()
+			if up {
+				return
+			}
+		}
+	}
 	x.start(nil)
 	x.live(0)
 	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on"))
