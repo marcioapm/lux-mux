@@ -168,8 +168,14 @@ const leftoverPrefix = "leftover:"
 // not end; the next attach (terminateLeftovers) or the session's end
 // tries again.
 func (m *Mux) keepLeftoverLocked(ep config.Endpoint, id string, err error) {
-	m.sess.SetSpare(leftoverPrefix+id, id, ep)
+	m.recordLeftoverLocked(ep, id)
 	m.unterminatedLocked(ep, id, err)
+}
+
+// recordLeftoverLocked records Run id on ep as a leftover and writes the
+// file.
+func (m *Mux) recordLeftoverLocked(ep config.Endpoint, id string) {
+	m.sess.SetSpare(leftoverPrefix+id, id, ep)
 	m.persistLocked()
 }
 
@@ -187,8 +193,7 @@ func (m *Mux) persistLocked() {
 // (goEndLeftover).
 func (m *Mux) retire(ep config.Endpoint, id string) {
 	m.mu.Lock()
-	m.sess.SetSpare(leftoverPrefix+id, id, ep)
-	m.persistLocked()
+	m.recordLeftoverLocked(ep, id)
 	m.mu.Unlock()
 	m.goEndLeftover(ep, id)
 }

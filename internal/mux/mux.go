@@ -335,9 +335,6 @@ func (m *Mux) DefaultProfile() string {
 // Endpoint is the lux a window of profile p is made on.
 func (m *Mux) Endpoint(p config.Profile) config.Endpoint { return m.eps.Of(p) }
 
-// DefaultEndpoint is the lux CLI configuration's lux.
-func (m *Mux) DefaultEndpoint() config.Endpoint { return m.eps.Default() }
-
 // Pools are the pools a window of profile p may use, on p's lux.
 func (m *Mux) Pools(ctx context.Context, p config.Profile) ([]api.Pool, error) {
 	c, err := m.eps.Client(m.eps.Of(p))
