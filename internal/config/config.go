@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -64,6 +65,15 @@ type Profile struct {
 	// PersistHome puts /home/agent on a state volume. Unset means true
 	// for luxmux's default image and false for any other.
 	PersistHome *bool `toml:"persist_home,omitempty" json:"persistHome,omitempty"`
+	// The lux the profile's Runs live on (see Endpoint); each one unset
+	// is the lux CLI configuration's.
+	LuxURL     string `toml:"lux_url,omitempty" json:"luxUrl,omitempty"`
+	Tenant     string `toml:"tenant,omitempty" json:"tenant,omitempty"`
+	APIKeyEnv  string `toml:"api_key_env,omitempty" json:"apiKeyEnv,omitempty"`
+	APIKeyFile string `toml:"api_key_file,omitempty" json:"apiKeyFile,omitempty"`
+	// APIKey is decoded only to be refused with a message: a key is never
+	// kept in config.toml, and never written out from here.
+	APIKey *string `toml:"api_key,omitempty" json:"-"`
 }
 
 // HomeVolume reports whether the profile's Runs get the home volume.
@@ -324,6 +334,19 @@ func (p Profile) Validate() error {
 	}
 	if p.Workdir != "" && !strings.HasPrefix(p.Workdir, "/") {
 		fail("workdir must be absolute")
+	}
+	if p.APIKey != nil {
+		fail("api_key: a key is never kept in config.toml: set api_key_env (an environment variable holding it) or api_key_file (a file holding it, mode 0600)")
+	}
+	if p.APIKeyEnv != "" && !envNameRe.MatchString(p.APIKeyEnv) {
+		fail("api_key_env: invalid environment variable name %q", p.APIKeyEnv)
+	}
+	if p.LuxURL != "" {
+		if u, err := url.Parse(p.LuxURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			fail("lux_url: want an http(s) URL such as https://lux.example.com")
+		} else if u.User != nil {
+			fail("lux_url: no credentials in the URL: set api_key_env or api_key_file")
+		}
 	}
 	for k := range p.Env {
 		if !envNameRe.MatchString(k) || strings.HasPrefix(k, "LUX_") {

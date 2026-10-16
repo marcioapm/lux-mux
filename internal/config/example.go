@@ -40,6 +40,13 @@ image = "` + DefaultImage + `"
 # or lift the filter.
 # egress = ["github.com", "*.ubuntu.com", "140.82.112.0/20"]
 # unrestricted_network = false
+# Another lux, tenant or API key for this profile's Runs; each unset is
+# the lux CLI's. The key is never written here: name an environment
+# variable holding it, or a file (mode 0600) holding it.
+# lux_url = "https://lux.example.com"
+# tenant = "example"
+# api_key_env = "EXAMPLE_LUX_API_KEY"
+# api_key_file = "~/.config/luxmux/example.key"
 
 # A profile with a repository, cloned into /workspace/repos/<name>.
 # [profiles.app]
