@@ -55,9 +55,9 @@ func Label(dir, name string) (string, error) {
 
 // LiveLabel is Label after a stale rename entry naming name was dropped
 // (pruneStale): a renamed session whose Runs all ended frees both names.
-// The caller holds name's lock, or none.
+// An entry whose session's lock is held, by the caller too, is kept.
 func LiveLabel(ctx context.Context, c *luxapi.Client, dir, name string) (string, error) {
-	if err := pruneStale(ctx, c, dir, name); err != nil {
+	if err := pruneStale(ctx, c, dir, name, false); err != nil {
 		return "", err
 	}
 	return Label(dir, name)
@@ -172,9 +172,10 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 // reconciled with its Runs (and the Runs new-window made, and the waiting
 // spares, that it lacks), else rebuilt from their labels. existed is
 // false when there is neither. A stale rename entry naming name is
-// dropped first (pruneStale). The caller holds the session's lock.
+// dropped first (pruneStale). The caller holds the session's lock, just
+// taken to attach it.
 func Open(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
-	if err := pruneStale(ctx, c, dir, name); err != nil {
+	if err := pruneStale(ctx, c, dir, name, true); err != nil {
 		return nil, "", false, err
 	}
 	return Reopen(ctx, c, dir, cfg, name)
@@ -220,12 +221,12 @@ var ErrTaken = errors.New("session exists")
 // no live Runs labelled with it. own is the label of the session being
 // renamed, which may take its label back as its name ("" for a new one).
 // A rename entry naming name that is stale (see pruneStale) is dropped
-// first.
+// first; one whose session's lock is held, by the caller too, is kept.
 func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string) error {
 	if err := CheckName(name); err != nil {
 		return err
 	}
-	if err := pruneStale(ctx, c, dir, name); err != nil {
+	if err := pruneStale(ctx, c, dir, name, false); err != nil {
 		return err
 	}
 	if _, ok, err := state.Load(dir, name); err != nil {
@@ -262,11 +263,13 @@ func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string) err
 
 // pruneStale drops a rename entry naming name (as its session or its
 // label) that is stale: no live Run carries its label, and no process
-// has the session, but for this one holding name's own lock (a caller
-// about to create or attach it). Its file, whose windows' Runs are then
-// all gone, goes with it, as when an attached session's last window ends
-// (Mux.endSession).
-func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string) error {
+// holds its session's lock. attaching makes the one exception: the
+// caller holds name's lock to attach name now (Open), so an entry for
+// name held by this process is its own. Any other lock, this process's
+// included, is a session attached somewhere, which ends itself when its
+// windows do (Mux.endSession). A pruned entry's file, whose windows'
+// Runs are then all gone, goes with it.
+func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string, attaching bool) error {
 	renames, err := state.Renames(dir)
 	if err != nil {
 		return err
@@ -275,7 +278,7 @@ func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string) error {
 		if n != name && l != name {
 			continue
 		}
-		if pid, held := state.Held(dir, n); held && (n != name || pid != strconv.Itoa(os.Getpid())) {
+		if pid, held := state.Held(dir, n); held && !(attaching && n == name && pid == strconv.Itoa(os.Getpid())) {
 			continue
 		}
 		runs, err := c.ListSession(ctx, l)

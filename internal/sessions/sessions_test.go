@@ -121,6 +121,52 @@ func TestRenameEntryKeptWhileAttached(t *testing.T) {
 	}
 }
 
+// TestEntryHeldHereDroppedOnlyByOpen: with its lock held by this process,
+// an ended renamed session's entry and file survive CheckFree and
+// LiveLabel; Open, attaching that name, drops them.
+func TestEntryHeldHereDroppedOnlyByOpen(t *testing.T) {
+	f := newFixture(t)
+	id := f.renamed(true)
+	ctx := context.Background()
+	if err := f.c.Terminate(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := state.Lock(f.dir, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	kept := func(when string) {
+		t.Helper()
+		if r, _ := state.Renames(f.dir); r["b"] != "a" {
+			t.Fatalf("%s: renames %v", when, r)
+		}
+		if _, ok, _ := state.Load(f.dir, "b"); !ok {
+			t.Fatalf("%s: b.json is gone", when)
+		}
+	}
+	for _, n := range []string{"a", "b"} {
+		if err := CheckFree(ctx, f.c, f.dir, n, ""); err == nil {
+			t.Fatalf("CheckFree(%s) while b is held here", n)
+		}
+		kept("CheckFree(" + n + ")")
+	}
+	if l, err := LiveLabel(ctx, f.c, f.dir, "b"); err != nil || l != "a" {
+		t.Fatalf("LiveLabel(b): %q %v", l, err)
+	}
+	kept("LiveLabel(b)")
+	_, label, existed, err := Open(ctx, f.c, f.dir, f.cfg, "b")
+	if err != nil || existed || label != "b" {
+		t.Fatalf("open b: %q %v %v", label, existed, err)
+	}
+	if r, _ := state.Renames(f.dir); len(r) != 0 {
+		t.Fatalf("renames after Open: %v", r)
+	}
+	if _, ok, _ := state.Load(f.dir, "b"); ok {
+		t.Fatal("b.json left after Open")
+	}
+}
+
 // TestMoveInterrupted: a rename that stopped after any of its steps is
 // recovered when the session is opened by its new name: one file, under
 // the new name, with its windows; the old name hidden.

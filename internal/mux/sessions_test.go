@@ -755,6 +755,69 @@ func TestRenameSessionCollision(t *testing.T) {
 	h.detach()
 }
 
+// TestNameCheckKeepsAttachedRenamedSession: a renamed session attached
+// here whose only Run ended keeps both its names: the new-session
+// dialog's name check and NewSession refuse its name and leave its file
+// and rename entry, so a relaunch and the next attach still use its
+// Runs' label.
+func TestNameCheckKeepsAttachedRenamedSession(t *testing.T) {
+	h := newMulti(t)
+	h.attach("a")
+	id := h.on("a")
+	m := h.con.Current()
+	if err := m.RenameSession("a", "b"); err != nil {
+		t.Fatalf("rename a to b: %v", err)
+	}
+	h.lux.End(id, "terminated", "terminated")
+	h.waitFor("window ended", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.windows[0].phase == phaseDead
+	})
+	kept := func(when string) {
+		t.Helper()
+		if r, _ := state.Renames(h.dir); len(r) != 1 || r["b"] != "a" {
+			t.Fatalf("%s: renames %v", when, r)
+		}
+		if _, ok, _ := state.Load(h.dir, "b"); !ok {
+			t.Fatalf("%s: b.json is gone", when)
+		}
+	}
+	if err := m.CheckSessionName(context.Background(), "b"); !errors.Is(err, sessions.ErrTaken) {
+		t.Fatalf("CheckSessionName(b): %v", err)
+	}
+	kept("after CheckSessionName")
+	if m.NewSession(&NewSessionRequest{Name: "b", ProfileName: "default", Profile: h.cfg.Profiles["default"]}) {
+		t.Fatal("NewSession(b) started")
+	}
+	kept("after NewSession")
+	if m.Session() != "b" {
+		t.Fatalf("session is %q", m.Session())
+	}
+	h.type_("r")
+	h.waitFor("relaunched", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.windows[0].RunID != "" && m.windows[0].RunID != id
+	})
+	m.mu.Lock()
+	nid := m.windows[0].RunID
+	m.mu.Unlock()
+	if l := h.lux.Run(nid).Labels[config.LabelSession]; l != "a" {
+		t.Fatalf("the relaunched Run is labelled %q", l)
+	}
+	h.detach()
+	kept("after the detach")
+	list, err := sessions.List(context.Background(), h.cl, h.dir)
+	if err != nil || len(list) != 1 || list[0].Name != "b" || list[0].Label != "a" {
+		t.Fatalf("list %+v %v", list, err)
+	}
+	sess, label, existed, err := sessions.Open(context.Background(), h.cl, h.dir, h.cfg, "b")
+	if err != nil || !existed || label != "a" || len(sess.Windows) != 1 || sess.Windows[0].RunID != nid {
+		t.Fatalf("open b: %+v %q %v %v", sess, label, existed, err)
+	}
+}
+
 // TestSessionPreviewClosedOnMove: moving the chooser's highlight from
 // one previewed session to another closes the first preview's stream
 // while the chooser is still open.
