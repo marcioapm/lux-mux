@@ -77,7 +77,7 @@ func (m *Mux) launch(w *Window) {
 		m.markDead(w, err.Error())
 		return
 	}
-	sp, err := config.RunSpec(spec, config.Target{Session: m.opt.Session, Profile: profile}, secrets)
+	sp, err := config.RunSpec(spec, config.Target{Session: m.label, Profile: profile}, secrets)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
@@ -269,11 +269,13 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	var run *api.Run
 	if err == nil {
 		var sp api.RunSpec
-		sp, err = config.RunSpec(p, config.Target{Session: m.opt.Session, Profile: name, Spare: true}, secrets)
+		sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
 		if err == nil {
 			// Not cancelled by a detach: lux may make the Run anyway,
-			// and luxmux must learn its id to record it.
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(m.ctx), 30*time.Second)
+			// and luxmux must learn its id to record it. A switch does
+			// cancel it (stopSpares): the next attach's listing records
+			// the Run lux made (sessions.Open).
+			ctx, cancel := context.WithTimeout(m.spareCtx, 30*time.Second)
 			run, err = m.lux.Submit(ctx, sp)
 			cancel()
 		}
@@ -400,7 +402,7 @@ func (m *Mux) Recent() (images, repos []string) {
 
 // Validate is lux's dry run of the spec a profile makes.
 func (m *Mux) Validate(ctx context.Context, name string, p config.Profile) (*api.SubmitAnswer, error) {
-	sp, err := config.RunSpec(p, config.Target{Session: m.opt.Session, Profile: name}, nil)
+	sp, err := config.RunSpec(p, config.Target{Session: m.label, Profile: name}, nil)
 	if err != nil {
 		return nil, err
 	}

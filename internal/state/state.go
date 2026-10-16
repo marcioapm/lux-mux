@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,14 +86,20 @@ func Load(dir, session string) (s *Session, ok bool, err error) {
 
 // Save writes the session's file atomically.
 func Save(dir string, s *Session) error {
+	return writeJSON(dir, s.Name+".*.tmp", Path(dir, s.Name), s)
+}
+
+// writeJSON writes v to path atomically, through a temporary file in dir
+// named after pattern (os.CreateTemp).
+func writeJSON(dir, pattern, path string, v any) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(s, "", "  ")
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, s.Name+".*.tmp")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -104,11 +112,18 @@ func Save(dir string, s *Session) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), Path(dir, s.Name))
+	return os.Rename(tmp.Name(), path)
 }
 
 // ErrLocked is Lock's error when another process has the session.
 var ErrLocked = errors.New("session is attached elsewhere")
+
+// lockTries×lockEvery is how long Lock retries a held lock: Held's probe
+// holds a shared lock for a moment.
+const (
+	lockTries = 4
+	lockEvery = 5 * time.Millisecond
+)
 
 // Lock takes the session's advisory lock, <dir>/<session>.lock, held
 // until unlock is called or the process exits: one luxmux process per
@@ -117,17 +132,22 @@ func Lock(dir, session string) (unlock func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, session+".lock")
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(lockPath(dir, session), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		b := make([]byte, 32)
-		n, _ := f.ReadAt(b, 0)
+	for i := 1; ; i++ {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) || i == lockTries {
+			break
+		}
+		time.Sleep(lockEvery)
+	}
+	if err != nil {
+		pid := lockPid(f)
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			if pid := strings.TrimSpace(string(b[:n])); pid != "" {
+			if pid != "" {
 				return nil, fmt.Errorf("%w (pid %s)", ErrLocked, pid)
 			}
 			return nil, ErrLocked
@@ -136,11 +156,22 @@ func Lock(dir, session string) (unlock func(), err error) {
 	}
 	_ = f.Truncate(0)
 	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
-	return func() {
+	// Once: a second unlock must not flock a descriptor number reused
+	// by another file.
+	return sync.OnceFunc(func() {
 		_ = f.Truncate(0)
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
-	}, nil
+	}), nil
+}
+
+func lockPath(dir, session string) string { return filepath.Join(dir, session+".lock") }
+
+// lockPid is the pid a lock file names ("": none).
+func lockPid(f *os.File) string {
+	b := make([]byte, 32)
+	n, _ := f.ReadAt(b, 0)
+	return strings.TrimSpace(string(b[:n]))
 }
 
 // Remove deletes a session's file; a missing one is fine.
@@ -163,12 +194,87 @@ func List(dir string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range ents {
-		if n, ok := strings.CutSuffix(e.Name(), ".json"); ok && !e.IsDir() {
+		// Only session names: renamesFile starts with a dot, which no
+		// session name does.
+		if n, ok := strings.CutSuffix(e.Name(), ".json"); ok && !e.IsDir() && config.NameRe.MatchString(n) {
 			out = append(out, n)
 		}
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// Held reports whether another process holds session's lock, and the pid
+// it wrote. The probe takes a shared lock without blocking and drops it
+// at once; Lock retries past it. It only probes a lock file that names a
+// pid (Unlock empties it).
+func Held(dir, session string) (pid string, held bool) {
+	f, err := os.Open(lockPath(dir, session))
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	if pid = lockPid(f); pid == "" {
+		// Unlock empties the file, and Lock writes its pid once it holds it.
+		return "", false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		return pid, errors.Is(err, syscall.EWOULDBLOCK)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return "", false
+}
+
+// renamesFile maps a renamed session's name to the luxmux-session label
+// its Runs keep: lux cannot change a Run's labels.
+const renamesFile = ".renames.json"
+
+// Renames is the rename map: session name → its Runs' label. A session
+// absent from it is labelled with its own name.
+func Renames(dir string) (map[string]string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, renamesFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Join(dir, renamesFile), err)
+	}
+	return m, nil
+}
+
+// SetRenamed records that session old is now named new, its Runs keeping
+// label. A session renamed back to its label leaves the map.
+func SetRenamed(dir, old, new, label string) error {
+	m, err := Renames(dir)
+	if err != nil {
+		return err
+	}
+	delete(m, old)
+	if new != label {
+		m[new] = label
+	}
+	return writeRenames(dir, m)
+}
+
+// DropRenamed forgets a session's entry (it was killed or ended).
+func DropRenamed(dir, name string) error {
+	m, err := Renames(dir)
+	if err != nil {
+		return err
+	}
+	if _, ok := m[name]; !ok {
+		return nil
+	}
+	delete(m, name)
+	return writeRenames(dir, m)
+}
+
+func writeRenames(dir string, m map[string]string) error {
+	return writeJSON(dir, ".renames.*.tmp", filepath.Join(dir, renamesFile), m)
 }
 
 // Live reports whether a Run's state is one a window can follow: anything
@@ -190,16 +296,74 @@ func Adoptable(r *api.Run, session string) bool {
 		r.Labels[config.LabelSpare] != "true" && Live(r.State) && !Terminating(r)
 }
 
-// Rebuild makes a session from the Runs lux lists for it (those labelled
-// with the session), for when its file is gone: its non-terminated Runs
-// that are not a waiting warm spare, oldest first. Names are lost: each
-// window is named after its profile. A Run whose spec lux returns gets
-// that spec as its window's (profiles: the configuration's, by name).
-func Rebuild(session string, runs []*api.Run, profiles map[string]config.Profile) *Session {
-	s := &Session{Name: session}
+// RecordExternal appends to sess the Runs new-window made that its file
+// lacks (label: the luxmux-session label of the session's Runs):
+// new-window found the session attached and left the record to that
+// process, which detached before it adopted them. A Run being terminated
+// (its window was closed there) is not one.
+func RecordExternal(sess *Session, label string, runs []*api.Run, profiles map[string]config.Profile) {
+	for _, r := range runs {
+		if !Adoptable(r, label) {
+			continue
+		}
+		if slices.ContainsFunc(sess.Windows, func(w Window) bool { return w.RunID == r.ID }) {
+			continue
+		}
+		sess.Windows = append(sess.Windows, WindowFromRun(r, profiles[r.Labels[config.LabelProfile]]))
+	}
+}
+
+// RecordSpares puts into sess's empty spare slots the waiting spares lux
+// has of it (label: its Runs' luxmux-session label) that its file does
+// not know: a submit a switch cancelled may still have made its Run. A
+// slot already filled keeps its spare; the newest Run wins an empty one.
+func RecordSpares(sess *Session, label string, runs []*api.Run) {
+	known := map[string]bool{}
+	for _, w := range sess.Windows {
+		known[w.RunID] = true
+	}
+	for _, id := range sess.Claimed {
+		known[id] = true
+	}
+	for _, id := range sess.Spares {
+		known[id] = true
+	}
+	filled := map[string]bool{}
+	for key, id := range sess.Spares {
+		filled[key] = id != ""
+	}
+	byAge := slices.Clone(runs)
+	sort.SliceStable(byAge, func(i, j int) bool { return byAge[i].CreatedAt.After(byAge[j].CreatedAt) })
+	for _, r := range byAge {
+		if r.Labels[config.LabelSession] != label || r.Labels[config.LabelSpare] != "true" || known[r.ID] ||
+			!waitingSpare[r.State] || Terminating(r) {
+			continue
+		}
+		key := r.Labels[config.LabelSpec]
+		if key == "" || filled[key] {
+			continue
+		}
+		if sess.Spares == nil {
+			sess.Spares = map[string]string{}
+		}
+		sess.Spares[key], filled[key] = r.ID, true
+	}
+}
+
+// waitingSpare are the states of a spare that may still be claimed.
+var waitingSpare = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
+
+// RebuildLabelled makes session name from the Runs lux lists for it (those
+// labelled label: its name, or its old one if it was renamed, see
+// Renames), for when its file is gone: its non-terminated Runs that are
+// not a waiting warm spare, oldest first. Names are lost: each window is
+// named after its profile. A Run whose spec lux returns gets that spec
+// as its window's (profiles: the configuration's, by name).
+func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]config.Profile) *Session {
+	s := &Session{Name: name}
 	live := make([]*api.Run, 0, len(runs))
 	for _, r := range runs {
-		if r.Labels[config.LabelSession] != session || !Live(r.State) {
+		if r.Labels[config.LabelSession] != label || !Live(r.State) {
 			continue
 		}
 		live = append(live, r)
@@ -317,7 +481,7 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 }
 
 // sortWindowsByCreation orders windows by their Runs' creation, after
-// Rebuild appended claimed spares out of order.
+// RebuildLabelled appended claimed spares out of order.
 func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	at := map[string]time.Time{}
 	for _, r := range runs {

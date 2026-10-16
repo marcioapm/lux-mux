@@ -900,12 +900,12 @@ func (m *Mux) discoverWindows() {
 	defer tick.Stop()
 	for {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		runs, err := m.lux.ListSession(ctx, m.opt.Session)
+		runs, err := m.lux.ListSession(ctx, m.label)
 		cancel()
 		if err == nil {
 			m.pruneConsidered(runs)
 			for _, r := range runs {
-				if state.Adoptable(r, m.opt.Session) && m.markConsidered(r.ID) {
+				if state.Adoptable(r, m.label) && m.markConsidered(r.ID) {
 					m.adoptRun(r)
 				}
 			}
@@ -967,7 +967,7 @@ func (m *Mux) considerRun(id string) {
 			m.mu.Unlock()
 			return
 		}
-		if state.Adoptable(r, m.opt.Session) {
+		if state.Adoptable(r, m.label) {
 			m.adoptRun(r)
 		}
 	})

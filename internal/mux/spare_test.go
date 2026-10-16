@@ -67,7 +67,9 @@ func TestWarmSpare(t *testing.T) {
 		t.Fatalf("claiming must submit only the replacement, submitted %d", n)
 	}
 	s, _, _ := state.Load(h.dir, "s")
-	if len(s.Claimed) != 1 || s.Claimed[0] != spare || s.Spares[config.SpecKey(h.cfg.Profiles["dev"])] != spareOf(h) {
+	// The first window's launch may itself claim a spare keepSpares made first.
+	claimed := slices.DeleteFunc(slices.Clone(s.Claimed), func(id string) bool { return id == first })
+	if !slices.Equal(claimed, []string{spare}) || s.Spares[config.SpecKey(h.cfg.Profiles["dev"])] != spareOf(h) {
 		t.Fatalf("state: claimed %v spares %v", s.Claimed, s.Spares)
 	}
 	// The last window's exit ends the session and terminates the spare.
@@ -112,6 +114,20 @@ type fakeUI struct {
 	helpMu   sync.Mutex
 	helpOpen bool
 	helpGot  []byte
+
+	// session answers ChooseSession; sessionOpen, when set, is called
+	// with the Mux while the session chooser is open.
+	session     SessionChoice
+	sessionOpen func(m *Mux)
+}
+
+func (f *fakeUI) ChooseSession(m *Mux) (SessionChoice, error) {
+	out, _, _ := m.Terminal()
+	_, _ = out.Write([]byte("\x1b[2J\x1b[HSESSIONS-OPEN"))
+	if f.sessionOpen != nil {
+		f.sessionOpen(m)
+	}
+	return f.session, nil
 }
 
 func (f *fakeUI) Choose(m *Mux) (ChooseResult, error) {
@@ -453,7 +469,7 @@ func TestRebuiltSessionClaimsSpareBySpec(t *testing.T) {
 		r := h.lux.Run(id)
 		runs = append(runs, &r)
 	}
-	sess := state.Rebuild("s", runs, nil)
+	sess := state.RebuildLabelled("s", "s", runs, nil)
 	submits := len(h.lux.Submits())
 	h.start(sess)
 	h.live(0)

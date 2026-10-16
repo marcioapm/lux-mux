@@ -101,6 +101,15 @@ type Server struct {
 	failGets map[string]bool
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
+	// feeds counts the event feed requests being served.
+	feeds int
+}
+
+// Feeds is how many event feed requests are being served.
+func (s *Server) Feeds() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.feeds
 }
 
 // FailAttaches makes every attach to Run id end at once, its first frame
@@ -732,7 +741,13 @@ func (s *Server) attach(w http.ResponseWriter, req *http.Request) {
 func (s *Server) feed(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	after := len(s.events)
+	s.feeds++
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.feeds--
+		s.mu.Unlock()
+	}()
 	if a := req.URL.Query().Get("after"); a != "" {
 		after, _ = strconv.Atoi(a)
 	} else if a := req.Header.Get("Last-Event-ID"); a != "" {

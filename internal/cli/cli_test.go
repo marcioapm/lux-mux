@@ -148,6 +148,58 @@ func TestNotSignedIn(t *testing.T) {
 	_ = os.Remove(env.ConfigPath)
 }
 
+// TestKillSessionDropsEndedRenameEntry: kill-session of a renamed session
+// that has no file and whose Runs all ended drops its rename entry, so
+// both of its names are free again.
+func TestKillSessionDropsEndedRenameEntry(t *testing.T) {
+	lux := fakelux.New()
+	defer lux.Close()
+	id := submit(t, lux, "old", "default", false)
+	env, _, errb := testEnv(t, lux, "")
+	if err := state.SetRenamed(env.StateDir, "old", "new", "old"); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := luxapi.New(lux.Config())
+	if err := c.Terminate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"kill-session", "-t", "new", "-y"}); code != 0 {
+		t.Fatalf("kill-session: %s", errb.String())
+	}
+	if r, _ := state.Renames(env.StateDir); len(r) != 0 {
+		t.Fatalf("renames after the kill: %v", r)
+	}
+}
+
+// TestAbandonedRenamedName: session a renamed to b, with no file, no
+// live Run and nobody attached. new -s b, which takes b's lock before
+// its name check, gets past that check and drops the entry (it then
+// stops at the missing terminal), and new-window -t b refuses it as
+// attach does.
+func TestAbandonedRenamedName(t *testing.T) {
+	for _, cmd := range []string{"new", "new-window"} {
+		t.Run(cmd, func(t *testing.T) {
+			lux := fakelux.New()
+			defer lux.Close()
+			env, _, errb := testEnv(t, lux, "")
+			if err := state.SetRenamed(env.StateDir, "a", "b", "a"); err != nil {
+				t.Fatal(err)
+			}
+			args := map[string][]string{"new": {"new", "-s", "b"}, "new-window": {"new-window", "-t", "b"}}[cmd]
+			want := map[string]string{"new": "luxmux needs a terminal", "new-window": "no session b: luxmux new -s b"}[cmd]
+			if code := Main(env, args); code == 0 || !strings.Contains(errb.String(), want) {
+				t.Fatalf("%v: %d %q", args, code, errb.String())
+			}
+			if r, _ := state.Renames(env.StateDir); len(r) != 0 {
+				t.Fatalf("renames after %v: %v", args, r)
+			}
+			if n := len(lux.Submits()); n != 0 {
+				t.Fatalf("%d submits", n)
+			}
+		})
+	}
+}
+
 // TestAttachRefusedWhileAttached: a session attached by another process
 // (its lock held) is not attached a second time.
 func TestAttachRefusedWhileAttached(t *testing.T) {

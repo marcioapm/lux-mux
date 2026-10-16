@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,11 +33,25 @@ type UI interface {
 	Choose(m *Mux) (ChooseResult, error)
 	NewDialog(m *Mux) (*NewWindowRequest, error)
 	Help(m *Mux) error
+	// ChooseSession runs the session chooser. Its renames and kills
+	// happen through the Mux as they are made.
+	ChooseSession(m *Mux) (SessionChoice, error)
 }
 
 // Options configure a Mux.
 type Options struct {
-	Session  string
+	Session string
+	// Label is the luxmux-session label of the session's Runs: its name,
+	// unless it was renamed (sessions.Label). Empty: Session.
+	Label string
+	// Unlock releases the session's lock (nil: none is held).
+	Unlock func()
+	// Console is the terminal and keyboard, shared by the sessions one
+	// process shows in turn. Nil: New makes one of In and Out, closed
+	// when the session ends.
+	Console *Console
+	// Notice is shown once the session is on the terminal.
+	Notice   string
 	Config   *config.Config
 	Lux      *luxapi.Client
 	StateDir string
@@ -73,6 +88,12 @@ type Options struct {
 	// new-window made while the feed was down (default 30s). Unexported:
 	// only tests change it.
 	discoverEvery time.Duration
+	// switchOpenWait bounds opening a switch's target (default
+	// switchOpenWait). Unexported: only tests change it.
+	switchOpenWait time.Duration
+	// afterSwitchUnlock, when set, runs once a switch released this
+	// session's lock and before it takes the target's. Only tests set it.
+	afterSwitchUnlock func()
 	// writeKeys writes one message of keystrokes to a stream (default
 	// wsjson.Write). Unexported: only tests change it.
 	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
@@ -85,16 +106,32 @@ type Mux struct {
 	keys *keys.Machine
 	in   *input
 	// tw is the only writer of the terminal (opt.Out).
-	tw *termWriter
+	tw      *termWriter
+	console *Console
+	// label is the luxmux-session label of the session's Runs, and of
+	// those it makes: a rename keeps it.
+	label string
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// spareCtx bounds spare submits: a detach does not cancel them (lux
+	// may make the Run, and its id must be recorded); a switch does.
+	spareCtx   context.Context
+	stopSpares context.CancelFunc
+	// inputDone closes when the input loop returned: the next session's
+	// loop must not start while this one can still take a key.
+	inputDone chan struct{}
 
 	// mu guards the windows, the order of what is queued for the terminal
 	// and the session state. Nothing waits on the terminal, a stream or an
 	// emulator while holding it.
-	mu        sync.Mutex
+	mu sync.Mutex
+	// name is the session's name (a rename changes it); unlock releases
+	// the lock of that name.
+	name      string
+	unlock    func()
+	next      *switchTarget
 	windows   []*Window
 	active    int
 	last      int
@@ -122,6 +159,11 @@ type Mux struct {
 	ending    bool
 	done      chan string // the reason Run returns
 	crashOnce sync.Once
+	// preview follows another session's shown window for the session
+	// chooser.
+	preview sessionPreview
+	// stepping: a C-b ( or ) is listing the sessions.
+	stepping atomic.Bool
 }
 
 // ErrNoSession is returned by Open for attach to a session lux has no
@@ -156,6 +198,9 @@ func (o *Options) defaults() {
 	if o.discoverEvery == 0 {
 		o.discoverEvery = 30 * time.Second
 	}
+	if o.switchOpenWait == 0 {
+		o.switchOpenWait = switchOpenWait
+	}
 	if o.writeKeys == nil {
 		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
 			return wsjson.Write(ctx, c, d)
@@ -175,13 +220,19 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: newTermWriter(opt.Out),
+	con := opt.Console
+	if con == nil {
+		con = NewConsole(opt.In, opt.Out)
+	}
+	if opt.Label == "" {
+		opt.Label = opt.Session
+	}
+	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
+		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, done: make(chan string, 1)}
-	m.in = &input{r: opt.In, spawn: m.goSafe}
-	m.tw.caughtUp = m.terminalCaughtUp
-	m.goSafe(m.tw.run)
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
 	for _, sw := range sess.Windows {
 		spec := opt.Config.Profiles[sw.Profile]
 		if sw.Spec != nil {
@@ -194,6 +245,13 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	}
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
+	// A slot reserved with no id is a submit a switch cancelled: it is
+	// free (sessions.Open records the Run lux may have made in it).
+	for key, id := range sess.Spares {
+		if id == "" {
+			delete(sess.Spares, key)
+		}
+	}
 	return m, nil
 }
 
@@ -212,7 +270,11 @@ func clamp(i, n int) int {
 }
 
 // Session is the session's name.
-func (m *Mux) Session() string { return m.opt.Session }
+func (m *Mux) Session() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.name
+}
 
 // Config is the configuration.
 func (m *Mux) Config() *config.Config { return m.config() }
@@ -250,9 +312,12 @@ func (m *Mux) OnResize(fn func(rows, cols int)) {
 // Context ends when the session does.
 func (m *Mux) Context() context.Context { return m.ctx }
 
-// Run shows the session until it is detached, its last window closes, or
-// ctx ends. It returns why: "detached", "exited" or ctx's error.
+// Run shows the session until it is detached, its last window closes,
+// another session is switched to, or ctx ends. It returns why:
+// "detached", "exited", "switch" or ctx's error.
 func (m *Mux) Run(ctx context.Context) (string, error) {
+	m.console.cur.Store(m)
+	m.tw.setCaughtUp(m.terminalCaughtUp)
 	m.goSafe(func() {
 		select {
 		case <-ctx.Done():
@@ -279,15 +344,21 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	}
 	m.repaintLocked()
 	m.saveLocked()
+	if m.opt.Notice != "" {
+		m.setNoticeLocked(m.opt.Notice)
+	}
 	m.mu.Unlock()
 	m.wg.Add(3)
 	m.goSafe(m.discoverWindows)
 	m.goSafe(m.followEvents)
 	m.goSafe(m.keepSpares)
-	m.goSafe(m.inputLoop)
+	m.goSafe(func() {
+		defer close(m.inputDone)
+		m.inputLoop()
+	})
 	<-m.ctx.Done()
 	reason := <-m.done
-	m.shutdown()
+	m.shutdown(reason == reasonSwitch)
 	if reason == "" && ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -303,27 +374,41 @@ func (m *Mux) finish(reason string) {
 	m.cancel()
 }
 
-// shutdown closes every stream and waits for the goroutines; the Runs
-// keep running. The terminal is left as it was found.
-func (m *Mux) shutdown() {
+// shutdown closes every stream, the event feed and the session preview,
+// and waits for the session's goroutines, the input loop's included; the
+// Runs keep running and the state is saved. For a switch, spare submits
+// in flight are cancelled rather than waited for. A Console the session
+// made is closed; a shared one is left to the next session, its terminal
+// reset.
+func (m *Mux) shutdown(switching bool) {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
 	m.saveLocked()
 	m.suspended = true
 	m.tw.enqueue(screen.Reset(nil))
 	m.mu.Unlock()
+	if switching {
+		m.stopSpares()
+	}
 	for _, w := range ws {
 		if c := w.getConn(); c != nil {
 			c.CloseNow()
 		}
 	}
+	// The input loop first: an open session chooser may still start a
+	// preview until it returns.
+	<-m.inputDone
+	m.stopSessionPreview()
 	m.wg.Wait()
+	m.stopSpares()
 	m.mu.Lock()
 	for _, w := range ws {
 		m.closeFeedLocked(w)
 	}
 	m.mu.Unlock()
-	m.tw.close(2 * time.Second)
+	if m.opt.Console == nil {
+		m.tw.close(2 * time.Second)
+	}
 }
 
 func (m *Mux) closeFeedLocked(w *Window) {
@@ -390,7 +475,7 @@ func (m *Mux) indexLocked(w *Window) int {
 
 // titleLocked is the terminal title naming w: luxmux:<session> [i] name.
 func (m *Mux) titleLocked(w *Window) string {
-	return fmt.Sprintf("luxmux:%s [%d] %s", m.opt.Session, m.indexLocked(w), w.Name)
+	return fmt.Sprintf("luxmux:%s [%d] %s", m.name, m.indexLocked(w), w.Name)
 }
 
 // paintKind is why a window is painted; it decides what is drawn instead
@@ -855,7 +940,11 @@ func (m *Mux) endSession() {
 		m.terminate(id)
 	}
 	if m.opt.StateDir != "" {
-		_ = state.Remove(m.opt.StateDir, m.opt.Session)
+		m.mu.Lock()
+		name := m.name
+		m.mu.Unlock()
+		_ = state.Remove(m.opt.StateDir, name)
+		_ = state.DropRenamed(m.opt.StateDir, name)
 	}
 	m.finish("exited")
 }

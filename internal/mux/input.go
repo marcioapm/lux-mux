@@ -273,6 +273,12 @@ func (m *Mux) inputLoop() {
 // handleInput routes one chunk of keyboard input.
 func (m *Mux) handleInput(b []byte) {
 	for len(b) > 0 {
+		if m.ctx.Err() != nil {
+			// Switched to another session (or detached) by a key before
+			// these: they are the next session's.
+			m.in.unreadFirst(b)
+			return
+		}
 		m.mu.Lock()
 		if b = m.keys.SkipReleases(b); len(b) == 0 {
 			m.mu.Unlock()
@@ -306,7 +312,7 @@ func (m *Mux) handleInput(b []byte) {
 		m.mu.Unlock()
 		for _, a := range acts {
 			switch {
-			case a.IsCmd() && (a.Cmd.Op == config.OpChoose || a.Cmd.Op == config.OpNewDialog || a.Cmd.Op == config.OpHelp):
+			case a.IsCmd() && opensDialog(a.Cmd.Op):
 				// What was typed after the key is the dialog's: Feed
 				// stops at a command, so this is the last action.
 				m.in.unreadFirst(rest)
@@ -320,6 +326,16 @@ func (m *Mux) handleInput(b []byte) {
 		}
 		b = rest
 	}
+}
+
+// opensDialog reports whether op's command takes the keyboard, so what
+// was typed after its key is handed to it.
+func opensDialog(op string) bool {
+	switch op {
+	case config.OpChoose, config.OpNewDialog, config.OpHelp, config.OpChooseSession:
+		return true
+	}
+	return false
 }
 
 // relaunchOrResume is r on an ended window: a stopped Run is resumed, any
@@ -350,6 +366,16 @@ func (m *Mux) command(c config.Command) {
 		m.openChooser()
 	case config.OpHelp:
 		m.openHelp()
+	case config.OpChooseSession:
+		m.openSessionChooser()
+	case config.OpNextSession:
+		m.stepSession(1)
+	case config.OpPrevSession:
+		m.stepSession(-1)
+	case config.OpRenameSession:
+		m.mu.Lock()
+		m.askRenameSessionLocked()
+		m.mu.Unlock()
 	case config.OpRelaunch:
 		m.mu.Lock()
 		w := m.activeLocked()

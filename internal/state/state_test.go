@@ -101,7 +101,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	r := run("run_1", "work", "dev", "running", 1, false)
 	r.Spec = sp
 	r.Labels[config.LabelWindow] = "named"
-	s := Rebuild("work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
+	s := RebuildLabelled("work", "work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
 	if len(s.Windows) != 1 || s.Windows[0].Name != "named" || s.Windows[0].Profile != "dev" || s.Windows[0].Spec == nil {
 		t.Fatalf("%+v", s.Windows)
 	}
@@ -115,7 +115,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	}
 	// A Run listed without its spec keeps the profile name only.
 	bare := run("run_2", "work", "dev", "running", 2, false)
-	if s := Rebuild("work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
+	if s := RebuildLabelled("work", "work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
 		t.Fatalf("%+v", s.Windows[0])
 	}
 }
@@ -212,7 +212,7 @@ func TestRebuild(t *testing.T) {
 		run("run_2", "work", "app", "stopped", 20, true), // an older spare: claimed
 		run("run_4", "work", "app", "running", 40, true), // the newest spare: waiting
 	}
-	s := Rebuild("work", runs, nil)
+	s := RebuildLabelled("work", "work", runs, nil)
 	var ids []string
 	for _, w := range s.Windows {
 		ids = append(ids, w.RunID)
@@ -240,7 +240,7 @@ func TestRebuildBySpec(t *testing.T) {
 		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
 		run("run_e", "work", "legacy", "running", 50, true),
 	}
-	s := Rebuild("work", runs, nil)
+	s := RebuildLabelled("work", "work", runs, nil)
 	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
@@ -306,5 +306,38 @@ func TestLock(t *testing.T) {
 	u3()
 	if names, _ := List(dir); len(names) != 0 {
 		t.Fatalf("lock files listed as sessions: %v", names)
+	}
+}
+
+// TestRecordSpares: lux's waiting spares of the session fill only its
+// empty slots, the newest Run per slot; a filled slot keeps its spare,
+// and a spare being terminated, ended, of another label, without a spec
+// key, or already a window's Run (claimed or not) is skipped.
+func TestRecordSpares(t *testing.T) {
+	spare := func(id, label, key, st string, at int) *api.Run {
+		r := run(id, label, "dev", st, at, true)
+		r.Labels[config.LabelSpec] = key
+		return r
+	}
+	stopping := spare("run_stop", "work", "k3", "running", 9)
+	stopping.StateReason = "terminate"
+	runs := []*api.Run{
+		spare("run_old", "work", "k1", "running", 1),
+		spare("run_new", "work", "k1", "starting", 2),
+		spare("run_lux", "work", "k2", "running", 3),
+		stopping,
+		spare("run_k3", "work", "k3", "running", 4),
+		spare("run_end", "work", "k4", "terminated", 5),
+		spare("run_other", "play", "k5", "running", 6),
+		spare("run_cl", "work", "k6", "running", 10),
+		spare("run_win", "work", "k7", "running", 11),
+		spare("run_nokey", "work", "", "running", 12),
+	}
+	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"},
+		Claimed: []string{"run_cl"}, Windows: []Window{{RunID: "run_win"}}}
+	RecordSpares(s, "work", runs)
+	want := map[string]string{"k1": "run_new", "k2": "run_kept", "k3": "run_k3"}
+	if !reflect.DeepEqual(s.Spares, want) {
+		t.Fatalf("spares %v, want %v", s.Spares, want)
 	}
 }

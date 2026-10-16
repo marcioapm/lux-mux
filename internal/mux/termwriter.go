@@ -22,7 +22,8 @@ import (
 type termWriter struct {
 	out io.Writer
 	// caughtUp runs, on the writer's goroutine, once the queue is empty
-	// after live output was dropped.
+	// after live output was dropped. Guarded by mu: the session attached
+	// changes it.
 	caughtUp func()
 
 	mu      sync.Mutex
@@ -113,6 +114,13 @@ func (t *termWriter) add(it termItem) {
 	t.signal()
 }
 
+// setCaughtUp makes fn the writer's caughtUp (nil: none).
+func (t *termWriter) setCaughtUp(fn func()) {
+	t.mu.Lock()
+	t.caughtUp = fn
+	t.mu.Unlock()
+}
+
 // caughtUpDone is called by the repaint caughtUp asked for, under m.mu
 // before it queues the repaint: live output after it is queued again.
 func (t *termWriter) caughtUpDone() {
@@ -165,9 +173,9 @@ func (t *termWriter) run() {
 				t.mu.Unlock()
 				return
 			}
-			if t.behind && t.caughtUp != nil {
+			if caught := t.caughtUp; t.behind && caught != nil {
 				t.mu.Unlock()
-				t.caughtUp()
+				caught()
 				t.mu.Lock()
 				if len(t.q) > 0 || t.closed {
 					continue

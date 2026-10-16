@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 	"time"
 
@@ -13,13 +12,15 @@ import (
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/sessions"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // submitWindow checks p's spec with lux's dry run, then submits it as a
-// window of session that an attached luxmux adopts.
-func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profile, name string, p config.Profile) (state.Window, error) {
-	t := config.Target{Session: session, Profile: profile}
+// window of the session whose Runs are labelled label, which an attached
+// luxmux adopts.
+func submitWindow(ctx context.Context, env Env, c *luxapi.Client, label, profile, name string, p config.Profile) (state.Window, error) {
+	t := config.Target{Session: label, Profile: profile}
 	sp, err := externalSpec(p, t, name, nil)
 	if err != nil {
 		return state.Window{}, err
@@ -125,7 +126,7 @@ func windowProfile(cfg *config.Config, sessionDefault string, o windowFlags, war
 // from lux's event feed. With none attached, the lock is taken for the
 // time it takes to submit and record the window.
 func newWindow(env Env, o windowFlags) error {
-	if err := checkName(o.Session); err != nil {
+	if err := sessions.CheckName(o.Session); err != nil {
 		return err
 	}
 	unlock, err := state.Lock(env.StateDir, o.Session)
@@ -146,7 +147,13 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	runs, err := c.ListSession(ctx, o.Session)
+	// Its lock taken here, a renamed session whose Runs all ended is
+	// dropped and refused below, as attach does.
+	label, err := sessions.LiveLabel(ctx, c, env.StateDir, o.Session, !attached)
+	if err != nil {
+		return err
+	}
+	runs, err := c.ListSession(ctx, label)
 	if err != nil {
 		return err
 	}
@@ -156,7 +163,7 @@ func newWindow(env Env, o windowFlags) error {
 		return err
 	}
 	if !ok {
-		sess = state.Rebuild(o.Session, runs, cfg.Profiles)
+		sess = state.RebuildLabelled(o.Session, label, runs, cfg.Profiles)
 	}
 	if !ok && len(sess.Windows) == 0 {
 		return fmt.Errorf("no session %s: luxmux new -s %s", o.Session, o.Session)
@@ -165,7 +172,7 @@ func newWindow(env Env, o windowFlags) error {
 	if err != nil {
 		return err
 	}
-	w, err := submitWindow(ctx, env, c, o.Session, profile, o.Name, p)
+	w, err := submitWindow(ctx, env, c, label, profile, o.Name, p)
 	if err != nil {
 		return err
 	}
@@ -177,20 +184,4 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	fmt.Fprintln(env.Stdout, w.RunID)
 	return nil
-}
-
-// recordExternal appends to sess the Runs new-window made that its file
-// lacks: new-window found the session attached and left the record to
-// that process, which detached before it adopted them. A Run being
-// terminated (its window was closed there) is not one.
-func recordExternal(sess *state.Session, runs []*api.Run, cfg *config.Config) {
-	for _, r := range runs {
-		if !state.Adoptable(r, sess.Name) {
-			continue
-		}
-		if slices.ContainsFunc(sess.Windows, func(w state.Window) bool { return w.RunID == r.ID }) {
-			continue
-		}
-		sess.Windows = append(sess.Windows, state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]]))
-	}
 }

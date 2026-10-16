@@ -35,6 +35,7 @@ func TestHelpSectionsAndConfiguredKeys(t *testing.T) {
 		"C-a c", "new window (the session's default profile)", "C-a C", "new window (dialog)", "C-a n", "C-a p", "C-a 0-9",
 		"C-a l", "C-a '", "C-a w", "window chooser", "C-a ,", "rename window", "C-a &", "kill window",
 		"C-a d", "detach", "C-a ?", "C-a C-a", "send C-a to the window",
+		"C-a s", "session chooser", "C-a )", "next session", "C-a (", "previous session", "C-a $", "rename this session",
 		"M-n", "next window", "M-1", "select window 1",
 		"Tab / Shift-Tab", "Enter", "Space", "Ctrl-S", "Esc", "shell behind"} {
 		if !strings.Contains(out, want) {
@@ -100,7 +101,9 @@ func TestHelpScroll(t *testing.T) {
 	if h.scroll != 1 {
 		t.Fatalf("down: %d", h.scroll)
 	}
-	helpKeys(h, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
+	for range (h.maxScroll() + h.page() - 1) / h.page() {
+		helpKeys(h, tea.KeyMsg{Type: tea.KeyPgDown})
+	}
 	if h.scroll != h.maxScroll() || !strings.Contains(plain(h.View()), "Ctrl-S") {
 		t.Fatalf("pgdown to the end: %d of %d\n%s", h.scroll, h.maxScroll(), plain(h.View()))
 	}
@@ -108,7 +111,10 @@ func TestHelpScroll(t *testing.T) {
 	if h.scroll != max(0, h.maxScroll()-h.page()) {
 		t.Fatalf("pgup: %d", h.scroll)
 	}
-	helpKeys(h, tea.KeyMsg{Type: tea.KeyUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
+	helpKeys(h, tea.KeyMsg{Type: tea.KeyUp})
+	for range h.scroll/h.page() + 2 {
+		helpKeys(h, tea.KeyMsg{Type: tea.KeyPgUp})
+	}
 	if h.scroll != 0 {
 		t.Fatalf("up stops at the top: %d", h.scroll)
 	}
