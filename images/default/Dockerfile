@@ -85,7 +85,8 @@ ENV DISABLE_AUTOUPDATER=1 \
 # The workload's package-manager caches go outside the home: luxmux snapshots
 # /home/agent on every stop, and wheels or tarballs there would be exported and
 # uploaded each time. Set after the build steps, so /tmp/agent-cache is created
-# by the workload user at run time, not left root-owned by the build.
+# by the workload user at run time, not left root-owned by the build. Images
+# built on this one must remove it after root RUN steps (see README.md).
 ENV XDG_CACHE_HOME=/tmp/agent-cache \
     NPM_CONFIG_CACHE=/tmp/agent-cache/npm \
     UV_CACHE_DIR=/tmp/agent-cache/uv

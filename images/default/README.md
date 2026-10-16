@@ -46,6 +46,16 @@ are installed with `npm install --global`, as each vendor documents, into
   on every stop. Agent configuration and sessions (`~/.claude`, `~/.codex`,
   `~/.local/share/opencode`, `~/.config`) stay in the home. A profile's
   `env` can point any of these back into the home.
+- **Building on this image.** The cache variables apply to your build steps
+  too, so a `RUN` as root (`npm install -g`, `uv pip install`, …) leaves a
+  root-owned `/tmp/agent-cache` in your image, and `agent` then gets `EACCES`
+  at run time. End such a step by removing it:
+
+  ```dockerfile
+  USER root
+  RUN npm install -g some-tool && rm -rf /tmp/agent-cache
+  USER agent
+  ```
 - **`/.lux`** is lux's and not in the image: the shim at `/.lux/bin/lux-shim`,
   its runtime volume at `/.lux/run`, file secrets on a tmpfs at
   `/.lux/secrets` and service sockets at `/.lux/services`.
