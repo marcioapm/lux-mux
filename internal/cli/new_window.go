@@ -126,7 +126,7 @@ func windowProfile(cfg *config.Config, sessionDefault string, o windowFlags, war
 // from lux's event feed. With none attached, the lock is taken for the
 // time it takes to submit and record the window.
 func newWindow(env Env, o windowFlags) error {
-	if err := checkName(o.Session); err != nil {
+	if err := sessions.CheckName(o.Session); err != nil {
 		return err
 	}
 	unlock, err := state.Lock(env.StateDir, o.Session)

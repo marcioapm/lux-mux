@@ -144,8 +144,6 @@ func client(env Env) (*luxapi.Client, error) { return luxapi.New(env.Lux()) }
 
 func loadConfig(env Env) (*config.Config, error) { return config.Load(env.ConfigPath) }
 
-func checkName(n string) error { return sessions.CheckName(n) }
-
 func freeName(env Env) (string, error) {
 	names, err := state.List(env.StateDir)
 	if err != nil {
@@ -174,7 +172,7 @@ func freeName(env Env) (string, error) {
 // profile and overrides, and attaches it.
 func newSession(env Env, o windowFlags) error {
 	name := o.Session
-	if err := checkName(name); err != nil {
+	if err := sessions.CheckName(name); err != nil {
 		return err
 	}
 	unlock, err := lockSession(env, name)
@@ -217,7 +215,7 @@ func newSession(env Env, o windowFlags) error {
 // attach attaches name: its file, else rebuilt from its Runs' labels.
 // create makes it when there is neither.
 func attach(env Env, name string, create bool) error {
-	if err := checkName(name); err != nil {
+	if err := sessions.CheckName(name); err != nil {
 		return err
 	}
 	unlock, err := lockSession(env, name)
