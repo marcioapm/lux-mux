@@ -8,6 +8,8 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/marcioapm/lux/api"
 )
@@ -30,6 +32,11 @@ const (
 	LabelSpare = "luxmux-spare"
 	// LabelSpec is a warm spare's SpecKey: which windows may claim it.
 	LabelSpec = "luxmux-spec"
+	// LabelResources is what the window asked of resources, e.g.
+	// "cpus=4,memory=8Gi" or "size=large"; absent when it asked
+	// nothing. luxd stores its defaults in spec.resources and records the
+	// request (sizing.requested) only on shaped pools.
+	LabelResources = "luxmux-resources"
 )
 
 // SpecKey identifies the Run a profile makes, whatever the profile is
@@ -41,6 +48,8 @@ func SpecKey(p Profile) string {
 	if err != nil {
 		return ""
 	}
+	// spec.resources already carries it; keys from before the label stay.
+	delete(sp.Labels, LabelResources)
 	b, err := json.Marshal(sp)
 	if err != nil {
 		return ""
@@ -148,6 +157,9 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		}
 		sp.Resources.Disk = b
 	}
+	if v := resourcesLabel(sp.Resources); v != "" {
+		sp.Labels[LabelResources] = v
+	}
 	sp.Placement.Pool = p.Pool
 	sp.Network.Unrestricted = p.UnrestrictedNetwork
 	for _, e := range p.Egress {
@@ -158,6 +170,75 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		}
 	}
 	return sp, nil
+}
+
+// resourcesLabel is LabelResources's value for r as RunSpec sets it:
+// size, else cpus, memory and disk, each only when set. lux takes a label
+// value of up to 256 bytes, any characters; this is far shorter.
+func resourcesLabel(r api.Resources) string {
+	if r.Size != "" {
+		return "size=" + r.Size
+	}
+	var parts []string
+	if r.CPUs != 0 {
+		parts = append(parts, "cpus="+strconv.FormatFloat(r.CPUs, 'g', -1, 64))
+	}
+	if r.Memory != 0 {
+		parts = append(parts, "memory="+compactBytes(r.Memory))
+	}
+	if r.Disk != 0 {
+		parts = append(parts, "disk="+compactBytes(r.Disk))
+	}
+	return strings.Join(parts, ",")
+}
+
+// compactBytes writes b in the largest binary unit that divides it
+// exactly, as api.ParseBytes reads it back: 8Gi, 1536Mi, 1000.
+func compactBytes(b api.Bytes) string {
+	n := int64(b)
+	for _, u := range []string{"", "Ki", "Mi", "Gi"} {
+		if n%1024 != 0 || u == "Gi" {
+			return strconv.FormatInt(n, 10) + u
+		}
+		n /= 1024
+	}
+	return ""
+}
+
+// ApplyResourcesLabel sets p's size, cpus, memory and disk to what a
+// LabelResources value v says, the rest unset. A value it cannot read
+// leaves p as it was and returns false.
+func ApplyResourcesLabel(p *Profile, v string) bool {
+	var q Profile
+	for _, kv := range strings.Split(v, ",") {
+		k, val, ok := strings.Cut(kv, "=")
+		if !ok || val == "" {
+			return false
+		}
+		switch k {
+		case "size":
+			q.Size = val
+		case "cpus":
+			c, err := strconv.ParseFloat(val, 64)
+			if err != nil || c <= 0 {
+				return false
+			}
+			q.CPUs = c
+		case "memory", "disk":
+			if _, err := api.ParseBytes(val); err != nil {
+				return false
+			}
+			if k == "memory" {
+				q.Memory = val
+			} else {
+				q.Disk = val
+			}
+		default:
+			return false
+		}
+	}
+	p.Size, p.CPUs, p.Memory, p.Disk = q.Size, q.CPUs, q.Memory, q.Disk
+	return true
 }
 
 // SecretValues is the resume request's secrets: every one of a Run's

@@ -249,11 +249,13 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 	p.Image, p.Pool, p.Workdir = sp.Image.Ref, sp.Placement.Pool, sp.Workload.Workdir
 	p.Shell, p.Env, p.UnrestrictedNetwork = sp.Workload.Command, sp.Env, sp.Network.Unrestricted
 	// luxd stores resources filled in: its defaults for what the submit
-	// left unset, or the resolved size on a shaped pool. Only
-	// sizing.requested (shaped pools only) says what was asked, so a
-	// resource is taken from the Run only when it is there; otherwise the
-	// profile's own value is kept.
-	if r.Sizing != nil && r.Sizing.Requested != nil {
+	// left unset, or the resolved size on a shaped pool; spec.resources is
+	// never read. What the window asked is sizing.requested (shaped pools
+	// only), else luxmux's LabelResources, else, with neither (a Run from
+	// before the label, or not luxmux's), the profile's own values.
+	label, labelled := r.Labels[config.LabelResources]
+	switch {
+	case r.Sizing != nil && r.Sizing.Requested != nil:
 		q := r.Sizing.Requested
 		p.Size, p.CPUs, p.Memory, p.Disk = q.Size, 0, "", ""
 		if q.CPUs != nil {
@@ -265,6 +267,8 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 		if q.Disk != nil {
 			p.Disk = fmt.Sprint(int64(*q.Disk))
 		}
+	case labelled:
+		config.ApplyResourcesLabel(&p, label)
 	}
 	p.Repository, p.Branch, p.Ref, p.Repositories = "", "", "", nil
 	if sp.Git != nil {

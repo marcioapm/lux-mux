@@ -115,6 +115,46 @@ func TestSpecKeyStableForCustomImages(t *testing.T) {
 	}
 }
 
+// TestResourcesLabel: a window's Run is labelled with the resources its
+// profile asks, in a form ApplyResourcesLabel reads back to the same
+// SpecKey, and not labelled when it asks none.
+func TestResourcesLabel(t *testing.T) {
+	for _, tc := range []struct {
+		p    Profile
+		want string
+	}{
+		{Profile{Image: "alpine"}, ""},
+		{Profile{Image: "alpine", CPUs: 4}, "cpus=4"},
+		{Profile{Image: "alpine", CPUs: 0.5, Memory: "8GiB", Disk: "1500Mi"}, "cpus=0.5,memory=8Gi,disk=1500Mi"},
+		{Profile{Image: "alpine", Memory: "1000"}, "memory=1000"},
+		{Profile{Image: "alpine", Size: "large"}, "size=large"},
+	} {
+		for _, spare := range []bool{false, true} {
+			sp, err := RunSpec(tc.p, Target{Session: "s", Profile: "p", Spare: spare}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := sp.Labels[LabelResources]
+			if got != tc.want || ok != (tc.want != "") {
+				t.Errorf("%+v spare %v: label %q (present %v), want %q", tc.p, spare, got, ok, tc.want)
+			}
+		}
+		if tc.want == "" {
+			continue
+		}
+		back := Profile{Image: "alpine", CPUs: 9, Size: "other"}
+		if !ApplyResourcesLabel(&back, tc.want) || SpecKey(back) != SpecKey(tc.p) {
+			t.Errorf("%q read back as %+v", tc.want, back)
+		}
+	}
+	for _, bad := range []string{"cpus", "cpus=x", "cpus=-1", "memory=lots", "gpus=1", "cpus=4,"} {
+		p := Profile{Image: "alpine", CPUs: 2}
+		if ApplyResourcesLabel(&p, bad) || p.CPUs != 2 {
+			t.Errorf("%q accepted: %+v", bad, p)
+		}
+	}
+}
+
 // TestSpareLabelIsSpecKey: a spare carries its profile's SpecKey whatever
 // session or profile name it is made for, and whatever the secret values.
 func TestSpareLabelIsSpecKey(t *testing.T) {

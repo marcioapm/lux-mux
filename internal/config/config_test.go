@@ -290,7 +290,7 @@ func TestRunSpec(t *testing.T) {
 	}
 	want := api.RunSpec{
 		Name:   "luxmux-work",
-		Labels: map[string]string{"app": "luxmux", "luxmux-session": "work", "luxmux-profile": "app", "team": "x"},
+		Labels: map[string]string{"app": "luxmux", "luxmux-session": "work", "luxmux-profile": "app", "team": "x", "luxmux-resources": "size=m-2-arm64"},
 		Image:  api.Image{Ref: "ghcr.io/example/dev:1"},
 		Workload: api.Workload{Adapter: "generic", TTY: true, Command: DefaultShell,
 			Workdir: "/workspace/repos/my-app"},

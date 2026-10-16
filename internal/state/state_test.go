@@ -141,37 +141,65 @@ func TestRebuildSizedRun(t *testing.T) {
 }
 
 // TestRebuildDefaultedResources: luxd stores resources for every Run,
-// its defaults where the submit set none. Without sizing.requested
-// saying a resource was asked, the window keeps its profile's own value,
-// so an unsized profile's window stays unsized; what sizing.requested
-// names is taken.
+// its defaults where the submit set none, so they are never read back.
+// What the window asked comes from sizing.requested (shaped pools), else
+// the luxmux-resources label, else the profile's own values.
 func TestRebuildDefaultedResources(t *testing.T) {
 	cpus, mem := 4.0, api.Bytes(16<<30)
 	defaulted := api.Resources{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 4096}
+	with := func(f func(*api.Resources)) api.Resources { r := defaulted; f(&r); return r }
+	cpus4 := with(func(r *api.Resources) { r.CPUs = 4 })
+	unsized := config.Profile{Image: "alpine"}
 	for _, tc := range []struct {
 		name   string
 		prof   config.Profile
+		stored api.Resources
+		label  string // "": none
 		sizing *api.RunSizing
 		want   config.Profile
 	}{
-		{"unshaped, unsized", config.Profile{Image: "alpine"}, nil, config.Profile{Image: "alpine"}},
-		{"unshaped, sized", config.Profile{Image: "alpine", CPUs: 4}, nil, config.Profile{Image: "alpine", CPUs: 4}},
-		{"shaped, default size", config.Profile{Image: "alpine"}, &api.RunSizing{Requested: &api.SizeRequest{}}, config.Profile{Image: "alpine"}},
-		{"shaped, cpus and memory asked", config.Profile{Image: "alpine"},
+		{"unshaped, unsized", unsized, defaulted, "", nil, unsized},
+		{"unshaped, sized in config", config.Profile{Image: "alpine", CPUs: 4}, cpus4, "cpus=4", nil, config.Profile{Image: "alpine", CPUs: 4}},
+		{"unshaped, unsized profile, cpus asked by the window", unsized, cpus4, "cpus=4", nil, config.Profile{Image: "alpine", CPUs: 4}},
+		{"unshaped, label with every resource", config.Profile{Image: "alpine", CPUs: 1}, api.Resources{CPUs: 0.5, Memory: 1 << 30, Disk: 40 << 30, Pids: 4096},
+			"cpus=0.5,memory=1Gi,disk=40Gi", nil, config.Profile{Image: "alpine", CPUs: 0.5, Memory: "1Gi", Disk: "40Gi"}},
+		{"no label, no sizing: the profile's, not the stored", unsized, cpus4, "", nil, unsized},
+		{"no label, no sizing, sized profile", config.Profile{Image: "alpine", CPUs: 4, Memory: "1Gi"}, defaulted, "", nil,
+			config.Profile{Image: "alpine", CPUs: 4, Memory: "1Gi"}},
+		{"shaped, default size", unsized, defaulted, "", &api.RunSizing{Requested: &api.SizeRequest{}}, unsized},
+		{"shaped, cpus and memory asked", unsized, defaulted, "",
 			&api.RunSizing{Requested: &api.SizeRequest{CPUs: &cpus, Memory: &mem}}, config.Profile{Image: "alpine", CPUs: 4, Memory: "17179869184"}},
+		{"shaped: sizing.requested over the label", unsized, defaulted, "size=large",
+			&api.RunSizing{Requested: &api.SizeRequest{CPUs: &cpus}}, config.Profile{Image: "alpine", CPUs: 4}},
 	} {
-		sp, err := config.RunSpec(tc.prof, config.Target{Session: "work", Profile: "dev"}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sp.Resources = defaulted
-		r := run("run_1", "work", "dev", "running", 1, false)
-		r.Spec, r.Sizing = sp, tc.sizing
-		got := *WindowFromRun(r, tc.prof).Spec
-		if got.Size != tc.want.Size || got.CPUs != tc.want.CPUs || got.Memory != tc.want.Memory || got.Disk != tc.want.Disk ||
-			config.SpecKey(got) != config.SpecKey(tc.want) {
-			t.Errorf("%s: rebuilt %+v", tc.name, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			sp, err := config.RunSpec(tc.prof, config.Target{Session: "work", Profile: "dev"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp.Resources = tc.stored
+			r := run("run_1", "work", "dev", "running", 1, false)
+			if tc.label != "" {
+				r.Labels[config.LabelResources] = tc.label
+			}
+			r.Spec, r.Sizing = sp, tc.sizing
+			got := *WindowFromRun(r, tc.prof).Spec
+			if got.Size != tc.want.Size {
+				t.Errorf("size %q, want %q", got.Size, tc.want.Size)
+			}
+			if got.CPUs != tc.want.CPUs {
+				t.Errorf("cpus %v, want %v", got.CPUs, tc.want.CPUs)
+			}
+			if got.Memory != tc.want.Memory {
+				t.Errorf("memory %q, want %q", got.Memory, tc.want.Memory)
+			}
+			if got.Disk != tc.want.Disk {
+				t.Errorf("disk %q, want %q", got.Disk, tc.want.Disk)
+			}
+			if config.SpecKey(got) != config.SpecKey(tc.want) {
+				t.Errorf("SpecKey of %+v differs from %+v's", got, tc.want)
+			}
+		})
 	}
 }
 
