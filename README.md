@@ -293,6 +293,11 @@ set. With neither, the key is the lux CLI's (`api_key`, `LUX_API_KEY`).
   its file unreadable) waits, saying why, and attaches once it can. Closing
   it, or `r`, keeps its Run (and the window) with a notice until the key is
   back: the Run cannot be terminated without it.
+- A Run luxmux cannot terminate (its lux refuses the key, or does not
+  answer) is never forgotten: closing its window keeps the window, with a
+  notice; a Run `r` replaced, or a spare, stays in the session file and is
+  terminated by a later attach. When the last window closes, such spares
+  keep the session file, and `luxmux` names them on exit.
 - `luxmux ls`, `kill-session` and `spares` go across every lux, and say
   which one did not answer. Each lux gets 10 s to list; one that does not
   answer costs a command that and no more. `kill-session` of a session with

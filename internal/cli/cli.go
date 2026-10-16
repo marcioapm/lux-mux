@@ -369,6 +369,12 @@ func runMux(env Env, eps *luxapi.Endpoints, sess *state.Session, label string, u
 		fmt.Fprintf(env.Stderr, "[detached (from session %s)]\n", name)
 	case "exited":
 		fmt.Fprintf(env.Stderr, "[exited (session %s)]\n", name)
+		// The session that exited is the last one the console showed.
+		if m := con.Current(); m != nil {
+			if left := m.Unterminated(); len(left) > 0 {
+				fmt.Fprintf(env.Stderr, "session file kept: Runs not terminated:\n  %s\n", strings.Join(left, "\n  "))
+			}
+		}
 	}
 	return nil
 }

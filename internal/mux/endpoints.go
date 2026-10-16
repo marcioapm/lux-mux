@@ -191,7 +191,8 @@ func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 // adoptSpares records the waiting spares of this session ep's first
 // successful listing has that the session does not: one whose submit an
 // earlier detach stopped waiting for, made by lux anyway. Each takes its
-// slot if that is free; any other is terminated, so none runs unrecorded.
+// slot if that is free; any other is retired (recorded, then terminated),
+// so none runs unrecorded.
 // A spare is submitted on ep only after the first listing was tried
 // (waitListed), so this normally runs first.
 func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
@@ -235,13 +236,7 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 	}
 	m.mu.Unlock()
 	for _, id := range extra {
-		m.wg.Add(1)
-		m.goSafe(func() {
-			defer m.wg.Done()
-			if err := m.terminate(ep, id); err != nil {
-				m.Notice(cannotTerminate(ep, err))
-			}
-		})
+		m.retire(ep, id)
 	}
 }
 

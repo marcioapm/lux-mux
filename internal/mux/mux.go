@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"sync"
@@ -171,9 +172,11 @@ type Mux struct {
 	shown *Window
 	// ending: the last window closed; spares submitted from now on are
 	// terminated, not recorded.
-	ending    bool
-	done      chan string // the reason Run returns
-	crashOnce sync.Once
+	ending bool
+	// unterminated are the Runs the session's end could not terminate.
+	unterminated []string
+	done         chan string // the reason Run returns
+	crashOnce    sync.Once
 	// preview follows another session's shown window for the session
 	// chooser.
 	preview sessionPreview
@@ -407,6 +410,7 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 		m.setNoticeLocked(m.opt.Notice)
 	}
 	m.mu.Unlock()
+	m.terminateLeftovers()
 	m.wg.Add(1)
 	m.goSafe(m.keepSpares)
 	m.goSafe(func() {
@@ -445,7 +449,10 @@ const spareDetachWait = 5 * time.Second
 func (m *Mux) shutdown(switching bool) {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
-	m.saveLocked()
+	// An ended session's file was written or removed by endSession.
+	if !m.ending {
+		m.saveLocked()
+	}
 	m.suspended = true
 	m.tw.enqueue(screen.Reset(nil))
 	m.mu.Unlock()
@@ -937,21 +944,30 @@ func (m *Mux) Kill(i int) {
 }
 
 // closeWindow removes w; with terminate, its Run is terminated first.
-// notice, when set, is shown afterwards. A Run whose lux has no client
-// now (its key unreadable) is not terminated, and its window is kept:
-// dropping it would leave the Run running with nothing recording it.
-func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
-	if terminate && w.RunID != "" {
-		if err := m.terminate(w.Endpoint, w.RunID); err != nil {
+// notice, when set, is shown afterwards. A Run terminate could not end
+// (no client, the key refused, lux failing) keeps its window, with a
+// notice, and closeWindow returns the error: dropping the window would
+// leave the Run running with nothing recording it.
+func (m *Mux) closeWindow(w *Window, terminate bool, notice string) error {
+	m.mu.Lock()
+	id := w.RunID
+	m.mu.Unlock()
+	if terminate && id != "" {
+		if err := m.terminate(w.Endpoint, id); err != nil {
 			m.Notice(cannotTerminate(w.Endpoint, err))
-			return
+			return err
 		}
 	}
 	m.mu.Lock()
+	if terminate && w.RunID != id {
+		// Relaunched meanwhile: its new Run is terminated too.
+		m.mu.Unlock()
+		return m.closeWindow(w, terminate, notice)
+	}
 	i := m.indexLocked(w)
 	if i < 0 {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	if w.cancel != nil {
 		w.cancel()
@@ -968,7 +984,7 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 		m.saveLocked()
 		m.mu.Unlock()
 		m.endSession()
-		return
+		return nil
 	}
 	// The window shown next: the last one if it was the active one, as
 	// tmux does, else the active one stays.
@@ -996,12 +1012,14 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	m.repaintLocked()
 	m.saveLocked()
 	m.mu.Unlock()
+	return nil
 }
 
-// endSession ends the session when its last window closed: its spares are
-// terminated (nothing would claim them) and its file removed. A spare on
-// a lux with no client now (its key unreadable) stays recorded in the
-// file, which then holds only spares; luxmux spares lists them.
+// endSession ends the session when its last window closed: its spares and
+// leftovers are terminated (nothing would claim them) and its file
+// removed. One terminate cannot end (no client, the key refused, lux
+// failing) stays recorded in the file, which then holds only those, and
+// is listed by Unterminated; the file is not removed then.
 func (m *Mux) endSession() {
 	m.mu.Lock()
 	m.ending = true
@@ -1019,55 +1037,72 @@ func (m *Mux) endSession() {
 	m.sess.Spares, m.sess.SpareEndpoints = nil, nil
 	m.mu.Unlock()
 	sort.Slice(spares, func(i, j int) bool { return spares[i].id < spares[j].id })
-	var kept []spare
+	type failure struct {
+		spare
+		err error
+	}
+	var kept []failure
 	for _, s := range spares {
 		if err := m.terminate(s.ep, s.id); err != nil {
-			kept = append(kept, s)
+			kept = append(kept, failure{s, err})
 		}
 	}
-	if m.opt.StateDir != "" {
-		m.mu.Lock()
-		name := m.name
-		m.mu.Unlock()
-		if len(kept) == 0 {
-			_ = state.Remove(m.opt.StateDir, name)
-			_ = state.DropRenamed(m.opt.StateDir, name)
-		} else {
-			m.mu.Lock()
-			for _, s := range kept {
-				m.sess.SetSpare(s.slot, s.id, s.ep)
-			}
-			m.saveLocked()
-			m.mu.Unlock()
-		}
+	m.mu.Lock()
+	for _, f := range kept {
+		m.sess.SetSpare(f.slot, f.id, f.ep)
+		m.unterminatedLocked(f.ep, f.id, f.err)
 	}
+	m.saveEndedLocked()
+	m.mu.Unlock()
 	m.finish("exited")
 }
 
-// cannotTerminate is the notice for a Run left running because its lux
-// has no client now.
+// saveEndedLocked writes an ended session's file: removed when it records
+// no Run, kept while a spare or leftover terminate could not end is in it.
+func (m *Mux) saveEndedLocked() {
+	if m.opt.StateDir == "" {
+		return
+	}
+	if len(m.sess.Spares) == 0 {
+		_ = state.Remove(m.opt.StateDir, m.name)
+		_ = state.DropRenamed(m.opt.StateDir, m.name)
+		return
+	}
+	// Kept with its rename entry: the Runs it records carry the label.
+	m.saveLocked()
+}
+
+// cannotTerminate is the notice for a Run left running because terminate
+// could not end it.
 func cannotTerminate(ep config.Endpoint, err error) string {
 	return fmt.Sprintf("cannot terminate on %s: %v", ep.Label(), err)
 }
 
-// terminate terminates a Run on ep, retrying a few times on errors. Its
-// error is only that ep has no client (the Run was not asked to end);
-// lux's own refusals after the retries are not reported.
+// terminate terminates Run id on ep, trying up to 5 times. It returns nil
+// when lux accepted, or answered 404 (the Run is gone) or 409 (it is
+// already ending). Any other error means the Run may still be running and
+// the caller must keep it recorded: ep has no client, lux refused the key
+// (401/403, not retried), or lux did not answer or failed every try.
 func (m *Mux) terminate(ep config.Endpoint, id string) error {
 	c, err := m.clientOf(ep)
 	if err != nil {
 		return err
 	}
 	d := m.opt.Backoff
-	for range 5 {
+	for i := range 5 {
+		if i > 0 {
+			time.Sleep(d)
+			d = min(2*d, m.opt.MaxBackoff)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err := c.Terminate(ctx, id)
+		err = c.Terminate(ctx, id)
 		cancel()
-		if err == nil {
+		if err == nil || luxapi.IsStatus(err, http.StatusNotFound) || luxapi.IsStatus(err, http.StatusConflict) {
 			return nil
 		}
-		time.Sleep(d)
-		d = min(2*d, m.opt.MaxBackoff)
+		if luxapi.Refused(err) {
+			break
+		}
 	}
-	return nil
+	return luxapi.Described(err)
 }

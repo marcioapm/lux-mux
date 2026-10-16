@@ -857,12 +857,16 @@ func (m *Mux) forgetStaleScreenLocked(w *Window) {
 	}
 }
 
-// shellExited closes a window whose shell exited, terminating its Run.
+// shellExited closes a window whose shell exited, terminating its Run. A
+// Run terminate could not end keeps the window, ended: r relaunches it
+// and & closes it, each terminating the Run first.
 func (m *Mux) shellExited(w *Window) {
 	m.mu.Lock()
 	idx := m.indexLocked(w)
 	m.mu.Unlock()
-	m.closeWindow(w, true, fmt.Sprintf("window %d exited", idx))
+	if err := m.closeWindow(w, true, fmt.Sprintf("window %d exited", idx)); err != nil {
+		m.markDead(w, "shell exited; "+cannotTerminate(w.Endpoint, err))
+	}
 }
 
 // Resize takes the terminal's new size: every emulator and every stream.

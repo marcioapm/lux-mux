@@ -562,6 +562,31 @@ func TestWrongKeyWindow(t *testing.T) {
 // lux has no client (its key unset), the spare is not dropped: the file
 // keeps it, and luxmux spares can list it.
 func TestKeyUnsetSpareKeptAtEnd(t *testing.T) {
+	h, b, spare := spareOnB(t)
+	h.detach()
+	h.setEnv(remoteEnv, "", false)
+	h.start(nil)
+	h.live(0)
+	h.m.Kill(0)
+	select {
+	case <-h.done:
+	case <-timeout():
+		t.Fatal("the session did not end")
+	}
+	s, ok, _ := state.Load(h.dir, "s")
+	if !ok || !slices.Contains(slices.Collect(maps.Values(s.Spares)), spare) {
+		t.Fatalf("file %v %+v", ok, s)
+	}
+	if r := b.Run(spare); r.State != "running" || len(b.Terminated()) != 0 {
+		t.Fatalf("spare %s, b terminated %v", r.State, b.Terminated())
+	}
+	noKeys(t, h.dir, h.term.rawBytes())
+}
+
+// spareOnB is a session with window 0 on a and a warm spare of profile
+// there waiting on b, recorded.
+func spareOnB(t *testing.T) (*harness, *fakelux.Server, string) {
+	t.Helper()
 	b := fakelux.NewWithKey(keyB)
 	b.IDPrefix = "run_b"
 	t.Cleanup(b.Close)
@@ -588,9 +613,17 @@ api_key_env = "` + remoteEnv + `"
 		sp := h.spares()
 		return len(sp) == 1 && !slices.Contains(slices.Collect(maps.Values(sp)), "")
 	})
-	spare := slices.Collect(maps.Values(h.spares()))[0]
+	return h, b, slices.Collect(maps.Values(h.spares()))[0]
+}
+
+// TestWrongKeySpareKeptAtEnd: when the last window closes while b refuses
+// the key, b's spare cannot be terminated: the file is kept with the
+// spare recorded, and the session's end names it. With b's key back, the
+// next session's end terminates it and removes the file.
+func TestWrongKeySpareKeptAtEnd(t *testing.T) {
+	h, b, spare := spareOnB(t)
 	h.detach()
-	h.setEnv(remoteEnv, "", false)
+	h.setEnv(remoteEnv, keyA, true)
 	h.start(nil)
 	h.live(0)
 	h.m.Kill(0)
@@ -606,7 +639,113 @@ api_key_env = "` + remoteEnv + `"
 	if r := b.Run(spare); r.State != "running" || len(b.Terminated()) != 0 {
 		t.Fatalf("spare %s, b terminated %v", r.State, b.Terminated())
 	}
+	if u := h.m.Unterminated(); len(u) != 1 || !strings.HasPrefix(u[0], spare+" on ") || !strings.Contains(u[0], "invalid API key") {
+		t.Fatalf("Unterminated %q", u)
+	}
 	noKeys(t, h.dir, h.term.rawBytes())
+
+	h.setEnv(remoteEnv, keyB, true)
+	h.start(nil)
+	h.live(0)
+	h.m.Kill(0)
+	select {
+	case <-h.done:
+	case <-timeout():
+		t.Fatal("the second session did not end")
+	}
+	if _, ok, _ := state.Load(h.dir, "s"); ok || !slices.Contains(b.Terminated(), spare) {
+		t.Fatalf("file kept %v; b terminated %v", ok, b.Terminated())
+	}
+}
+
+// TestWrongKeyKillKeepsWindow: C-b x on a window whose lux refuses the key
+// keeps the window, in the file too, with a notice: its Run still runs.
+// With the key back, the next attach's C-b x terminates it and drops it.
+func TestWrongKeyKillKeepsWindow(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, keyA, true)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 refused", func() bool { return strings.Contains(x.reason(1), "refused the key") })
+	x.m.Kill(1)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on "+strings.TrimPrefix(x.b.URL, "http://")))
+	if x.nwindows() != 2 || x.window(1) != b1 {
+		t.Fatalf("window 1 dropped: %d windows", x.nwindows())
+	}
+	x.detach()
+	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 2 || s.Windows[1].RunID != b1 {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	if r := x.b.Run(b1); r.State != "running" || len(x.b.Terminated()) != 0 {
+		t.Fatalf("b1 %s, b terminated %v", r.State, x.b.Terminated())
+	}
+	noKeys(t, x.dir, x.term.rawBytes())
+
+	x.setEnv(remoteEnv, keyB, true)
+	x.start(nil)
+	x.live(0)
+	x.liveOnB(1)
+	x.m.Kill(1)
+	x.waitFor("window 1 closed", func() bool { return x.nwindows() == 1 })
+	if !slices.Contains(x.b.Terminated(), b1) {
+		t.Fatalf("b terminated %v", x.b.Terminated())
+	}
+	x.detach()
+	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 1 {
+		t.Fatalf("file %+v", s.Windows)
+	}
+}
+
+// TestWrongKeyRelaunchKeepsOldRun: r on an ended window whose lux refuses
+// the key cannot terminate the old Run: the file keeps it (as a
+// leftover), with a notice. The next attach with the key back terminates
+// it and forgets it.
+func TestWrongKeyRelaunchKeepsOldRun(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, keyA, true)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 refused", func() bool { return strings.Contains(x.reason(1), "refused the key") })
+	x.m.mu.Lock()
+	w := x.m.windows[1]
+	x.m.mu.Unlock()
+	x.m.markDead(w, "ended for the test")
+	x.m.relaunchOrResume(w)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on"))
+	recorded := func() bool {
+		s, _, _ := state.Load(x.dir, "s")
+		for _, sw := range s.Windows {
+			if sw.RunID == b1 {
+				return true
+			}
+		}
+		return slices.Contains(slices.Collect(maps.Values(s.Spares)), b1)
+	}
+	x.detach()
+	if !recorded() {
+		t.Fatal("the old Run is in no window or spare of the file")
+	}
+	if r := x.b.Run(b1); r.State != "running" || len(x.b.Terminated()) != 0 {
+		t.Fatalf("b1 %s, b terminated %v", r.State, x.b.Terminated())
+	}
+
+	x.setEnv(remoteEnv, keyB, true)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("the old Run terminated", func() bool { return slices.Contains(x.b.Terminated(), b1) })
+	x.waitFor("and forgotten", func() bool { return !recorded() })
+	x.detach()
+	if recorded() {
+		t.Fatal("the terminated Run is still in the file")
+	}
 }
 
 // TestRelaunchWithoutClientKeepsRun: r on an ended window whose lux has
