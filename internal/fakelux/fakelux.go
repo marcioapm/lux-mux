@@ -103,6 +103,9 @@ type Server struct {
 	failing map[string]string
 	// failGets: GETs of these Runs are answered 503 (FailGets).
 	failGets map[string]bool
+	// failTerms: the status every terminate is answered with, 0 for none
+	// (FailTerminates).
+	failTerms int
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
 	// key is the one API key accepted; refused counts requests without it.
@@ -176,6 +179,28 @@ func (s *Server) FailGets(id string, on bool) {
 		s.failGets = map[string]bool{}
 	}
 	s.failGets[id] = on
+}
+
+// FailTerminates answers every terminate with HTTP status code (0: as
+// usual) and leaves the Run as it is, not counted in Terminated.
+func (s *Server) FailTerminates(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failTerms = code
+}
+
+// SetSubmitHook sets SubmitHook while the server is serving.
+func (s *Server) SetSubmitHook(f func()) {
+	s.mu.Lock()
+	s.SubmitHook = f
+	s.mu.Unlock()
+}
+
+// SetTerminateHook sets TerminateHook while the server is serving.
+func (s *Server) SetTerminateHook(f func(runID string)) {
+	s.mu.Lock()
+	s.TerminateHook = f
+	s.mu.Unlock()
 }
 
 type fakeRun struct {
@@ -417,8 +442,11 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 		e.write(w)
 		return
 	}
-	if s.SubmitHook != nil && !validateOnly {
-		s.SubmitHook()
+	s.mu.Lock()
+	shook := s.SubmitHook
+	s.mu.Unlock()
+	if shook != nil && !validateOnly {
+		shook()
 	}
 	if validateOnly {
 		ans := api.SubmitAnswer{Valid: true, WouldStartNow: true, EffectivePool: pool.Name}
@@ -577,6 +605,11 @@ func (s *Server) terminate(w http.ResponseWriter, req *http.Request) {
 	}
 	s.mu.Lock()
 	r := s.runs[id]
+	if code := s.failTerms; code != 0 {
+		s.mu.Unlock()
+		writeErr(w, code, "failed", "terminate failed")
+		return
+	}
 	if r == nil {
 		s.mu.Unlock()
 		writeErr(w, 404, "not_found", "no such run")
