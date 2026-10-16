@@ -160,7 +160,7 @@ const (
 
 // lockSeconds bounds the wait for the lock. WindowNameScript runs within
 // the mux's 5 s exec deadline; the wrapper delays the prompt by at most this.
-const lockSeconds = "2"
+const lockSeconds = 2
 
 // probeSeconds bounds the whole optional probe group (df, stat, git).
 const probeSeconds = "1"
@@ -228,12 +228,7 @@ const quoteFunc = `_lm_quote() {
 // (read-only volume), _lm_lock fails and the caller publishes nothing.
 // Temporary files are only made under the lock, so the holder removes any
 // left by a holder that died.
-var lockFunc = buildLockFunc(lockSeconds, lockRetries(lockSeconds))
-
-func lockRetries(seconds string) string {
-	n, _ := strconv.Atoi(seconds)
-	return strconv.Itoa(10 * n)
-}
+var lockFunc = buildLockFunc(strconv.Itoa(lockSeconds), strconv.Itoa(10*lockSeconds))
 
 func buildLockFunc(seconds, retries string) string {
 	return `_lm_lock() {
