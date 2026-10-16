@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,15 +115,21 @@ func TestWrapperQuiet(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(dir, 0o755)
-	sp, err := RunSpec(Profile{Image: "alpine", Shell: []string{"/bin/sh", "-c", `printf 'shell:%s:%s'  "$LUXMUX_START" "$LUXMUX_BRANCH_CHECKED_OUT"`}}, Target{}, nil)
+	sp, err := RunSpec(Profile{Image: "alpine", Shell: []string{"/bin/sh", "-c", `printf 'shell:%s:%s:%s'  "$LUXMUX_START" "$LUXMUX_BRANCH_CHECKED_OUT" "$$"`}}, Target{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("/bin/sh", sp.Workload.Command[1:]...)
 	cmd.Env = []string{"PATH=/nonexistent", EnvTestWorkspace + "=" + dir, EnvTestCgroup + "=" + filepath.Join(dir, "none"), EnvRepoDir + "=" + dir}
-	out, err := cmd.CombinedOutput()
-	if err != nil || string(out) != "shell:start:" {
-		t.Fatalf("%q %v", out, err)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	// The shell is exec'd: it is the wrapper's own process.
+	if want := "shell:start::" + strconv.Itoa(cmd.Process.Pid); err != nil || out.String() != want {
+		t.Fatalf("%q %v, want %q", out.String(), err, want)
 	}
 }
 
