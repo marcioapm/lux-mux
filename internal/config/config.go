@@ -149,9 +149,6 @@ func imageForVersion(version string) string {
 
 var releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
-// DefaultShell starts bash as a login shell where the image has it, sh otherwise.
-var DefaultShell = []string{"sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"}
-
 // Dir is luxmux's configuration directory.
 func Dir() (string, error) {
 	d, err := os.UserConfigDir()

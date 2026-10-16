@@ -28,6 +28,9 @@ const (
 	EnvBranchCheckedOut = "LUXMUX_BRANCH_CHECKED_OUT"
 	EnvStart            = "LUXMUX_START"
 	EnvRunID            = "LUXMUX_RUN_ID"
+	// EnvWindow is in the env file only, written by luxmux over lux's exec
+	// API when a window takes the Run and on every rename.
+	EnvWindow = "LUXMUX_WINDOW"
 
 	// Tests point the wrapper's workspace and cgroup directories at
 	// fixtures with these; nothing else sets them.
@@ -45,7 +48,7 @@ var (
 // reservedEnv reports whether name is one luxmux sets: a profile's env
 // or secrets may not use it, so no secret value can reach the env file.
 func reservedEnv(name string) bool {
-	return slices.Contains(StaticEnv, name) || slices.Contains(ComputedEnv, name) ||
+	return slices.Contains(StaticEnv, name) || slices.Contains(ComputedEnv, name) || name == EnvWindow ||
 		name == EnvTestWorkspace || name == EnvTestCgroup
 }
 
@@ -115,6 +118,11 @@ func ParseWindowCommand(cmd []string) (shell []string, onStart, onResume string,
 	return shell, cmd[4], cmd[5], true
 }
 
+// WindowNameCommand is the exec command that records window name in a Run.
+func WindowNameCommand(name string) []string {
+	return []string{"sh", "-c", WindowNameScript, "luxmux-window", name}
+}
+
 // StartWrapper is the POSIX sh script every window's Run starts with. Its
 // text is the same for every profile: on_start ($1) and on_resume ($2)
 // are arguments, only ever run as sh -c "$cmd", never part of the text.
@@ -127,6 +135,38 @@ func ParseWindowCommand(cmd []string) (shell []string, onStart, onResume string,
 // as luxmux always has. Without commands it prints nothing.
 var StartWrapper = buildWrapper()
 
+// quoteFunc defines _lm_quote, which sets _lm_qv to $1 single-quoted for
+// sh.
+const quoteFunc = `_lm_quote() {
+	_lm_qs=$1 _lm_qv=
+	while :; do
+		case $_lm_qs in
+		*\'*) _lm_qv=$_lm_qv${_lm_qs%%\'*}\'\\\'\' ; _lm_qs=${_lm_qs#*\'} ;;
+		*) break ;;
+		esac
+	done
+	_lm_qv=\'$_lm_qv$_lm_qs\'
+}
+`
+
+// WindowNameScript is what luxmux execs in a Run (lux's exec API) when a
+// window takes it or is renamed: $1, the window's name, goes to
+// .luxmux/window, and the env file's LUXMUX_WINDOW line is replaced, each
+// atomically. The name is never part of the text.
+var WindowNameScript = `_lm_ws=${` + EnvTestWorkspace + `:-/workspace}
+_lm_d=$_lm_ws/.luxmux
+mkdir -p "$_lm_d" || exit 1
+printf '%s\n' "$1" >"$_lm_d/.window.$$" && mv -f "$_lm_d/.window.$$" "$_lm_d/window" || exit 1
+[ -f "$_lm_d/env" ] || exit 0
+` + quoteFunc + `_lm_quote "$1"
+{
+	while IFS= read -r _lm_l || [ -n "$_lm_l" ]; do
+		case $_lm_l in export\ ` + EnvWindow + `=*) ;; *) printf '%s\n' "$_lm_l" ;; esac
+	done <"$_lm_d/env"
+	printf 'export %s=%s\n' ` + EnvWindow + ` "$_lm_qv"
+} >"$_lm_d/.env.$$" && chmod 644 "$_lm_d/.env.$$" && mv -f "$_lm_d/.env.$$" "$_lm_d/env"
+`
+
 func buildWrapper() string {
 	names := strings.Join(append(slices.Clone(StaticEnv), ComputedEnv...), " ")
 	return `# luxmux window start: LUXMUX_* facts, on_start/on_resume, then the shell.
@@ -136,7 +176,7 @@ _lm_ws=${` + EnvTestWorkspace + `:-/workspace}
 _lm_cg=${` + EnvTestCgroup + `:-/sys/fs/cgroup}
 _lm_d=$_lm_ws/.luxmux
 _lm_num() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
-LUXMUX_CPU= _lm_q= _lm_p=
+LUXMUX_CPU='' _lm_q='' _lm_p=''
 { read -r _lm_q _lm_p <"$_lm_cg/cpu.max"; } 2>/dev/null
 if _lm_num "$_lm_q" && _lm_num "$_lm_p" && [ "$_lm_p" -gt 0 ]; then
 	_lm_m=$((_lm_q * 1000 / _lm_p))
@@ -148,7 +188,7 @@ if _lm_num "$_lm_q" && _lm_num "$_lm_p" && [ "$_lm_p" -gt 0 ]; then
 		LUXMUX_CPU=$LUXMUX_CPU.$_lm_f
 	fi
 fi
-LUXMUX_MEMORY= _lm_v=
+LUXMUX_MEMORY='' _lm_v=''
 { read -r _lm_v <"$_lm_cg/memory.max"; } 2>/dev/null
 _lm_num "$_lm_v" && LUXMUX_MEMORY=$_lm_v
 LUXMUX_DISK=
@@ -175,30 +215,33 @@ else
 fi
 LUXMUX_RUN_ID=${LUX_RUN_ID-}
 export LUXMUX_CPU LUXMUX_MEMORY LUXMUX_DISK LUXMUX_BRANCH_CHECKED_OUT LUXMUX_START LUXMUX_RUN_ID
-_lm_quote() {
-	_lm_qs=$1 _lm_qv=
-	while :; do
-		case $_lm_qs in
-		*\'*) _lm_qv=$_lm_qv${_lm_qs%%\'*}\'\\\'\' ; _lm_qs=${_lm_qs#*\'} ;;
-		*) break ;;
-		esac
-	done
-	_lm_qv=\'$_lm_qv$_lm_qs\'
-}
-if [ -d "$_lm_d" ]; then
+# The window name is only in the env file: renames change it there, never
+# in a running process's environment. A name written while the file is
+# made (luxmux writes .luxmux/window, then the file if it exists) is
+# picked up by the second pass.
+` + quoteFunc + `_lm_w='' _lm_pass=0
+while [ -d "$_lm_d" ] && [ "$_lm_pass" -lt 2 ]; do
+	_lm_pass=$((_lm_pass + 1)) _lm_o=$_lm_w _lm_w=
+	{ IFS= read -r _lm_w <"$_lm_d/window"; } 2>/dev/null
+	[ "$_lm_pass" -eq 2 ] && [ "$_lm_w" = "$_lm_o" ] && break
 	_lm_t=$_lm_d/.env.$$
 	if {
 		for _lm_n in ` + names + `; do
 			eval "_lm_quote \"\${$_lm_n-}\""
 			printf 'export %s=%s\n' "$_lm_n" "$_lm_qv"
 		done
+		if [ -n "$_lm_w" ]; then
+			_lm_quote "$_lm_w"
+			printf 'export %s=%s\n' ` + EnvWindow + ` "$_lm_qv"
+		fi
 	} 2>/dev/null >"$_lm_t"; then
 		chmod 644 "$_lm_t" 2>/dev/null
 		mv -f "$_lm_t" "$_lm_d/env" 2>/dev/null || rm -f "$_lm_t" 2>/dev/null
 	else
 		rm -f "$_lm_t" 2>/dev/null
+		break
 	fi
-fi
+done
 _lm_run() {
 	[ -n "$2" ] || return 0
 	trap : INT QUIT
@@ -209,6 +252,8 @@ _lm_run() {
 }
 if [ "$LUXMUX_START" = start ]; then _lm_run on_start "$_lm_s"; else _lm_run on_resume "$_lm_r"; fi
 [ $# -eq 0 ] || exec "$@"
+# The shell luxmux has always started: exec replaces this process.
+# shellcheck disable=SC2015
 command -v bash >/dev/null && exec bash -l || exec sh -l
 `
 }

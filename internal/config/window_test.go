@@ -49,7 +49,7 @@ func TestStartWrapper(t *testing.T) {
 						os.WriteFile(filepath.Join(cg, "cpu.max"), []byte(tc.cpu+"\n"), 0600)
 						os.WriteFile(filepath.Join(cg, "memory.max"), []byte(tc.mem+"\n"), 0600)
 					}
-					p := Profile{Image: "alpine", OnStart: `printf 'hook:%s:%s\n' "$LUXMUX_START" "$EXAMPLE_SECRET"; exit 7`, OnResume: `printf 'hook:%s\n' "$LUXMUX_START"`, Shell: []string{"sh", "-c", `printf 'shell:%s:%s:%s\n' "$LUXMUX_START" "$LUXMUX_CPU" "$LUXMUX_MEMORY"`}}
+					p := Profile{Image: "alpine", OnStart: `printf 'hook:%s:%s\n' "$LUXMUX_START" "$EXAMPLE_SECRET"; exit 7`, OnResume: `printf 'hook:%s\n' "$LUXMUX_START"`, Shell: []string{"/bin/sh", "-c", `printf 'shell:%s:%s:%s\n' "$LUXMUX_START" "$LUXMUX_CPU" "$LUXMUX_MEMORY"`}}
 					sp, err := RunSpec(p, Target{Session: "s", Profile: "p"}, nil)
 					if err != nil {
 						t.Fatal(err)
@@ -102,5 +102,41 @@ func TestStartWrapper(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// TestWrapperQuiet: without commands the wrapper prints nothing before the
+// shell, and a read-only workspace, an absent cgroup directory and no git
+// on PATH change nothing but the facts.
+func TestWrapperQuiet(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	sp, err := RunSpec(Profile{Image: "alpine", Shell: []string{"/bin/sh", "-c", `printf 'shell:%s:%s'  "$LUXMUX_START" "$LUXMUX_BRANCH_CHECKED_OUT"`}}, Target{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", sp.Workload.Command[1:]...)
+	cmd.Env = []string{"PATH=/nonexistent", EnvTestWorkspace + "=" + dir, EnvTestCgroup + "=" + filepath.Join(dir, "none"), EnvRepoDir + "=" + dir}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "shell:start:" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// TestWrapperText: the wrapper's text is one constant whatever the
+// profile; commands are arguments only.
+func TestWrapperText(t *testing.T) {
+	cmd := `echo '"; exit 9; "' $(false)`
+	a := WindowCommand(Profile{OnStart: cmd, OnResume: cmd})
+	b := WindowCommand(Profile{})
+	if a[2] != b[2] || a[2] != buildWrapper() || strings.Contains(a[2], cmd) || a[4] != cmd || a[5] != cmd {
+		t.Fatal("the wrapper text depends on the profile")
+	}
+	shell, s, r, ok := ParseWindowCommand(WindowCommand(Profile{OnStart: "x", Shell: []string{"zsh", "-l"}}))
+	if !ok || s != "x" || r != "" || len(shell) != 2 {
+		t.Fatal(shell, s, r, ok)
 	}
 }

@@ -44,8 +44,8 @@ const (
 // labels or secret values. A warm spare is claimed only by a window whose
 // profile has the same key. It covers on_start and on_resume (arguments of
 // the window command) and every static LUXMUX_* value but the session's
-// and profile's (a spare is per session, and its profile is checked on
-// claim). Empty for a profile that makes no RunSpec.
+// and profile's (spares are scoped to a session and checked against their
+// profile on claim). Empty for a profile that makes no RunSpec.
 func SpecKey(p Profile) string {
 	sp, err := RunSpec(p, Target{}, nil)
 	if err != nil {
