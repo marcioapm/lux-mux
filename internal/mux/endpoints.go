@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -327,13 +328,14 @@ func (m *Mux) considerRun(ep config.Endpoint, lux *luxapi.Client, id string) {
 }
 
 // adoptRun appends a window for r, a Run on ep new-window made for this
-// session, with a notice; the window shown does not change.
+// session, with a notice; the window shown does not change. A Run the
+// session records as a spare or leftover is never a window.
 func (m *Mux) adoptRun(ep config.Endpoint, r *api.Run) {
 	cfg := m.config()
 	sw := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil {
+	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil || slices.Contains(slices.Collect(maps.Values(m.sess.Spares)), r.ID) {
 		return
 	}
 	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec, ep)

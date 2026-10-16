@@ -374,6 +374,8 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 		case <-m.ctx.Done():
 		}
 	})
+	// Before any endpoint is listed, so no listing adopts a leftover.
+	m.terminateLeftovers()
 	m.mu.Lock()
 	if len(m.windows) == 0 {
 		cfg := m.opt.Config
@@ -410,7 +412,6 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 		m.setNoticeLocked(m.opt.Notice)
 	}
 	m.mu.Unlock()
-	m.terminateLeftovers()
 	m.wg.Add(1)
 	m.goSafe(m.keepSpares)
 	m.goSafe(func() {

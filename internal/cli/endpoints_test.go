@@ -398,6 +398,40 @@ func TestAttachRecordsExternalOnB(t *testing.T) {
 	}
 }
 
+// TestAttachSkipsRecordedLeftover: a new-window Run the file records as a
+// leftover (replaced by r, not yet terminated) is not made a window again
+// by attach, and stays recorded as the leftover.
+func TestAttachSkipsRecordedLeftover(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	near := submitTo(t, a, "work", "a")
+	def := config.Endpoint{URL: a.URL}
+	if err := state.Save(env.StateDir, &state.Session{Name: "work", Windows: []state.Window{{RunID: near, Profile: "a", Endpoint: &def}}}); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote", "-n", "far"}); code != 0 {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	far := strings.TrimSpace(out.String())
+	if far == "" || b.Run(far).Labels[config.LabelExternal] != "true" {
+		t.Fatalf("new-window made %q on b", far)
+	}
+	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	s, _, _ := state.Load(env.StateDir, "work")
+	s.Windows = s.Windows[:1]
+	s.SetSpare("leftover:"+far, far, ep)
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	got := muxSession(t)
+	if code := Main(env, []string{"attach", "-t", "work"}); code != 0 {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	s = got()
+	if s == nil || len(s.Windows) != 1 || s.Windows[0].RunID != near || s.Spares["leftover:"+far] != far {
+		t.Fatalf("session %+v", s)
+	}
+}
+
 // TestAttachWithEndpointDown: attach of a session whose file is gone and
 // whose only Runs are on a lux that does not answer makes no window in
 // their place, and says which lux failed.

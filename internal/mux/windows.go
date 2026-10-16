@@ -218,13 +218,15 @@ func (m *Mux) goEndLeftover(ep config.Endpoint, id string) {
 	})
 }
 
-// terminateLeftovers terminates the leftovers the file recorded.
+// terminateLeftovers terminates the leftovers the file recorded, each
+// marked considered so the listing never adopts it as a window.
 func (m *Mux) terminateLeftovers() {
 	m.mu.Lock()
 	left := map[string]config.Endpoint{}
 	for slot, id := range m.sess.Spares {
 		if strings.HasPrefix(slot, leftoverPrefix) {
 			left[id] = m.spareEndpointLocked(slot)
+			m.considerLocked(left[id], id)
 		}
 	}
 	m.mu.Unlock()
