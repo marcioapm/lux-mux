@@ -151,7 +151,7 @@ func (m *Mux) switchOver(ctx context.Context) (Options, *state.Session, error) {
 	// long again: the saved state is reconciled by the supervisors.
 	if !timedOut {
 		rctx, cancel := context.WithTimeout(ctx, refreshWait)
-		if s, l, ok, rerr := sessions.Open(rctx, m.lux, m.opt.StateDir, opt.Config, old); rerr == nil && ok {
+		if s, l, ok, rerr := sessions.Reopen(rctx, m.lux, m.opt.StateDir, opt.Config, old); rerr == nil && ok {
 			sess, label = s, l
 		}
 		cancel()

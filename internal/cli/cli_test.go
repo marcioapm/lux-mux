@@ -148,6 +148,29 @@ func TestNotSignedIn(t *testing.T) {
 	_ = os.Remove(env.ConfigPath)
 }
 
+// TestKillSessionDropsEndedRenameEntry: kill-session of a renamed session
+// that has no file and whose Runs all ended drops its rename entry, so
+// both of its names are free again.
+func TestKillSessionDropsEndedRenameEntry(t *testing.T) {
+	lux := fakelux.New()
+	defer lux.Close()
+	id := submit(t, lux, "old", "default", false)
+	env, _, errb := testEnv(t, lux, "")
+	if err := state.SetRenamed(env.StateDir, "old", "new", "old"); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := luxapi.New(lux.Config())
+	if err := c.Terminate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"kill-session", "-t", "new", "-y"}); code != 0 {
+		t.Fatalf("kill-session: %s", errb.String())
+	}
+	if r, _ := state.Renames(env.StateDir); len(r) != 0 {
+		t.Fatalf("renames after the kill: %v", r)
+	}
+}
+
 // TestAttachRefusedWhileAttached: a session attached by another process
 // (its lock held) is not attached a second time.
 func TestAttachRefusedWhileAttached(t *testing.T) {

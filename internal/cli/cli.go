@@ -357,6 +357,8 @@ func list(env Env) error {
 	return tw.Flush()
 }
 
+// killSession terminates session name's Runs and forgets it; a rename
+// entry whose Runs all ended, with no file left, is dropped.
 func killSession(env Env, name string, yes bool) error {
 	c, err := client(env)
 	if err != nil {
@@ -369,7 +371,12 @@ func killSession(env Env, name string, yes bool) error {
 		return err
 	}
 	_, hasFile, _ := state.Load(env.StateDir, name)
-	if len(live) == 0 && !hasFile {
+	renames, err := state.Renames(env.StateDir)
+	if err != nil {
+		return err
+	}
+	_, mapped := renames[name]
+	if len(live) == 0 && !hasFile && !mapped {
 		return fmt.Errorf("no session %s", name)
 	}
 	if !yes && len(live) > 0 {

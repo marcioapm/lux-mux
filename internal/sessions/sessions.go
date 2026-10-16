@@ -11,7 +11,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/marcioapm/lux/api"
@@ -40,13 +43,24 @@ func (e *RenamedError) Error() string {
 
 // Label is the luxmux-session label of session name's Runs: the name it
 // had when they were made. The old name of a renamed session is a
-// *RenamedError.
+// *RenamedError. It reads the state directory only: LiveLabel also drops
+// a stale rename entry, which needs lux.
 func Label(dir, name string) (string, error) {
 	m, err := state.Renames(dir)
 	if err != nil {
 		return "", err
 	}
 	return labelIn(m, name)
+}
+
+// LiveLabel is Label after a stale rename entry naming name was dropped
+// (pruneStale): a renamed session whose Runs all ended frees both names.
+// The caller holds name's lock, or none.
+func LiveLabel(ctx context.Context, c *luxapi.Client, dir, name string) (string, error) {
+	if err := pruneStale(ctx, c, dir, name); err != nil {
+		return "", err
+	}
+	return Label(dir, name)
 }
 
 func labelIn(m map[string]string, name string) (string, error) {
@@ -157,13 +171,27 @@ func list(dir string, runs []*api.Run) ([]Info, error) {
 // Open reads session name for attaching, as luxmux attach does: its file
 // reconciled with its Runs (and the Runs new-window made, and the waiting
 // spares, that it lacks), else rebuilt from their labels. existed is
-// false when there is neither. The caller holds the session's lock.
+// false when there is neither. A stale rename entry naming name is
+// dropped first (pruneStale). The caller holds the session's lock.
 func Open(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
+	if err := pruneStale(ctx, c, dir, name); err != nil {
+		return nil, "", false, err
+	}
+	return Reopen(ctx, c, dir, cfg, name)
+}
+
+// Reopen is Open for a session this process had attached: its rename
+// entry is kept even when none of its Runs is live (its windows show
+// their end).
+func Reopen(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Config, name string) (sess *state.Session, label string, existed bool, err error) {
 	if label, err = Label(dir, name); err != nil {
 		return nil, "", false, err
 	}
 	runs, err := c.ListSession(ctx, label)
 	if err != nil {
+		return nil, "", false, err
+	}
+	if err := recoverMove(dir, name, runs); err != nil {
 		return nil, "", false, err
 	}
 	sess, ok, err := state.Load(dir, name)
@@ -191,8 +219,13 @@ var ErrTaken = errors.New("session exists")
 // a valid name with no file, not a renamed session's name or label, and
 // no live Runs labelled with it. own is the label of the session being
 // renamed, which may take its label back as its name ("" for a new one).
+// A rename entry naming name that is stale (see pruneStale) is dropped
+// first.
 func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string) error {
 	if err := CheckName(name); err != nil {
+		return err
+	}
+	if err := pruneStale(ctx, c, dir, name); err != nil {
 		return err
 	}
 	if _, ok, err := state.Load(dir, name); err != nil {
@@ -227,12 +260,52 @@ func CheckFree(ctx context.Context, c *luxapi.Client, dir, name, own string) err
 	return nil
 }
 
-// Move renames session old's files to new: its state file, if it has
-// one, and the rename map (label is its Runs' label). The caller holds
-// both names' locks and checked new with CheckFree.
+// pruneStale drops a rename entry naming name (as its session or its
+// label) that is stale: no live Run carries its label, and no process
+// has the session, but for this one holding name's own lock (a caller
+// about to create or attach it). Its file, whose windows' Runs are then
+// all gone, goes with it, as when an attached session's last window ends
+// (Mux.endSession).
+func pruneStale(ctx context.Context, c *luxapi.Client, dir, name string) error {
+	renames, err := state.Renames(dir)
+	if err != nil {
+		return err
+	}
+	for n, l := range renames {
+		if n != name && l != name {
+			continue
+		}
+		if pid, held := state.Held(dir, n); held && (n != name || pid != strconv.Itoa(os.Getpid())) {
+			continue
+		}
+		runs, err := c.ListSession(ctx, l)
+		if err != nil {
+			return err
+		}
+		if slices.ContainsFunc(runs, func(r *api.Run) bool { return state.Live(r.State) }) {
+			continue
+		}
+		if err := state.Remove(dir, n); err != nil {
+			return err
+		}
+		if err := state.DropRenamed(dir, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Move renames session old to new (label is its Runs' label). The caller
+// holds both names' locks and checked new with CheckFree. The steps, each
+// leaving a state Open recovers from: the rename entry new→label first
+// (old's file is then a leftover: recoverMove), then new's file, then
+// old's file is removed.
 func Move(dir, old, new, label string) error {
 	s, ok, err := state.Load(dir, old)
 	if err != nil {
+		return err
+	}
+	if err := state.SetRenamed(dir, old, new, label); err != nil {
 		return err
 	}
 	if ok {
@@ -241,15 +314,59 @@ func Move(dir, old, new, label string) error {
 			return err
 		}
 	}
-	if err := state.SetRenamed(dir, old, new, label); err != nil {
+	return state.Remove(dir, old)
+}
+
+// recoverMove finishes a Move to session name (its Runs labelled label,
+// listed in runs) that stopped part way: a file of another name that no
+// rename entry claims and whose windows are all Runs of label is the
+// old name's. It becomes name's file when name has none, and is removed.
+// The caller holds name's lock, which a Move to name needs too.
+func recoverMove(dir, name string, runs []*api.Run) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	renames, err := state.Renames(dir)
+	if err != nil {
 		return err
 	}
-	return state.Remove(dir, old)
+	ours := map[string]bool{}
+	for _, r := range runs {
+		ours[r.ID] = true
+	}
+	files, err := state.List(dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if _, mapped := renames[f]; mapped || f == name {
+			continue
+		}
+		s, ok, err := state.Load(dir, f)
+		if err != nil || !ok || len(s.Windows) == 0 ||
+			slices.ContainsFunc(s.Windows, func(w state.Window) bool { return !ours[w.RunID] }) {
+			continue
+		}
+		if _, ok, err := state.Load(dir, name); err != nil {
+			return err
+		} else if !ok {
+			s.Name = name
+			if err := state.Save(dir, s); err != nil {
+				return err
+			}
+		}
+		if err := state.Remove(dir, f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Kill terminates session name's live Runs and forgets it: its file and
 // its rename entry, once every terminate succeeded. done is called with
-// each Run terminated. The caller holds its lock.
+// each Run terminated. The session chooser holds the session's lock for
+// it; luxmux kill-session takes none, and a luxmux attached to the
+// session ends once its windows do.
 func Kill(ctx context.Context, c *luxapi.Client, dir, name string, done func(id string)) error {
 	label, err := Label(dir, name)
 	if err != nil {

@@ -147,7 +147,7 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	label, err := sessions.Label(env.StateDir, o.Session)
+	label, err := sessions.LiveLabel(ctx, c, env.StateDir, o.Session)
 	if err != nil {
 		return err
 	}
