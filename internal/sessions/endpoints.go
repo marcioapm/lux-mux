@@ -151,6 +151,9 @@ func (ls Listings) Live(keep func(*api.Run) bool) []Target {
 	return out
 }
 
+// anyRun is the Live filter that takes every Run.
+func anyRun(*api.Run) bool { return true }
+
 // Runs are every listed Run, each once.
 func (ls Listings) Runs() []*api.Run {
 	var out []*api.Run

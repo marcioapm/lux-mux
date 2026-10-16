@@ -291,7 +291,7 @@ func CheckFree(ctx context.Context, x Luxes, dir, name, own string, locked bool)
 		}
 	}
 	ls := x.ListSession(ctx, name)
-	for _, t := range ls.Live(func(*api.Run) bool { return true }) {
+	for _, t := range ls.Live(anyRun) {
 		return ls, fmt.Errorf("session %s has Runs on lux %s: %w", name, t.Endpoint.Label(), ErrTaken)
 	}
 	if err := x.report(ls); err != nil {
@@ -337,10 +337,11 @@ func pruneStale(ctx context.Context, x Luxes, dir, name string, locked bool) (Li
 		}
 		file, _, _ := state.Load(dir, n)
 		ls := x.ListSession(ctx, l, file)
-		if down := ls.Unlisted(); len(down) == len(ls) && len(ls) > 0 {
+		down := ls.Unlisted()
+		if len(down) == len(ls) && len(ls) > 0 {
 			return nil, ls.Report(io.Discard)
 		}
-		if len(ls.Unlisted()) > 0 || len(ls.Live(func(*api.Run) bool { return true })) > 0 {
+		if len(down) > 0 || len(ls.Live(anyRun)) > 0 {
 			if n == name {
 				own = ls
 			}
@@ -455,7 +456,7 @@ func PlanKill(ctx context.Context, x Luxes, dir, name string) (*Killing, error) 
 	if err := x.report(ls); err != nil {
 		return nil, err
 	}
-	k := &Killing{Name: name, Live: ls.Live(func(*api.Run) bool { return true }), HasFile: hasFile, Mapped: mapped, file: file, ls: ls}
+	k := &Killing{Name: name, Live: ls.Live(anyRun), HasFile: hasFile, Mapped: mapped, file: file, ls: ls}
 	if len(k.Live) == 0 && !hasFile && !mapped {
 		if err := k.mayRemain(); err != nil {
 			return nil, err
@@ -495,21 +496,20 @@ func (k *Killing) Do(ctx context.Context, x Luxes, dir string, done func(id stri
 		return errors.Join(append([]error{kept}, errs...)...)
 	}
 	if k.HasFile {
-		// Its Runs on a lux that did not answer may still be there.
-		var down []config.Endpoint
+		// Its Runs on a lux that did not answer may still be there. One
+		// lux under two key sources is named once.
+		down := k.ls.Down()
+		var unanswered []string
 		for _, ep := range endpointsOf(x.Eps.Default(), k.file) {
-			if k.ls.Down()(ep) && !slices.Contains(down, ep) {
-				down = append(down, ep)
+			if down(ep) && !slices.Contains(unanswered, ep.Label()) {
+				unanswered = append(unanswered, ep.Label())
 			}
 		}
-		if len(down) > 0 {
-			return fmt.Errorf("session file kept: %s, which it has windows on, did not answer", labels(down))
+		if len(unanswered) > 0 {
+			return fmt.Errorf("session file kept: %s, which it has windows on, did not answer", strings.Join(unanswered, ", "))
 		}
-	}
-	if !k.HasFile {
-		if err := k.mayRemain(); err != nil {
-			return err
-		}
+	} else if err := k.mayRemain(); err != nil {
+		return err
 	}
 	if err := state.Remove(dir, k.Name); err != nil {
 		return err
@@ -529,5 +529,5 @@ func LiveRuns(ctx context.Context, x Luxes, dir, name string) ([]Target, error) 
 	if err := x.report(ls); err != nil {
 		return nil, err
 	}
-	return ls.Live(func(*api.Run) bool { return true }), nil
+	return ls.Live(anyRun), nil
 }
