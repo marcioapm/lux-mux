@@ -216,8 +216,12 @@ type Window struct {
 	keys      screen.KeyModes
 	altScreen bool
 	epoch     int
-	cancel    context.CancelFunc
-	closed    bool
+	// nameSent is the name last written into the Run's env file;
+	// nameSending: a write is in flight.
+	nameSent    string
+	nameSending bool
+	cancel      context.CancelFunc
+	closed      bool
 
 	// connMu guards the stream and the window's input queue. in holds the
 	// keystrokes typed for the window and not yet written, in order: the

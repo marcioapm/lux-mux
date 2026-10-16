@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/marcioapm/lux/api"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -198,6 +199,34 @@ func (c *Client) Attach(ctx context.Context, id string, restore bool, rows, cols
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+// Exec runs command in the Run without a TTY and returns its exit code.
+// It sends EOF before reading, so the command gets no input.
+func (c *Client) Exec(ctx context.Context, id string, command []string) (int, error) {
+	ws, err := c.C.Dial(ctx, "/v1/runs/"+url.PathEscape(id)+"/exec")
+	if err != nil {
+		return 0, err
+	}
+	defer ws.CloseNow()
+	if err := wsjson.Write(ctx, ws, api.StreamOpen{Command: command}); err != nil {
+		return 0, err
+	}
+	if err := wsjson.Write(ctx, ws, api.StreamData{EOF: true}); err != nil {
+		return 0, err
+	}
+	for {
+		var d api.StreamData
+		if err := wsjson.Read(ctx, ws, &d); err != nil {
+			return 0, err
+		}
+		if d.Error != "" {
+			return 0, errors.New(d.Error)
+		}
+		if d.ExitCode != nil {
+			return *d.ExitCode, nil
+		}
+	}
+}
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 

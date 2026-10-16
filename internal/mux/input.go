@@ -424,6 +424,7 @@ func (m *Mux) commandLocked(c config.Command) {
 		m.askLocked("rename window: ", w.Name, false, func(s string, ok bool) {
 			if ok && s != "" && m.indexLocked(w) >= 0 {
 				w.Name = s
+				m.sendNameLocked(w)
 				m.saveLocked()
 				m.repaintLocked()
 			}

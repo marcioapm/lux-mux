@@ -920,6 +920,7 @@ func (m *Mux) Rename(i int, name string) {
 	defer m.mu.Unlock()
 	if i >= 0 && i < len(m.windows) && name != "" {
 		m.windows[i].Name = name
+		m.sendNameLocked(m.windows[i])
 		m.saveLocked()
 	}
 }

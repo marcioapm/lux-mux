@@ -273,6 +273,7 @@ func (m *Mux) relaunch(w *Window) {
 		m.sess.SetSpare(state.LeftoverPrefix+old, old, w.Endpoint)
 	}
 	w.RunID = ""
+	w.nameSent = ""
 	w.phase = phaseStarting
 	w.reason = ""
 	w.resumable = false
@@ -349,6 +350,12 @@ func (m *Mux) claimSpare(w *Window) string {
 		if err != nil || state.Live(run.State) {
 			m.retire(w.Endpoint, id)
 		}
+		return ""
+	}
+	// A spare's LUXMUX_PROFILE is its profile's: another profile of the
+	// same spec does not take it.
+	if run.Labels[config.LabelProfile] != w.Profile {
+		m.retire(w.Endpoint, id)
 		return ""
 	}
 	m.mu.Lock()
