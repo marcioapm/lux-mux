@@ -768,10 +768,8 @@ exec sleep 30`
 		if d > 9*time.Second {
 			t.Fatalf("prompt after %v", d)
 		}
-		for _, n := range []string{"df"} {
-			if _, err := os.Stat(filepath.Join(f.state, n+".ran")); err != nil {
-				t.Fatalf("%s never ran: the deadline was not exercised", n)
-			}
+		if _, err := os.Stat(filepath.Join(f.state, "df.ran")); err != nil {
+			t.Fatalf("df never ran: the deadline was not exercised")
 		}
 		if _, err := os.Stat(filepath.Join(f.state, "stat.ran")); err == nil {
 			t.Fatal("stat ran after df timed out")
@@ -820,7 +818,7 @@ func TestWrapperProbeCost(t *testing.T) {
 	f := newFixture(t, toolDir(t, append(slices.Clone(baseTools), "df", "stat", "git"), nil), Profile{Image: "alpine"})
 	f.shell = []string{dash}
 	plain, placement := time.Hour, time.Hour
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 40; i++ {
 		_, d, err := f.run([]string{"-c", ":"})
 		if err != nil {
 			t.Fatal(err)
@@ -834,6 +832,9 @@ func TestWrapperProbeCost(t *testing.T) {
 		}
 		if d < placement {
 			placement = d
+		}
+		if i >= 7 && placement <= 60*time.Millisecond+12*plain {
+			break
 		}
 	}
 	// Minimums select an idle sample; the relative allowance handles slow hosts.

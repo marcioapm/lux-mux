@@ -3,6 +3,7 @@ package config
 import (
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -227,7 +228,12 @@ const quoteFunc = `_lm_quote() {
 // (read-only volume), _lm_lock fails and the caller publishes nothing.
 // Temporary files are only made under the lock, so the holder removes any
 // left by a holder that died.
-var lockFunc = buildLockFunc(lockSeconds, "20")
+var lockFunc = buildLockFunc(lockSeconds, lockRetries(lockSeconds))
+
+func lockRetries(seconds string) string {
+	n, _ := strconv.Atoi(seconds)
+	return strconv.Itoa(10 * n)
+}
 
 func buildLockFunc(seconds, retries string) string {
 	return `_lm_lock() {
