@@ -248,22 +248,22 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 	p := base
 	p.Image, p.Pool, p.Workdir = sp.Image.Ref, sp.Placement.Pool, sp.Workload.Workdir
 	p.Shell, p.Env, p.UnrestrictedNetwork = sp.Workload.Command, sp.Env, sp.Network.Unrestricted
-	p.Size, p.CPUs, p.Memory, p.Disk = "", 0, "", ""
-	// luxd resolves a size into cpus, memory and disk and keeps what was
-	// asked in sizing.requested; a spec read back as submitted has it.
-	size := sp.Resources.Size
-	if r.Sizing != nil && r.Sizing.Requested != nil && r.Sizing.Requested.Size != "" {
-		size = r.Sizing.Requested.Size
-	}
-	if size != "" {
-		p.Size = size
-	} else {
-		p.CPUs = sp.Resources.CPUs
-		if sp.Resources.Memory != 0 {
-			p.Memory = fmt.Sprint(int64(sp.Resources.Memory))
+	// luxd stores resources filled in: its defaults for what the submit
+	// left unset, or the resolved size on a shaped pool. Only
+	// sizing.requested (shaped pools only) says what was asked, so a
+	// resource is taken from the Run only when it is there; otherwise the
+	// profile's own value is kept.
+	if r.Sizing != nil && r.Sizing.Requested != nil {
+		q := r.Sizing.Requested
+		p.Size, p.CPUs, p.Memory, p.Disk = q.Size, 0, "", ""
+		if q.CPUs != nil {
+			p.CPUs = *q.CPUs
 		}
-		if sp.Resources.Disk != 0 {
-			p.Disk = fmt.Sprint(int64(sp.Resources.Disk))
+		if q.Memory != nil {
+			p.Memory = fmt.Sprint(int64(*q.Memory))
+		}
+		if q.Disk != nil {
+			p.Disk = fmt.Sprint(int64(*q.Disk))
 		}
 	}
 	p.Repository, p.Branch, p.Ref, p.Repositories = "", "", "", nil

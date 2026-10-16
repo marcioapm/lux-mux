@@ -140,6 +140,41 @@ func TestRebuildSizedRun(t *testing.T) {
 	}
 }
 
+// TestRebuildDefaultedResources: luxd stores resources for every Run,
+// its defaults where the submit set none. Without sizing.requested
+// saying a resource was asked, the window keeps its profile's own value,
+// so an unsized profile's window stays unsized; what sizing.requested
+// names is taken.
+func TestRebuildDefaultedResources(t *testing.T) {
+	cpus, mem := 4.0, api.Bytes(16<<30)
+	defaulted := api.Resources{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 4096}
+	for _, tc := range []struct {
+		name   string
+		prof   config.Profile
+		sizing *api.RunSizing
+		want   config.Profile
+	}{
+		{"unshaped, unsized", config.Profile{Image: "alpine"}, nil, config.Profile{Image: "alpine"}},
+		{"unshaped, sized", config.Profile{Image: "alpine", CPUs: 4}, nil, config.Profile{Image: "alpine", CPUs: 4}},
+		{"shaped, default size", config.Profile{Image: "alpine"}, &api.RunSizing{Requested: &api.SizeRequest{}}, config.Profile{Image: "alpine"}},
+		{"shaped, cpus and memory asked", config.Profile{Image: "alpine"},
+			&api.RunSizing{Requested: &api.SizeRequest{CPUs: &cpus, Memory: &mem}}, config.Profile{Image: "alpine", CPUs: 4, Memory: "17179869184"}},
+	} {
+		sp, err := config.RunSpec(tc.prof, config.Target{Session: "work", Profile: "dev"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sp.Resources = defaulted
+		r := run("run_1", "work", "dev", "running", 1, false)
+		r.Spec, r.Sizing = sp, tc.sizing
+		got := *WindowFromRun(r, tc.prof).Spec
+		if got.Size != tc.want.Size || got.CPUs != tc.want.CPUs || got.Memory != tc.want.Memory || got.Disk != tc.want.Disk ||
+			config.SpecKey(got) != config.SpecKey(tc.want) {
+			t.Errorf("%s: rebuilt %+v", tc.name, got)
+		}
+	}
+}
+
 func TestRebuild(t *testing.T) {
 	runs := []*api.Run{
 		run("run_3", "work", "app", "running", 30, false),
