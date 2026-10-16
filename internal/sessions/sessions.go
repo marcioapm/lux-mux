@@ -494,9 +494,17 @@ func (k *Killing) Do(ctx context.Context, x Luxes, dir string, done func(id stri
 		kept := fmt.Errorf("session %s: file kept, %d Run(s) not terminated", k.Name, len(errs))
 		return errors.Join(append([]error{kept}, errs...)...)
 	}
-	if k.HasFile && slices.ContainsFunc(endpointsOf(x.Eps.Default(), k.file), k.ls.Down()) {
+	if k.HasFile {
 		// Its Runs on a lux that did not answer may still be there.
-		return errors.New("session file kept: a lux it has windows on did not answer")
+		var down []config.Endpoint
+		for _, ep := range endpointsOf(x.Eps.Default(), k.file) {
+			if k.ls.Down()(ep) && !slices.Contains(down, ep) {
+				down = append(down, ep)
+			}
+		}
+		if len(down) > 0 {
+			return fmt.Errorf("session file kept: %s, which it has windows on, did not answer", labels(down))
+		}
 	}
 	if !k.HasFile {
 		if err := k.mayRemain(); err != nil {

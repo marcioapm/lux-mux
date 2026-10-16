@@ -268,6 +268,9 @@ func TestChooserKillRefusedKeepsFile(t *testing.T) {
 			h.type_("\x02s")
 			err := <-errs
 			want := map[string]string{"terminate refused": ep.Label(), "key refused": "session file kept"}[how]
+			if how == "key refused" && (err == nil || !strings.Contains(err.Error(), ep.Label())) {
+				t.Fatalf("kill error %v does not name lux %s", err, ep.Label())
+			}
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("kill: %v, want it to say %q", err, want)
 			}
