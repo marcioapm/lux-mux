@@ -406,6 +406,29 @@ func TestAdoptSizedRun(t *testing.T) {
 	}
 }
 
+// TestAdoptedWindowRelaunchClaimsSpare: an adopted window of an unsized
+// warm_spare profile, whose Run lux stores with its default resources,
+// keeps the profile's spec: r on it once ended claims the profile's
+// waiting spare.
+func TestAdoptedWindowRelaunchClaimsSpare(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare submitted", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	ext := submitExternal(t, h, "dev", "ext")
+	h.waitFor("adopted", func() bool { return h.nwindows() == 2 && h.window(1) == ext })
+	h.live(1)
+	h.lux.End(ext, "failed", "timeout")
+	h.type_("\x021")
+	h.waitFor("window 1 ended", func() bool { return h.activeIndex() == 1 && h.phase(1) == phaseDead })
+	h.type_("\x02r")
+	h.waitFor("relaunched", func() bool { id := h.window(1); return id != "" && id != ext })
+	if got := h.window(1); got != spare {
+		t.Fatalf("relaunch made %s, want the spare %s", got, spare)
+	}
+	h.detach()
+}
+
 // TestConsideredPruned: Run ids read after their submitted event that
 // were not adoptable (another session's) are forgotten at the next
 // listing, which does not list them.
