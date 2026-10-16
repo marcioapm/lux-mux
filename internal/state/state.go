@@ -59,8 +59,9 @@ type Session struct {
 	// Spares maps a warm-spare slot (config.SpareSlot) to its waiting
 	// spare's Run id.
 	Spares map[string]string `json:"spares,omitempty"`
-	// SpareEndpoints is the endpoint of each slot in Spares that is not
-	// the lux CLI configuration's.
+	// SpareEndpoints is the endpoint of each slot in Spares. A slot it
+	// lacks (files from before every slot recorded one) is the lux CLI
+	// configuration's at read time.
 	SpareEndpoints map[string]config.Endpoint `json:"spareEndpoints,omitempty"`
 	// Unlisted are endpoints the session's Runs could not be listed on
 	// when it was rebuilt: their windows are added once one answers.
@@ -435,27 +436,25 @@ func rebuild(name, label string, ls []Listing, def *config.Endpoint, profiles ma
 			// Which spares were claimed is only in the lost file: the
 			// newest of a spec is taken to be its waiting spare, any
 			// older one a claimed window.
-			if s.Spares == nil {
-				s.Spares = map[string]string{}
-			}
 			key := r.Labels[config.LabelSpec]
 			if key == "" {
 				key = prof
 			}
 			if def != nil {
 				key = config.SpareSlot(key, epOf[r.ID], *def)
-				if ep := epOf[r.ID]; ep != *def {
-					if s.SpareEndpoints == nil {
-						s.SpareEndpoints = map[string]config.Endpoint{}
-					}
-					s.SpareEndpoints[key] = ep
-				}
 			}
 			if prev, ok := s.Spares[key]; ok {
 				s.Claimed = append(s.Claimed, prev)
 				s.Windows = append(s.Windows, window(prev, prof))
 			}
-			s.Spares[key] = r.ID
+			if def != nil {
+				s.SetSpare(key, r.ID, epOf[r.ID])
+			} else {
+				if s.Spares == nil {
+					s.Spares = map[string]string{}
+				}
+				s.Spares[key] = r.ID
+			}
 			continue
 		}
 		s.Windows = append(s.Windows, window(r.ID, prof))

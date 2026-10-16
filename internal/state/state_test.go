@@ -345,7 +345,7 @@ func TestRecordSpares(t *testing.T) {
 // TestRebuildFromEndpoints: windows rebuilt from two endpoints' listings
 // record the endpoint each Run was listed on; an endpoint that could not
 // be listed adds nothing; a spare off the default endpoint gets a slot of
-// its own with its endpoint recorded.
+// its own; every spare records its endpoint, the default's too.
 func TestRebuildFromEndpoints(t *testing.T) {
 	def := config.Endpoint{URL: "https://lux.example.com"}
 	other := config.Endpoint{URL: "https://lux2.example.com", Tenant: "example", KeyEnv: "EXAMPLE_LUX_API_KEY"}
@@ -361,7 +361,8 @@ func TestRebuildFromEndpoints(t *testing.T) {
 		t.Fatalf("windows %+v", s.Windows)
 	}
 	slot := config.SpareSlot("k", other, def)
-	if !reflect.DeepEqual(s.Spares, map[string]string{"k": "run_s1", slot: "run_s2"}) || s.SpareEndpoints[slot] != other || len(s.SpareEndpoints) != 1 {
+	if !reflect.DeepEqual(s.Spares, map[string]string{"k": "run_s1", slot: "run_s2"}) ||
+		!reflect.DeepEqual(s.SpareEndpoints, map[string]config.Endpoint{"k": def, slot: other}) {
 		t.Fatalf("spares %v endpoints %v", s.Spares, s.SpareEndpoints)
 	}
 }

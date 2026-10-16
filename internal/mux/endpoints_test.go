@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -390,7 +391,12 @@ api_key_env = "` + remoteEnv + `"
 		}
 		return ""
 	}
-	x.waitFor("a spare on each lux", func() bool { return spareOn(x.lux) != "" && spareOn(x.b) != "" && len(x.spares()) == 2 })
+	x.waitFor("a spare on each lux", func() bool {
+		sp := x.spares()
+		// A slot reserved while its submit is in flight is "": the spare
+		// lux made is not claimable until it is recorded.
+		return spareOn(x.lux) != "" && spareOn(x.b) != "" && len(sp) == 2 && !slices.Contains(slices.Collect(maps.Values(sp)), "")
+	})
 	spareB := spareOn(x.b)
 	x.m.opt.UI = &fakeUI{choose: -1, req: &NewWindowRequest{ProfileName: "there", Profile: cfg.Profiles["there"]}}
 	x.type_("\x02C")
@@ -401,8 +407,51 @@ api_key_env = "` + remoteEnv + `"
 	x.waitFor("b's spare replaced on b", func() bool { s := spareOn(x.b); return s != "" && s != spareB })
 	x.detach()
 	s, _, _ := state.Load(x.dir, "s")
-	if len(s.Spares) != 2 || len(s.SpareEndpoints) != 1 {
+	if len(s.Spares) != 2 || len(s.SpareEndpoints) != 2 {
 		t.Fatalf("file spares %v endpoints %v", s.Spares, s.SpareEndpoints)
 	}
+	for slot, ep := range s.SpareEndpoints {
+		if want := map[bool]string{true: x.b.URL, false: x.lux.URL}[strings.Contains(slot, "@")]; ep.URL != want {
+			t.Fatalf("slot %s on %s, want %s", slot, ep.URL, want)
+		}
+	}
 	noKeys(t, x.dir, x.term.rawBytes())
+}
+
+// TestSpareOnFormerDefault: a spare on the lux CLI configuration's lux is
+// terminated there when the session ends, though the lux CLI points at
+// another lux by then.
+func TestSpareOnFormerDefault(t *testing.T) {
+	h := newHarness(t, `
+[profiles.default]
+image = "alpine"
+warm_spare = true
+`, nil)
+	h.live(0)
+	h.waitFor("spare", func() bool {
+		id := h.spares()[config.SpecKey(h.cfg.Profiles["default"])]
+		return id != ""
+	})
+	spare := h.spares()[config.SpecKey(h.cfg.Profiles["default"])]
+	h.detach()
+
+	// The lux CLI now points at another lux; the key is the same, so the
+	// window recorded on the first still attaches there.
+	other := fakelux.New()
+	t.Cleanup(other.Close)
+	h.opts = func(o *Options) { o.Endpoints = luxapi.NewEndpoints(other.Config(), o.Lookup) }
+	h.start(nil)
+	h.live(0)
+	h.m.Kill(0)
+	select {
+	case r := <-h.done:
+		if r != "exited" {
+			t.Fatalf("Run returned %q", r)
+		}
+	case <-timeout():
+		t.Fatal("the session did not end")
+	}
+	if !slices.Contains(h.lux.Terminated(), spare) {
+		t.Fatalf("spare %s left %s on its lux; terminated there %v, on the new default %v", spare, h.lux.Run(spare).State, h.lux.Terminated(), other.Terminated())
+	}
 }

@@ -304,20 +304,13 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		m.mu.Unlock()
 		return
 	}
-	if m.sess.Spares == nil {
-		m.sess.Spares = map[string]string{}
-	}
 	if _, ok := m.sess.Spares[slot]; ok {
 		m.mu.Unlock()
 		return
 	}
-	m.sess.Spares[slot] = "" // reserved while submitting
-	if ep != m.eps.Default() {
-		if m.sess.SpareEndpoints == nil {
-			m.sess.SpareEndpoints = map[string]config.Endpoint{}
-		}
-		m.sess.SpareEndpoints[slot] = ep
-	}
+	// Reserved while submitting; the endpoint is recorded for every slot,
+	// the default lux's too, which may be another at the next attach.
+	m.sess.SetSpare(slot, "", ep)
 	m.mu.Unlock()
 	lux, err := m.clientOf(ep)
 	var run *api.Run

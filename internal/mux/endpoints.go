@@ -142,18 +142,8 @@ func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 	}
 	m.sess.Claimed = append(m.sess.Claimed, rb.Claimed...)
 	for slot, id := range rb.Spares {
-		if _, ok := m.sess.Spares[slot]; ok {
-			continue
-		}
-		if m.sess.Spares == nil {
-			m.sess.Spares = map[string]string{}
-		}
-		m.sess.Spares[slot] = id
-		if e, ok := rb.SpareEndpoints[slot]; ok {
-			if m.sess.SpareEndpoints == nil {
-				m.sess.SpareEndpoints = map[string]config.Endpoint{}
-			}
-			m.sess.SpareEndpoints[slot] = e
+		if _, ok := m.sess.Spares[slot]; !ok {
+			m.sess.SetSpare(slot, id, ep)
 		}
 	}
 	m.saveLocked()
