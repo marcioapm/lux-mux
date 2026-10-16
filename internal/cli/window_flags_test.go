@@ -416,8 +416,8 @@ func TestAttachRecordsExternalWindows(t *testing.T) {
 	other := lux.Run(external("other", false))
 	runs = append(runs, &other)
 	s := &state.Session{Name: "work", Windows: []state.Window{{RunID: first, Name: "a", Profile: "a"}}}
-	recordExternal(s, []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg)
-	recordExternal(s, []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg)
+	state.RecordExternal(s, "work", []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg.Profiles)
+	state.RecordExternal(s, "work", []state.Listing{{Endpoint: config.Endpoint{URL: lux.URL}, Runs: runs}}, cfg.Profiles)
 	if len(s.Windows) != 2 || s.Windows[1].RunID != ext || s.Windows[1].Name != "ext" || s.Windows[1].Profile != "b" {
 		t.Fatalf("windows %+v", s.Windows)
 	}

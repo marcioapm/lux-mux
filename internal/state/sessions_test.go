@@ -129,7 +129,7 @@ func TestRebuildLabelled(t *testing.T) {
 		{ID: "r1", State: "running", CreatedAt: now, Labels: map[string]string{config.LabelSession: "old", config.LabelProfile: "p"}},
 		{ID: "r3", State: "running", CreatedAt: now, Labels: map[string]string{config.LabelSession: "new", config.LabelProfile: "p"}},
 	}
-	s := RebuildLabelled("new", "old", runs, nil)
+	s := RebuildLabelledFrom("new", "old", []Listing{{Endpoint: testEP, Runs: runs}}, testEP, nil)
 	if s.Name != "new" || len(s.Windows) != 2 || s.Windows[0].RunID != "r1" || s.Windows[1].RunID != "r2" {
 		t.Fatalf("%+v", s)
 	}

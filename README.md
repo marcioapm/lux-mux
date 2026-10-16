@@ -136,12 +136,15 @@ without leaving the terminal.
 row per session with its window count, whether another luxmux has it
 attached (`elsewhere`; `here` marks this one, also starred), its default
 profile and its age, and a live preview of the highlighted session's shown
-window, read from lux with a restore attach that sends no keys and does
-not resize it. A session attached elsewhere is not attached for a preview:
+window, read from that window's own lux with a restore attach that sends no
+keys and does not resize it. Sessions are listed from every lux the
+profiles and the session files name, as `luxmux ls` lists them. A session attached elsewhere is not attached for a preview:
 it shows `attached elsewhere — preview unavailable`. `/` filters by name
 or default profile, Enter switches, `,` renames, `x` kills (it asks, then
-terminates that session's Runs, as `kill-session` does; the session
-attached here, and one attached elsewhere, are refused), `n` opens a small
+terminates that session's Runs, each on its own lux, as `kill-session`
+does: a Run that cannot be terminated is named with its lux, and the
+session's file, its leftovers included, is kept; the session attached
+here, and one attached elsewhere, are refused), `n` opens a small
 dialog for a new session: its name, its first window's profile and that
 window's repositories and branches. The profile becomes the new session's
 default; the window keeps the profile's image, size and secrets.
@@ -149,24 +152,29 @@ default; the window keeps the profile's image, size and secrets.
 `(` and `)` switch to the previous and next session by name, wrapping
 around, and skip those attached elsewhere, with a notice that says so.
 
-**Switching** detaches the session shown as `d` does: its streams and its
-event feed are closed, its Runs keep running, its file is saved and its
-lock released. Then the other session's lock is taken and it is attached
-as `luxmux attach -t` attaches it, its shown window's screen restored
-from lux. If that session cannot be opened (another process took it in
-between, it is gone, or lux does not answer within 10 s), luxmux
-reattaches the one you were on from the state it just saved, without
-waiting for lux, and says why. A warm-spare submit still in flight is
-not waited for: the spare lux makes anyway is recorded the next time
-that session is attached.
+**Switching** detaches the session shown as `d` does: its streams and the
+event feed and listing of every lux it follows are closed, its Runs keep
+running, its file is saved and its lock released. Then the other session's
+lock is taken and it is attached as `luxmux attach -t` attaches it, from
+every lux its file and the profiles name, each window on its own lux and
+its shown window's screen restored from there. If that session cannot be
+opened (another process took it in between, it is gone, or no lux answers
+within 10 s), luxmux reattaches the one you were on from the state it just
+saved, without waiting for lux, and says why. A warm-spare submit still in
+flight is not waited for: the spare lux makes anyway is recorded the next
+time that session is attached. Nor is the terminate of a leftover (a Run
+the session could not terminate before): it goes on in the background,
+and the session's file keeps the leftover until a later attach of that
+session sees it ended.
 
 **Renaming** (`$` for this session, `,` in the chooser) renames the
 session's file. lux cannot change the labels of a Run, so the session's
 Runs (and the windows it makes later) keep the `luxmux-session` label of
 the name they were made under; `$XDG_STATE_HOME/luxmux/.renames.json`
 maps the new name to it. `ls`, `attach`, `new-window` and `kill-session`
-follow the map, and a session rebuilt from lux after its file is gone
-gets its new name, as long as that map is there. The old name stays taken
+follow the map, on every lux, and a session rebuilt from its Runs on
+every lux after its file is gone gets its new name, as long as that map is
+there. The old name stays taken
 while those Runs live: `attach -t` with it says what it was renamed to,
 and `new -s` refuses it. Once none of them is live (and no luxmux has the
 session), both names are free again. On another machine (an empty state
@@ -298,10 +306,13 @@ set. With neither, the key is the lux CLI's (`api_key`, `LUX_API_KEY`).
   notice; a Run `r` replaced, or a spare, stays in the session file and is
   terminated by a later attach. When the last window closes, such spares
   keep the session file, and `luxmux` names them on exit.
-- `luxmux ls`, `kill-session` and `spares` go across every lux, and say
-  which one did not answer. Each lux gets 10 s to list; one that does not
-  answer costs a command that and no more. `kill-session` of a session with
-  no file exits non-zero when a lux it could not list may still hold Runs.
+- `luxmux ls`, `kill-session` and `spares`, and the session chooser, go
+  across every lux, and say which one did not answer. Each lux gets 10 s to
+  list; one that does not answer costs a command that and no more.
+  `kill-session` (and the chooser's `x`) exits non-zero, keeping the
+  session file, when a terminate fails, naming each Run and its lux, or
+  when a lux it has windows on did not answer; of a session with no file,
+  when a lux it could not list may still hold Runs.
 - The chooser marks with `@` a window on a lux other than the lux CLI's,
   and names that lux above the preview.
 

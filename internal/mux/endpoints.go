@@ -108,7 +108,7 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 		lux, err := m.eps.Client(ep)
 		if err == nil {
 			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-			runs, err = lux.ListSession(ctx, m.opt.Session)
+			runs, err = lux.ListSession(ctx, m.label)
 			cancel()
 		}
 		if err == nil {
@@ -119,7 +119,7 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 			}
 			m.pruneConsidered(ep, runs)
 			for _, r := range runs {
-				if state.Adoptable(r, m.opt.Session) && m.markConsidered(ep, r.ID) {
+				if state.Adoptable(r, m.label) && m.markConsidered(ep, r.ID) {
 					m.adoptRun(ep, r)
 				}
 			}
@@ -155,7 +155,7 @@ func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 		return
 	}
 	cfg := m.config()
-	rb := state.RebuildFrom(m.opt.Session, []state.Listing{{Endpoint: ep, Runs: runs}}, m.eps.Default(), cfg.Profiles)
+	rb := state.RebuildLabelledFrom(m.Session(), m.label, []state.Listing{{Endpoint: ep, Runs: runs}}, m.eps.Default(), cfg.Profiles)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !slices.Contains(m.sess.Unlisted, ep) || m.ending || m.ctx.Err() != nil {
@@ -205,7 +205,7 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 	}
 	var found []*api.Run
 	for _, r := range runs {
-		if r.Labels[config.LabelSession] == m.opt.Session && r.Labels[config.LabelSpare] == "true" &&
+		if r.Labels[config.LabelSession] == m.label && r.Labels[config.LabelSpare] == "true" &&
 			state.Live(r.State) && !state.Terminating(r) && !known[r.ID] && m.byRun[r.ID] == nil && !m.considered[r.ID] {
 			found = append(found, r)
 		}
@@ -296,7 +296,7 @@ func (m *Mux) considerRun(ep config.Endpoint, lux *luxapi.Client, id string) {
 			m.mu.Unlock()
 			return
 		}
-		if state.Adoptable(r, m.opt.Session) {
+		if state.Adoptable(r, m.label) {
 			m.adoptRun(ep, r)
 		}
 	})

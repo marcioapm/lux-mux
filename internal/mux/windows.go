@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/marcioapm/lux/api"
@@ -159,10 +158,8 @@ func (m *Mux) Unterminated() []string {
 	return slices.Clone(m.unterminated)
 }
 
-// leftoverPrefix starts the Spares key of a leftover: a Run of the
-// session no window or slot has, recorded until it is terminated.
-// config.SpareSlot never makes a key starting with it, so none is claimed.
-const leftoverPrefix = "leftover:"
+// leftoverPrefix is state.LeftoverPrefix.
+const leftoverPrefix = state.LeftoverPrefix
 
 // keepLeftoverLocked records leftover Run id on ep, which terminate could
 // not end; the next attach (terminateLeftovers) or the session's end
@@ -230,7 +227,7 @@ func (m *Mux) terminateLeftovers() {
 	left := map[string]config.Endpoint{}
 	def := m.eps.Default()
 	for slot, id := range m.sess.Spares {
-		if strings.HasPrefix(slot, leftoverPrefix) {
+		if state.IsLeftover(slot) {
 			left[id] = m.sess.SpareEndpoint(slot, def)
 			m.considerLocked(left[id], id)
 		}

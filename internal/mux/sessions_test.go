@@ -113,7 +113,7 @@ func (h *multi) attach(name string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	sess, label, _, err := sessions.Open(context.Background(), h.cl, h.dir, h.cfg, name)
+	sess, label, _, err := sessions.Open(context.Background(), h.luxes(), h.dir, name)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -133,6 +133,15 @@ func (h *multi) attach(name string) {
 		}
 		h.done <- [2]string{r, n}
 	}()
+}
+
+// luxes are the luxes h's configuration names, through h's clients.
+func (h *multi) luxes() sessions.Luxes { return sessions.Luxes{Eps: h.eps, Cfg: h.cfg} }
+
+// checkFree is sessions.CheckFree's error for a new session, unlocked.
+func checkFree(ctx context.Context, x sessions.Luxes, dir, name string) error {
+	_, err := sessions.CheckFree(ctx, x, dir, name, "", false)
+	return err
 }
 
 // detach detaches the shown session and waits for Attach to return.
@@ -687,14 +696,14 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	h.on("alpha")
 	// The old name is the Runs' label: not free, and not attachable.
 	ctx := context.Background()
-	if err := sessions.CheckFree(ctx, h.cl, h.dir, "a", "", false); err == nil {
+	if err := checkFree(ctx, h.luxes(), h.dir, "a"); err == nil {
 		t.Fatal("the old name is free")
 	}
 	if _, err := sessions.Label(h.dir, "a"); err == nil || !strings.Contains(err.Error(), "renamed to alpha") {
 		t.Fatalf("old name: %v", err)
 	}
 	h.detach()
-	list, err := sessions.List(ctx, h.cl, h.dir)
+	list, err := sessions.List(ctx, h.luxes(), h.dir)
 	if err != nil || len(list) != 1 || list[0].Name != "alpha" || list[0].Windows != 2 {
 		t.Fatalf("list %+v %v", list, err)
 	}
@@ -703,7 +712,7 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	if err := state.Remove(h.dir, "alpha"); err != nil {
 		t.Fatal(err)
 	}
-	sess, label, existed, err := sessions.Open(ctx, h.cl, h.dir, h.cfg, "alpha")
+	sess, label, existed, err := sessions.Open(ctx, h.luxes(), h.dir, "alpha")
 	if err != nil || !existed || label != "a" || len(sess.Windows) != 2 || sess.Windows[0].RunID != id {
 		t.Fatalf("rebuilt %+v %q %v %v", sess, label, existed, err)
 	}
@@ -882,11 +891,11 @@ func TestNameCheckKeepsAttachedRenamedSession(t *testing.T) {
 	}
 	h.detach()
 	kept("after the detach")
-	list, err := sessions.List(context.Background(), h.cl, h.dir)
+	list, err := sessions.List(context.Background(), h.luxes(), h.dir)
 	if err != nil || len(list) != 1 || list[0].Name != "b" || list[0].Label != "a" {
 		t.Fatalf("list %+v %v", list, err)
 	}
-	sess, label, existed, err := sessions.Open(context.Background(), h.cl, h.dir, h.cfg, "b")
+	sess, label, existed, err := sessions.Open(context.Background(), h.luxes(), h.dir, "b")
 	if err != nil || !existed || label != "a" || len(sess.Windows) != 1 || sess.Windows[0].RunID != nid {
 		t.Fatalf("open b: %+v %q %v %v", sess, label, existed, err)
 	}

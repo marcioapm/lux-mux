@@ -343,7 +343,7 @@ func TestRecordSpares(t *testing.T) {
 	}
 	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"},
 		Claimed: []string{"run_cl"}, Windows: []Window{{RunID: "run_win"}}}
-	RecordSpares(s, "work", runs)
+	RecordSparesFrom(s, "work", []Listing{{Endpoint: testEP, Runs: runs}}, testEP)
 	want := map[string]string{"k1": "run_new", "k2": "run_kept", "k3": "run_k3"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
@@ -390,5 +390,33 @@ func TestReconcileKeepsDownEndpoint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(s.Spares, map[string]string{"k@x": "s2"}) || !reflect.DeepEqual(s.Claimed, []string{"b"}) {
 		t.Fatalf("spares %v claimed %v", s.Spares, s.Claimed)
+	}
+}
+
+// TestRecordSparesFromEndpoints: a waiting spare listed on a second lux
+// takes that lux's slot, with its endpoint; a leftover entry is never an
+// empty slot, is not overwritten, and its Run is not recorded again.
+func TestRecordSparesFromEndpoints(t *testing.T) {
+	other := config.Endpoint{URL: "https://lux2.example.com", Tenant: "example"}
+	spare := func(id, key string, at int) *api.Run {
+		r := run(id, "work", "dev", "running", at, true)
+		r.Labels[config.LabelSpec] = key
+		return r
+	}
+	slot := config.SpareSlot("k1", other, testEP)
+	s := &Session{Name: "work"}
+	s.SetSpare(LeftoverPrefix+"run_left", "run_left", other)
+	s.SetSpare(LeftoverPrefix+"k2", "", other)
+	ls := []Listing{
+		{Endpoint: testEP, Runs: []*api.Run{spare("run_a", "k1", 1)}},
+		{Endpoint: other, Runs: []*api.Run{spare("run_b", "k1", 2), spare("run_left", "k1", 3), spare("run_x", LeftoverPrefix+"k2", 4)}},
+	}
+	RecordSparesFrom(s, "work", ls, testEP)
+	want := map[string]string{"k1": "run_a", slot: "run_b", LeftoverPrefix + "run_left": "run_left", LeftoverPrefix + "k2": ""}
+	if !reflect.DeepEqual(s.Spares, want) {
+		t.Fatalf("spares %v, want %v", s.Spares, want)
+	}
+	if s.SpareEndpoint(slot, testEP) != other || s.SpareEndpoint("k1", testEP) != testEP {
+		t.Fatalf("spare endpoints %v", s.SpareEndpoints)
 	}
 }

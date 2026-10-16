@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 
 	"github.com/marcioapm/lux/api"
@@ -17,9 +16,10 @@ import (
 )
 
 // submitWindow checks p's spec with lux's dry run, then submits it as a
-// window of session that an attached luxmux adopts.
-func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, profile, name string, p config.Profile) (state.Window, error) {
-	t := config.Target{Session: session, Profile: profile}
+// window of the session whose Runs are labelled label, which an attached
+// luxmux adopts.
+func submitWindow(ctx context.Context, env Env, c *luxapi.Client, label, profile, name string, p config.Profile) (state.Window, error) {
+	t := config.Target{Session: label, Profile: profile}
 	sp, err := externalSpec(p, t, name, nil)
 	if err != nil {
 		return state.Window{}, err
@@ -141,17 +141,24 @@ func newWindow(env Env, o windowFlags) error {
 		return err
 	}
 	eps := endpoints(env)
+	x := luxes(env, eps, cfg)
+	// Its lock taken here, a renamed session whose Runs all ended is
+	// dropped and refused below, as attach does.
+	label, err := sessions.LiveLabel(context.Background(), x, env.StateDir, o.Session, !attached)
+	if err != nil {
+		return err
+	}
 	// Read-only while attached: the file is the attached process's.
 	sess, ok, err := state.Load(env.StateDir, o.Session)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		ls := listSession(eps, knownEndpoints(eps, cfg), o.Session)
-		if err := reportFailed(env.Stderr, ls); err != nil {
+		ls := x.ListSession(context.Background(), label)
+		if err := ls.Report(env.Stderr); err != nil {
 			return err
 		}
-		sess = state.RebuildFrom(o.Session, ls, eps.Default(), cfg.Profiles)
+		sess = state.RebuildLabelledFrom(o.Session, label, ls, eps.Default(), cfg.Profiles)
 	}
 	if !ok && len(sess.Windows) == 0 && len(sess.Unlisted) == 0 {
 		return fmt.Errorf("no session %s: luxmux new -s %s", o.Session, o.Session)
@@ -167,7 +174,7 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
-	w, err := submitWindow(ctx, env, c, o.Session, profile, o.Name, p)
+	w, err := submitWindow(ctx, env, c, label, profile, o.Name, p)
 	if err != nil {
 		return err
 	}
@@ -180,27 +187,4 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	fmt.Fprintln(env.Stdout, w.RunID)
 	return nil
-}
-
-// recordExternal appends to sess the Runs new-window made that its file
-// lacks: new-window found the session attached and left the record to
-// that process, which detached before it adopted them. A Run being
-// terminated (its window was closed there) is not one. Each records the
-// lux it was listed on.
-func recordExternal(sess *state.Session, ls []state.Listing, cfg *config.Config) {
-	for _, l := range ls {
-		for _, r := range l.Runs {
-			if !state.Adoptable(r, sess.Name) {
-				continue
-			}
-			// A spare or leftover the file records is never a window.
-			if slices.ContainsFunc(sess.Windows, func(w state.Window) bool { return w.RunID == r.ID }) || sess.RecordsSpare(r.ID) {
-				continue
-			}
-			w := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
-			ep := l.Endpoint
-			w.Endpoint = &ep
-			sess.Windows = append(sess.Windows, w)
-		}
-	}
 }

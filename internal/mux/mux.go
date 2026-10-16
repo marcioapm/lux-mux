@@ -108,7 +108,6 @@ type Options struct {
 type Mux struct {
 	opt  Options
 	eps  *luxapi.Endpoints
-	lux  *luxapi.Client
 	keys *keys.Machine
 	in   *input
 	// tw is the only writer of the terminal (opt.Out).
@@ -253,14 +252,13 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
 		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1)}
-	m.lux, _ = eps.Client(eps.Default())
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
 	def := eps.Default()
-	// A slot reserved with no id is a submit a detach stopped waiting for:
-	// it is free, and the Run lux may have made is found by its labels
-	// (adoptSpares).
+	// A slot reserved with no id is a submit a detach or a switch stopped
+	// waiting for: it is free, and the Run lux may have made is found by
+	// its labels (sessions.Open, adoptSpares).
 	for slot, id := range sess.Spares {
 		if id == "" {
 			sess.DropSpare(slot)
@@ -271,13 +269,6 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	}
 	m.active = clamp(sess.Active, len(m.windows))
 	m.last = clamp(sess.Last, len(m.windows))
-	// A slot reserved with no id is a submit a switch cancelled: it is
-	// free (sessions.Open records the Run lux may have made in it).
-	for key, id := range sess.Spares {
-		if id == "" {
-			delete(sess.Spares, key)
-		}
-	}
 	return m, nil
 }
 

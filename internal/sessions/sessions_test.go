@@ -16,6 +16,7 @@ type fixture struct {
 	t   *testing.T
 	lux *fakelux.Server
 	c   *luxapi.Client
+	x   Luxes
 	dir string
 	cfg *config.Config
 }
@@ -30,6 +31,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.cfg = cfg
+	f.x = Luxes{Eps: luxapi.NewEndpoints(f.lux.Config(), func(string) (string, bool) { return "", false }), Cfg: cfg}
 	return f
 }
 
@@ -77,19 +79,19 @@ func TestRenameEntryEndsWithItsRuns(t *testing.T) {
 			f := newFixture(t)
 			id := f.renamed(withFile)
 			ctx := context.Background()
-			if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err == nil {
+			if err := checkFree(ctx, f.x, f.dir, "a", "", false); err == nil {
 				t.Fatal("the old name is free while its Runs live")
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "b", "", false); !errors.Is(err, ErrTaken) {
+			if err := checkFree(ctx, f.x, f.dir, "b", "", false); !errors.Is(err, ErrTaken) {
 				t.Fatalf("the new name while its Runs live: %v", err)
 			}
 			if err := f.c.Terminate(ctx, id); err != nil {
 				t.Fatal(err)
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err != nil {
+			if err := checkFree(ctx, f.x, f.dir, "a", "", false); err != nil {
 				t.Fatalf("the old name after its Runs ended: %v", err)
 			}
-			if err := CheckFree(ctx, f.c, f.dir, "b", "", false); err != nil {
+			if err := checkFree(ctx, f.x, f.dir, "b", "", false); err != nil {
 				t.Fatalf("the new name after its Runs ended: %v", err)
 			}
 			if l, err := Label(f.dir, "a"); err != nil || l != "a" {
@@ -114,7 +116,7 @@ func TestRenameEntryKeptWhileAttached(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := CheckFree(ctx, f.c, f.dir, "a", "", false); err == nil {
+	if err := checkFree(ctx, f.x, f.dir, "a", "", false); err == nil {
 		t.Fatal("the old name of a session attached elsewhere is free")
 	}
 	if r, _ := state.Renames(f.dir); r["b"] != "a" {
@@ -151,31 +153,31 @@ func TestEntryHeldHereDroppedOnlyByOpen(t *testing.T) {
 				}
 			}
 			for _, n := range []string{"a", "b"} {
-				if err := CheckFree(ctx, f.c, f.dir, n, "", false); err == nil {
+				if err := checkFree(ctx, f.x, f.dir, n, "", false); err == nil {
 					t.Fatalf("CheckFree(%s) unlocked while b is held here", n)
 				}
 				kept("CheckFree(" + n + ")")
 			}
-			if l, err := LiveLabel(ctx, f.c, f.dir, "b", false); err != nil || l != "a" {
+			if l, err := LiveLabel(ctx, f.x, f.dir, "b", false); err != nil || l != "a" {
 				t.Fatalf("LiveLabel(b): %q %v", l, err)
 			}
 			kept("LiveLabel(b)")
 			// b's lock is not a's: the entry naming a as its label stays.
 			var re *RenamedError
-			if _, _, _, err := Open(ctx, f.c, f.dir, f.cfg, "a"); !errors.As(err, &re) {
+			if _, _, _, err := Open(ctx, f.x, f.dir, "a"); !errors.As(err, &re) {
 				t.Fatalf("open a: %v", err)
 			}
 			kept("Open(a)")
-			if err := CheckFree(ctx, f.c, f.dir, "a", "", true); err == nil {
+			if err := checkFree(ctx, f.x, f.dir, "a", "", true); err == nil {
 				t.Fatal("CheckFree(a) locked while b is held here")
 			}
 			kept("CheckFree(a) locked")
 			if by == "Open" {
-				_, label, existed, err := Open(ctx, f.c, f.dir, f.cfg, "b")
+				_, label, existed, err := Open(ctx, f.x, f.dir, "b")
 				if err != nil || existed || label != "b" {
 					t.Fatalf("open b: %q %v %v", label, existed, err)
 				}
-			} else if err := CheckFree(ctx, f.c, f.dir, "b", "", true); err != nil {
+			} else if err := checkFree(ctx, f.x, f.dir, "b", "", true); err != nil {
 				t.Fatalf("CheckFree(b) locked: %v", err)
 			}
 			if r, _ := state.Renames(f.dir); len(r) != 0 {
@@ -218,11 +220,11 @@ func TestMoveInterrupted(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			list, err := List(context.Background(), f.c, f.dir)
+			list, err := List(context.Background(), f.x, f.dir)
 			if err != nil || len(list) != 2 || list[0].Name != "b" || list[1].Name != "empty" {
 				t.Fatalf("list %+v %v", list, err)
 			}
-			sess, label, ok, err := Open(context.Background(), f.c, f.dir, f.cfg, "b")
+			sess, label, ok, err := Open(context.Background(), f.x, f.dir, "b")
 			if err != nil || !ok || label != "a" || len(sess.Windows) != 1 || sess.Windows[0].Name != "kept" {
 				t.Fatalf("open b: %+v %q %v %v", sess, label, ok, err)
 			}
@@ -254,7 +256,7 @@ func TestRecoverMoveKeepsMappedFile(t *testing.T) {
 	if err := state.Save(f.dir, &state.Session{Name: "c", Windows: []state.Window{{RunID: id, Name: "c's"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := Open(context.Background(), f.c, f.dir, f.cfg, "b"); err != nil {
+	if _, _, _, err := Open(context.Background(), f.x, f.dir, "b"); err != nil {
 		t.Fatal(err)
 	}
 	if s, ok, _ := state.Load(f.dir, "c"); !ok || len(s.Windows) != 1 || s.Windows[0].Name != "c's" {
@@ -263,4 +265,10 @@ func TestRecoverMoveKeepsMappedFile(t *testing.T) {
 	if s, ok, _ := state.Load(f.dir, "b"); ok && slices.ContainsFunc(s.Windows, func(w state.Window) bool { return w.Name == "c's" }) {
 		t.Fatalf("b.json took c's windows: %+v", s)
 	}
+}
+
+// checkFree is CheckFree's error.
+func checkFree(ctx context.Context, x Luxes, dir, name, own string, locked bool) error {
+	_, err := CheckFree(ctx, x, dir, name, own, locked)
+	return err
 }

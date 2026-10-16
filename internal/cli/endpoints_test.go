@@ -15,6 +15,7 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/sessions"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
@@ -88,9 +89,9 @@ func hangingLux(t *testing.T) string {
 // requests after a listing get less time than the listing may take, so
 // one that shares the listing's deadline fails.
 func shortTimeouts(t *testing.T) {
-	l, o, b := listTimeout, opTimeout, bulkTimeout
-	listTimeout, opTimeout, bulkTimeout = time.Second, 700*time.Millisecond, 700*time.Millisecond
-	t.Cleanup(func() { listTimeout, opTimeout, bulkTimeout = l, o, b })
+	l, o, b := sessions.ListTimeout, opTimeout, bulkTimeout
+	sessions.ListTimeout, opTimeout, bulkTimeout = time.Second, 700*time.Millisecond, 700*time.Millisecond
+	t.Cleanup(func() { sessions.ListTimeout, opTimeout, bulkTimeout = l, o, b })
 }
 
 // TestHungLuxCostsOneListing: a configured lux that never answers costs
@@ -477,6 +478,38 @@ api_key_file = "`+key+`"
 	errb.Reset()
 	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote"}); code != 0 || len(b.Submits()) != 1 {
 		t.Fatalf("0600: %d %q", code, errb.String())
+	}
+	noKeysIn(t, env.StateDir, out.String(), errb.String())
+}
+
+// TestKillSessionTerminateRefusedKeepsFile: kill-session of a session
+// whose window and leftover are on b while b refuses every terminate
+// exits non-zero naming b, keeps the file with its leftover, and still
+// terminates the Run on a.
+func TestKillSessionTerminateRefusedKeepsFile(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	near := submitTo(t, a, "work", "a")
+	far := submitTo(t, b, "work", "remote")
+	left := submitTo(t, b, "work", "remote")
+	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	def := config.Endpoint{URL: a.URL}
+	s := &state.Session{Name: "work", Windows: []state.Window{{RunID: near, Endpoint: &def}, {RunID: far, Endpoint: &ep}}}
+	s.SetSpare(state.LeftoverPrefix+left, left, ep)
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	b.FailTerminates(http.StatusForbidden)
+	code := Main(env, []string{"kill-session", "-t", "work", "-y"})
+	if code == 0 || !strings.Contains(errb.String(), "file kept") || !strings.Contains(errb.String(), ep.Label()) ||
+		!strings.Contains(errb.String(), far) || !strings.Contains(errb.String(), left) {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if !slices.Equal(a.Terminated(), []string{near}) || !strings.Contains(out.String(), "terminated "+near) {
+		t.Fatalf("a terminated %v; stdout %q", a.Terminated(), out.String())
+	}
+	f, ok, _ := state.Load(env.StateDir, "work")
+	if !ok || f.Spares[state.LeftoverPrefix+left] != left || f.SpareEndpoint(state.LeftoverPrefix+left, def) != ep {
+		t.Fatalf("file %+v %v", f, ok)
 	}
 	noKeysIn(t, env.StateDir, out.String(), errb.String())
 }
