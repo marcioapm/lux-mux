@@ -153,22 +153,35 @@ func (h *multi) make(name, text string) string {
 
 // muxGoroutines counts goroutines running a session's code: its
 // supervisors, stream readers, key writers, emulator feeders, event feed,
-// discovery and preview.
-func muxGoroutines() int {
+// discovery and preview. Their stacks are returned for failure messages.
+func muxGoroutines() (int, string) {
 	buf := make([]byte, 1<<22)
 	buf = buf[:runtime.Stack(buf, true)]
 	n := 0
+	var found []string
 	for _, g := range strings.Split(string(buf), "\n\n") {
 		for _, f := range []string{"mux.(*Mux).supervise", "mux.(*Mux).attachOnce", "mux.(*Mux).keyWriter",
 			"mux.(*Window).feeder", "mux.(*Mux).followEvents", "mux.(*Mux).discoverWindows", "mux.(*Mux).followPreview",
 			"mux.(*Mux).inputLoop", "mux.(*Mux).keepSpares"} {
 			if strings.Contains(g, f) {
 				n++
+				found = append(found, g)
 				break
 			}
 		}
 	}
-	return n
+	return n, strings.Join(found, "\n\n")
+}
+
+// goroutinesAtMost waits until at most n session goroutines run. Other
+// tests' sessions may still be ending: n is counted against a baseline
+// taken before this test started any.
+func (h *multi) goroutinesAtMost(what string, n int) {
+	h.t.Helper()
+	if !fakelux.WaitFor(context.Background(), 10*time.Second, func() bool { c, _ := muxGoroutines(); return c <= n }) {
+		c, stacks := muxGoroutines()
+		h.t.Fatalf("%s: %d session goroutines, want at most %d:\n%s", what, c, n, stacks)
+	}
 }
 
 // TestSwitchSessionAndBack: C-b s switches to another session in the same
@@ -177,13 +190,17 @@ func muxGoroutines() int {
 // event feed, goroutines) survives.
 func TestSwitchSessionAndBack(t *testing.T) {
 	h := newMulti(t)
+	base, _ := muxGoroutines()
 	idB := h.make("b", "B-SCREEN")
 	h.attach("a")
 	idA := h.on("a")
 	h.lux.Term(idA).Output([]byte("A-SCREEN\r\n"))
 	h.waitScreen("a's text", "A-SCREEN")
 	h.waitFor("one feed", func() bool { return h.lux.Feeds() == 1 })
-	before := muxGoroutines()
+	before, _ := muxGoroutines()
+	if before <= base {
+		t.Fatalf("%d session goroutines with a attached, %d before: the count sees none", before, base)
+	}
 
 	h.ui.session = SessionChoice{Switch: "b"}
 	h.type_("\x02s")
@@ -199,7 +216,7 @@ func TestSwitchSessionAndBack(t *testing.T) {
 	}
 	h.waitFor("a's stream closed", func() bool { return h.lux.Streams(idA) == 0 })
 	h.waitFor("one feed after the switch", func() bool { return h.lux.Feeds() == 1 })
-	h.waitFor("a's goroutines gone", func() bool { return muxGoroutines() == before })
+	h.goroutinesAtMost("a's goroutines gone after the switch", before)
 	if _, held := state.Held(h.dir, "a"); held {
 		t.Fatal("a's lock is still held")
 	}
@@ -222,7 +239,7 @@ func TestSwitchSessionAndBack(t *testing.T) {
 	})
 	h.waitFor("b's stream closed", func() bool { return h.lux.Streams(idB) == 0 })
 	h.waitFor("one feed after switching back", func() bool { return h.lux.Feeds() == 1 })
-	h.waitFor("b's goroutines gone", func() bool { return muxGoroutines() == before })
+	h.goroutinesAtMost("b's goroutines gone after switching back", before)
 	if _, held := state.Held(h.dir, "b"); held {
 		t.Fatal("b's lock is still held")
 	}
@@ -232,7 +249,7 @@ func TestSwitchSessionAndBack(t *testing.T) {
 		return strings.Contains(termText(h.lux.Term(idA)), "typed-in-a") && !strings.Contains(termText(h.lux.Term(idB)), "typed-in-a")
 	})
 	h.detach()
-	h.waitFor("no goroutines after detach", func() bool { return muxGoroutines() == 0 })
+	h.goroutinesAtMost("no session goroutines after the detach", base)
 	if h.lux.Feeds() != 0 || h.lux.Streams(idA) != 0 || h.lux.Streams(idB) != 0 {
 		t.Fatalf("after detach: %d feeds, streams %d %d", h.lux.Feeds(), h.lux.Streams(idA), h.lux.Streams(idB))
 	}
