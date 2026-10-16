@@ -56,12 +56,6 @@ func (m *Mux) startSupervisor(w *Window) {
 // it ended: a stopped Run waits for r to resume it, an ended one for r to
 // relaunch.
 func (m *Mux) supervise(ctx context.Context, w *Window) {
-	lux, err := m.clientOf(w.Endpoint)
-	if err != nil {
-		m.markDead(w, err.Error())
-		m.waitClosed(ctx, w)
-		return
-	}
 	bo := m.opt.Backoff
 	wait := func(d time.Duration) {
 		select {
@@ -70,6 +64,20 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 		}
 	}
 	grow := func() { bo = min(2*bo, m.opt.MaxBackoff) }
+	// A key that cannot be read now (its variable unset in this shell, its
+	// file unreadable) says nothing of the Run: the window waits, as for a
+	// lux that does not answer, and never ends on it.
+	lux, err := m.clientOf(w.Endpoint)
+	for err != nil {
+		m.setWaiting(w, err.Error())
+		wait(bo)
+		grow()
+		if ctx.Err() != nil {
+			return
+		}
+		lux, err = m.clientOf(w.Endpoint)
+	}
+	bo = m.opt.Backoff
 	// exitedEpoch is the epoch whose last stream ended with the shim's
 	// "the workload exited" (0: none since the last attach). Only that,
 	// and lux's exit-code reason for the same epoch, is the shell's exit:

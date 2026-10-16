@@ -129,7 +129,9 @@ func (m *Mux) launch(w *Window) {
 }
 
 // relaunch replaces an ended window's Run with a fresh one of the same
-// profile, in the same slot.
+// profile, in the same slot. While the window's lux has no client (its
+// key unreadable) the old Run could not be terminated: the window is
+// kept as it is, with a notice.
 func (m *Mux) relaunch(w *Window) {
 	m.mu.Lock()
 	if w.phase != phaseDead || w.closed {
@@ -137,6 +139,19 @@ func (m *Mux) relaunch(w *Window) {
 		return
 	}
 	old := w.RunID
+	m.mu.Unlock()
+	// A client once made is kept, so the terminate below gets this one.
+	if old != "" {
+		if _, err := m.clientOf(w.Endpoint); err != nil {
+			m.Notice(cannotTerminate(w.Endpoint, err))
+			return
+		}
+	}
+	m.mu.Lock()
+	if w.phase != phaseDead || w.closed || w.RunID != old {
+		m.mu.Unlock()
+		return
+	}
 	if w.cancel != nil {
 		w.cancel()
 		w.cancel = nil

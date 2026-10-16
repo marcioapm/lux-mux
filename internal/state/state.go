@@ -624,6 +624,18 @@ func (s *Session) index(id string) int {
 	return 0
 }
 
+// SetSpare records id as slot's waiting spare, on ep.
+func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
+	if s.Spares == nil {
+		s.Spares = map[string]string{}
+	}
+	if s.SpareEndpoints == nil {
+		s.SpareEndpoints = map[string]config.Endpoint{}
+	}
+	s.Spares[slot] = id
+	s.SpareEndpoints[slot] = ep
+}
+
 // AddRecent puts v first in list, without duplicates, keeping at most 10.
 func AddRecent(list []string, v string) []string {
 	if v == "" {

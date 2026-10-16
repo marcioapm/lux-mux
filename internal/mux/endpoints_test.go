@@ -288,6 +288,72 @@ func TestEndpointDown(t *testing.T) {
 	noKeys(t, x.dir, x.term.rawBytes())
 }
 
+// TestKeyUnsetThenRelaunch: a window whose lux's key cannot be read at
+// attach waits, saying why, and is not ended: r does nothing to it, and
+// once the key is back it attaches to the same Run, none terminated.
+func TestKeyUnsetThenRelaunch(t *testing.T) {
+	x := newTwoLux(t, nil)
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, "", false)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 waits for its key", func() bool { return strings.Contains(x.reason(1), remoteEnv+" is not set") })
+	if p := x.phase(1); p == phaseDead {
+		t.Fatalf("window 1 ended on a key it could not read: %q", x.reason(1))
+	}
+	x.m.mu.Lock()
+	w := x.m.windows[1]
+	x.m.mu.Unlock()
+	x.m.relaunchOrResume(w)
+	x.setEnv(remoteEnv, keyB, true)
+	if id := x.liveOnB(1); id != b1 {
+		t.Fatalf("window 1 is %s, want %s", id, b1)
+	}
+	if len(x.b.Terminated()) != 0 || len(x.b.RunIDs()) != 1 {
+		t.Fatalf("b terminated %v, has %v", x.b.Terminated(), x.b.RunIDs())
+	}
+	x.detach()
+	noKeys(t, x.dir, x.term.rawBytes())
+}
+
+// TestKeyUnsetThenKill: closing a window whose lux's key cannot be read
+// keeps it, with a notice: its Run could not be terminated, and dropping
+// it would leave the Run unrecorded. With the key back it is terminated.
+func TestKeyUnsetThenKill(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, "", false)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 waits for its key", func() bool { return strings.Contains(x.reason(1), remoteEnv+" is not set") })
+	x.m.Kill(1)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on "+strings.TrimPrefix(x.b.URL, "http://")))
+	if x.nwindows() != 2 || x.window(1) != b1 {
+		t.Fatalf("window 1 dropped: %d windows", x.nwindows())
+	}
+	noKeys(t, x.dir, x.term.rawBytes())
+	x.detach()
+	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 2 || s.Windows[1].RunID != b1 {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	if r := x.b.Run(b1); r.State != "running" || len(x.b.Terminated()) != 0 {
+		t.Fatalf("b1 %s, b terminated %v", r.State, x.b.Terminated())
+	}
+	x.setEnv(remoteEnv, keyB, true)
+	x.start(nil)
+	x.live(0)
+	x.liveOnB(1)
+	x.m.Kill(1)
+	x.waitFor("terminated on b", func() bool { return slices.Contains(x.b.Terminated(), b1) })
+	x.detach()
+}
+
 // TestSparesPerEndpoint: a warm-spare profile on each lux keeps its spare
 // on its own lux, and a window of each claims the spare of its lux.
 func TestSparesPerEndpoint(t *testing.T) {

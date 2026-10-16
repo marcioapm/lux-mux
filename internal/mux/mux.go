@@ -921,10 +921,15 @@ func (m *Mux) Kill(i int) {
 }
 
 // closeWindow removes w; with terminate, its Run is terminated first.
-// notice, when set, is shown afterwards.
+// notice, when set, is shown afterwards. A Run whose lux has no client
+// now (its key unreadable) is not terminated, and its window is kept:
+// dropping it would leave the Run running with nothing recording it.
 func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	if terminate && w.RunID != "" {
-		m.terminate(w.Endpoint, w.RunID)
+		if err := m.terminate(w.Endpoint, w.RunID); err != nil {
+			m.Notice(cannotTerminate(w.Endpoint, err))
+			return
+		}
 	}
 	m.mu.Lock()
 	i := m.indexLocked(w)
@@ -978,41 +983,64 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 }
 
 // endSession ends the session when its last window closed: its spares are
-// terminated (nothing would claim them) and its file removed.
+// terminated (nothing would claim them) and its file removed. A spare on
+// a lux with no client now stays recorded in the file instead.
 func (m *Mux) endSession() {
 	m.mu.Lock()
 	m.ending = true
 	type spare struct {
-		ep config.Endpoint
-		id string
+		slot string
+		ep   config.Endpoint
+		id   string
 	}
 	spares := make([]spare, 0, len(m.sess.Spares))
 	for slot, id := range m.sess.Spares {
 		if id != "" {
-			spares = append(spares, spare{m.spareEndpointLocked(slot), id})
+			spares = append(spares, spare{slot, m.spareEndpointLocked(slot), id})
 		}
 	}
 	m.sess.Spares, m.sess.SpareEndpoints = nil, nil
 	m.mu.Unlock()
 	sort.Slice(spares, func(i, j int) bool { return spares[i].id < spares[j].id })
+	var kept []spare
 	for _, s := range spares {
-		m.terminate(s.ep, s.id)
+		if err := m.terminate(s.ep, s.id); err != nil {
+			kept = append(kept, s)
+			m.Notice(cannotTerminate(s.ep, err))
+		}
 	}
 	if m.opt.StateDir != "" {
 		m.mu.Lock()
 		name := m.name
 		m.mu.Unlock()
-		_ = state.Remove(m.opt.StateDir, name)
-		_ = state.DropRenamed(m.opt.StateDir, name)
+		if len(kept) == 0 {
+			_ = state.Remove(m.opt.StateDir, name)
+			_ = state.DropRenamed(m.opt.StateDir, name)
+		} else {
+			m.mu.Lock()
+			for _, s := range kept {
+				m.sess.SetSpare(s.slot, s.id, s.ep)
+			}
+			m.saveLocked()
+			m.mu.Unlock()
+		}
 	}
 	m.finish("exited")
 }
 
-// terminate terminates a Run on ep, retrying a few times on errors.
-func (m *Mux) terminate(ep config.Endpoint, id string) {
+// cannotTerminate is the notice for a Run left running because its lux
+// has no client now.
+func cannotTerminate(ep config.Endpoint, err error) string {
+	return fmt.Sprintf("cannot terminate on %s: %v", ep.Label(), err)
+}
+
+// terminate terminates a Run on ep, retrying a few times on errors. Its
+// error is only that ep has no client (the Run was not asked to end);
+// lux's own refusals after the retries are not reported.
+func (m *Mux) terminate(ep config.Endpoint, id string) error {
 	c, err := m.clientOf(ep)
 	if err != nil {
-		return
+		return err
 	}
 	d := m.opt.Backoff
 	for range 5 {
@@ -1020,9 +1048,10 @@ func (m *Mux) terminate(ep config.Endpoint, id string) {
 		err := c.Terminate(ctx, id)
 		cancel()
 		if err == nil {
-			return
+			return nil
 		}
 		time.Sleep(d)
 		d = min(2*d, m.opt.MaxBackoff)
 	}
+	return nil
 }
