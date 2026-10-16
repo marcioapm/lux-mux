@@ -317,7 +317,10 @@ func (m *Mux) claimSpare(w *Window) string {
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
+			// Claimed in the same step, so a listing meanwhile does not
+			// record it as the slot's waiting spare again (adoptSpares).
 			m.sess.DropSpare(slot)
+			m.sess.Claimed = append(m.sess.Claimed, id)
 			m.saveLocked()
 		}
 	}
@@ -334,6 +337,7 @@ func (m *Mux) claimSpare(w *Window) string {
 	if err != nil {
 		// Kept for when the key can be read again.
 		m.mu.Lock()
+		m.dropClaimedLocked(id)
 		if _, taken := m.sess.Spares[slot]; taken || m.ending {
 			m.keepLeftoverLocked(w.Endpoint, id, err)
 		} else {
@@ -347,21 +351,30 @@ func (m *Mux) claimSpare(w *Window) string {
 	run, err := lux.Get(ctx, id)
 	cancel()
 	if err != nil || !spareStates[run.State] {
+		m.mu.Lock()
+		m.dropClaimedLocked(id)
+		m.mu.Unlock()
 		if err != nil || state.Live(run.State) {
 			m.retire(w.Endpoint, id)
 		}
 		return ""
 	}
-	// A spare's LUXMUX_PROFILE is its profile's: another profile of the
-	// same spec does not take it.
+	// A spare's LUXMUX_PROFILE is its own profile's: a window of another
+	// profile with the same spec leaves it waiting and gets a Run of its
+	// own.
 	if run.Labels[config.LabelProfile] != w.Profile {
-		m.retire(w.Endpoint, id)
+		m.mu.Lock()
+		m.dropClaimedLocked(id)
+		if _, taken := m.sess.Spares[slot]; taken || m.ending {
+			m.mu.Unlock()
+			m.retire(w.Endpoint, id)
+			return ""
+		}
+		m.sess.SetSpare(slot, id, w.Endpoint)
+		m.saveLocked()
+		m.mu.Unlock()
 		return ""
 	}
-	m.mu.Lock()
-	m.sess.Claimed = append(m.sess.Claimed, id)
-	m.saveLocked()
-	m.mu.Unlock()
 	return id
 }
 
