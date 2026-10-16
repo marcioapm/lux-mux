@@ -248,8 +248,7 @@ func (m *Mux) pruneConsidered(ep config.Endpoint, runs []*api.Run) {
 	defer m.mu.Unlock()
 	for id := range m.considered {
 		if m.consideredOn[id] == ep && !listed[id] {
-			delete(m.considered, id)
-			delete(m.consideredOn, id)
+			m.unconsiderLocked(id)
 		}
 	}
 }
@@ -258,6 +257,11 @@ func (m *Mux) pruneConsidered(ep config.Endpoint, runs []*api.Run) {
 func (m *Mux) considerLocked(ep config.Endpoint, id string) {
 	m.considered[id] = true
 	m.consideredOn[id] = ep
+}
+
+func (m *Mux) unconsiderLocked(id string) {
+	delete(m.considered, id)
+	delete(m.consideredOn, id)
 }
 
 // markConsidered marks a Run on ep no window has as looked at; false when
@@ -288,8 +292,7 @@ func (m *Mux) considerRun(ep config.Endpoint, lux *luxapi.Client, id string) {
 		cancel()
 		if err != nil {
 			m.mu.Lock()
-			delete(m.considered, id)
-			delete(m.consideredOn, id)
+			m.unconsiderLocked(id)
 			m.mu.Unlock()
 			return
 		}
