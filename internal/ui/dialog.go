@@ -49,14 +49,15 @@ const (
 	stCreate
 	stCancel
 	// stRepos is where the repository rows' stops start: row i's URL is
-	// repoURL(i), its branch repoURL(i)+1.
+	// repoURL(i), its branch repoBranch(i).
 	stRepos stop = 1000
 	// stRepo and stBranch are the first row's.
 	stRepo   = stRepos
 	stBranch = stRepos + 1
 )
 
-func repoURL(i int) stop { return stRepos + stop(2*i) }
+func repoURL(i int) stop    { return stRepos + stop(2*i) }
+func repoBranch(i int) stop { return repoURL(i) + 1 }
 
 // repoRowOf is the repository row s is in, if it is in one.
 func repoRowOf(s stop) (int, bool) {
@@ -306,7 +307,7 @@ func (d *Dialog) stops() []stop {
 func (d *Dialog) repoStops() []stop {
 	var s []stop
 	for i := range d.repos {
-		s = append(s, repoURL(i), repoURL(i)+1)
+		s = append(s, repoURL(i), repoBranch(i))
 	}
 	return s
 }
@@ -327,7 +328,7 @@ func (d *Dialog) setRepoRows(rows []RepoRow) {
 		setText(u, r.URL)
 		setText(b, r.Branch)
 		u.Width, b.Width = max(1, vw-1), max(1, vw-1)
-		d.in[repoURL(i)], d.in[repoURL(i)+1] = u, b
+		d.in[repoURL(i)], d.in[repoBranch(i)] = u, b
 	}
 }
 
@@ -335,7 +336,7 @@ func (d *Dialog) setRepoRows(rows []RepoRow) {
 func (d *Dialog) repoRows() []RepoRow {
 	rows := make([]RepoRow, d.repos)
 	for i := range rows {
-		rows[i] = RepoRow{URL: d.in[repoURL(i)].Value(), Branch: d.in[repoURL(i)+1].Value()}
+		rows[i] = RepoRow{URL: d.in[repoURL(i)].Value(), Branch: d.in[repoBranch(i)].Value()}
 	}
 	return rows
 }
@@ -354,8 +355,7 @@ func (d *Dialog) removeRepoRow() {
 	if !ok {
 		return
 	}
-	rows := slices.Delete(d.repoRows(), i, i+1)
-	d.setRepoRows(rows)
+	d.setRepoRows(slices.Delete(d.repoRows(), i, i+1))
 	d.changed(stRepos)
 	d.setFocus(repoURL(min(i, d.repos-1)))
 }
@@ -700,24 +700,23 @@ func (d *Dialog) secretNames() []string {
 }
 
 var stopLabel = map[stop]string{
-	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size", stAddRepo: "",
+	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size",
 	stSpare: "Warm spare", stDefault: "Session default", stSaveAs: "Save as profile",
 }
 
-// label is s's label: a repository row's are numbered from the second.
+// label is s's label: a repository row's URL is numbered from the second.
 func label(s stop) string {
 	i, ok := repoRowOf(s)
-	if !ok {
+	switch {
+	case !ok:
 		return stopLabel[s]
+	case s == repoBranch(i):
+		return "Branch"
+	case i == 0:
+		return "Repository"
+	default:
+		return fmt.Sprintf("Repository %d", i+1)
 	}
-	l := "Repository"
-	if s != repoURL(i) {
-		l = "Branch"
-	}
-	if i > 0 && s == repoURL(i) {
-		l += fmt.Sprintf(" %d", i+1)
-	}
-	return l
 }
 
 // View draws the dialog.
