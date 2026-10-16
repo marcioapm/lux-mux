@@ -103,11 +103,10 @@ func imageFromBuildInfo(read func() (*debug.BuildInfo, bool)) string {
 // image of their own, and pre-release binaries use latest even though the
 // image workflow publishes :X.Y.Z-rc.N for an rc tag.
 func imageForVersion(version string) string {
-	const prefix = ImageRepository + ":"
-	if !releaseRe.MatchString(version) {
-		return prefix + "latest"
+	if releaseRe.MatchString(version) {
+		return ImageRepository + ":" + strings.TrimPrefix(version, "v")
 	}
-	return prefix + strings.TrimPrefix(version, "v")
+	return ImageRepository + ":latest"
 }
 
 var releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
