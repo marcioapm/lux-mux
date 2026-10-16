@@ -558,6 +558,89 @@ func TestWrongKeyWindow(t *testing.T) {
 	x.detach()
 }
 
+// TestKeyUnsetSpareKeptAtEnd: when the last window closes while a spare's
+// lux has no client (its key unset), the spare is not dropped: the file
+// keeps it, and luxmux spares can list it.
+func TestKeyUnsetSpareKeptAtEnd(t *testing.T) {
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	h := &harness{t: t, lux: fakelux.NewWithKey(keyA), rows: 24, cols: 80, dir: t.TempDir(),
+		env: map[string]string{remoteEnv: keyB}, crashed: make(chan string, 1)}
+	t.Cleanup(h.lux.Close)
+	cfg, err := config.Parse([]byte(`
+default_profile = "here"
+[profiles.here]
+image = "alpine"
+[profiles.there]
+image = "alpine"
+warm_spare = true
+lux_url = "` + b.URL + `"
+api_key_env = "` + remoteEnv + `"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+	h.start(nil)
+	h.live(0)
+	h.waitFor("b's spare recorded", func() bool {
+		sp := h.spares()
+		return len(sp) == 1 && !slices.Contains(slices.Collect(maps.Values(sp)), "")
+	})
+	spare := slices.Collect(maps.Values(h.spares()))[0]
+	h.detach()
+	h.setEnv(remoteEnv, "", false)
+	h.start(nil)
+	h.live(0)
+	h.m.Kill(0)
+	select {
+	case <-h.done:
+	case <-timeout():
+		t.Fatal("the session did not end")
+	}
+	s, ok, _ := state.Load(h.dir, "s")
+	if !ok || !slices.Contains(slices.Collect(maps.Values(s.Spares)), spare) {
+		t.Fatalf("file %v %+v", ok, s)
+	}
+	if r := b.Run(spare); r.State != "running" || len(b.Terminated()) != 0 {
+		t.Fatalf("spare %s, b terminated %v", r.State, b.Terminated())
+	}
+	noKeys(t, h.dir, h.term.rawBytes())
+}
+
+// TestRelaunchWithoutClientKeepsRun: r on an ended window whose lux has
+// no client keeps the window's Run, with a notice. No path ends a window
+// before its client was made (and clients are kept), so the window is
+// ended here directly.
+func TestRelaunchWithoutClientKeepsRun(t *testing.T) {
+	x := newTwoLux(t, func(o *Options) { o.NoticeFor = 5 * time.Second })
+	x.live(0)
+	x.newRemote()
+	b1 := x.liveOnB(1)
+	x.detach()
+	x.setEnv(remoteEnv, "", false)
+	x.start(nil)
+	x.live(0)
+	x.waitFor("window 1 waits for its key", func() bool { return strings.Contains(x.reason(1), remoteEnv+" is not set") })
+	x.m.mu.Lock()
+	w := x.m.windows[1]
+	x.m.mu.Unlock()
+	x.m.markDead(w, "ended for the test")
+	x.m.relaunchOrResume(w)
+	x.waitScreen("cannot terminate notice", x.contains("cannot terminate on"))
+	if id := x.window(1); id != b1 {
+		t.Fatalf("window 1 is %q, want %s", id, b1)
+	}
+	x.detach()
+	if s, _, _ := state.Load(x.dir, "s"); len(s.Windows) != 2 || s.Windows[1].RunID != b1 {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	if len(x.b.RunIDs()) != 1 || len(x.b.Terminated()) != 0 {
+		t.Fatalf("b has %v, terminated %v", x.b.RunIDs(), x.b.Terminated())
+	}
+}
+
 // TestSparesPerEndpoint: a warm-spare profile on each lux keeps its spare
 // on its own lux, and a window of each claims the spare of its lux.
 func TestSparesPerEndpoint(t *testing.T) {

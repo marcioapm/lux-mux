@@ -1000,7 +1000,8 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 
 // endSession ends the session when its last window closed: its spares are
 // terminated (nothing would claim them) and its file removed. A spare on
-// a lux with no client now stays recorded in the file instead.
+// a lux with no client now (its key unreadable) stays recorded in the
+// file, which then holds only spares; luxmux spares lists them.
 func (m *Mux) endSession() {
 	m.mu.Lock()
 	m.ending = true
@@ -1022,7 +1023,6 @@ func (m *Mux) endSession() {
 	for _, s := range spares {
 		if err := m.terminate(s.ep, s.id); err != nil {
 			kept = append(kept, s)
-			m.Notice(cannotTerminate(s.ep, err))
 		}
 	}
 	if m.opt.StateDir != "" {
