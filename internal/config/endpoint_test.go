@@ -37,6 +37,31 @@ api_key = "` + fakeKeyA + `"
 	}
 }
 
+// TestMisplacedAPIKeyNotEchoed: a key at the top level (the lux CLI's own
+// layout) is refused as a profile's is, and a key under a misspelt name
+// is reported by its path and line; neither error holds the value.
+func TestMisplacedAPIKeyNotEchoed(t *testing.T) {
+	for name, c := range map[string]struct{ src, want string }{
+		"top level": {`api_key = "` + fakeKeyA + `"
+[profiles.p]
+image = "alpine"
+`, "api_key_env"},
+		"misspelt": {`[profiles.p]
+image = "alpine"
+lux_api_key = "` + fakeKeyA + `"
+`, "line 3: unknown key profiles.p.lux_api_key"},
+	} {
+		_, err := Parse([]byte(c.src))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+			continue
+		}
+		if strings.Contains(err.Error(), fakeKeyA) {
+			t.Errorf("%s: the error shows the key: %s", name, err)
+		}
+	}
+}
+
 // TestEndpointFields: lux_url, tenant and the key sources parse and make
 // the profile's Endpoint; unset ones are the lux CLI configuration's.
 func TestEndpointFields(t *testing.T) {
