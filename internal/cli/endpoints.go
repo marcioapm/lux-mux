@@ -110,6 +110,15 @@ type target struct {
 	r  *api.Run
 }
 
+// terminate terminates t's Run on its endpoint.
+func (t target) terminate(ctx context.Context, eps *luxapi.Endpoints) error {
+	c, err := eps.Client(t.ep)
+	if err != nil {
+		return err
+	}
+	return c.Terminate(ctx, t.r.ID)
+}
+
 // liveRuns are the listed Runs that are not terminated and that keep
 // takes, each once (one lux under two key sources lists it twice).
 func liveRuns(ls []state.Listing, keep func(*api.Run) bool) []target {

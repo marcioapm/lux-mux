@@ -450,9 +450,7 @@ func list(env Env) error {
 					unreachable[luxapi.FailedWord(err)+": "+ep.Label()] = true
 				}
 			}
-			for _, l := range slices.Sorted(maps.Keys(unreachable)) {
-				notes = append(notes, l)
-			}
+			notes = slices.Sorted(maps.Keys(unreachable))
 		} else {
 			notes = append(notes, "no local file: attach rebuilds it from lux")
 			windows -= spares
@@ -507,11 +505,7 @@ func killSession(env Env, name string, yes bool) error {
 	defer cancel()
 	var errs []error
 	for _, t := range live {
-		c, err := eps.Client(t.ep)
-		if err == nil {
-			err = c.Terminate(ctx, t.r.ID)
-		}
-		if err != nil {
+		if err := t.terminate(ctx, eps); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", t.r.ID, err))
 		} else {
 			fmt.Fprintln(env.Stdout, "terminated", t.r.ID)
@@ -567,11 +561,7 @@ func spares(env Env, rm bool) error {
 	defer cancel()
 	var errs []error
 	for _, s := range out {
-		c, err := eps.Client(s.ep)
-		if err == nil {
-			err = c.Terminate(ctx, s.r.ID)
-		}
-		if err != nil {
+		if err := s.terminate(ctx, eps); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -580,8 +570,7 @@ func spares(env Env, rm bool) error {
 		if sf, ok, _ := state.Load(env.StateDir, sn); ok {
 			for slot, id := range sf.Spares {
 				if id == s.r.ID {
-					delete(sf.Spares, slot)
-					delete(sf.SpareEndpoints, slot)
+					sf.DropSpare(slot)
 				}
 			}
 			_ = state.Save(env.StateDir, sf)
