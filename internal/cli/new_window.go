@@ -7,7 +7,6 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/marcioapm/lux/api"
 
@@ -142,15 +141,13 @@ func newWindow(env Env, o windowFlags) error {
 		return err
 	}
 	eps := endpoints(env)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	// Read-only while attached: the file is the attached process's.
 	sess, ok, err := state.Load(env.StateDir, o.Session)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		ls := listSession(ctx, eps, knownEndpoints(eps, cfg), o.Session)
+		ls := listSession(eps, knownEndpoints(eps, cfg), o.Session)
 		if err := reportFailed(env.Stderr, ls); err != nil {
 			return err
 		}
@@ -168,6 +165,8 @@ func newWindow(env Env, o windowFlags) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
 	w, err := submitWindow(ctx, env, c, o.Session, profile, o.Name, p)
 	if err != nil {
 		return err

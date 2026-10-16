@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/marcioapm/lux/api"
 
@@ -51,27 +52,38 @@ func knownEndpoints(eps *luxapi.Endpoints, cfg *config.Config, sessions ...*stat
 	return out
 }
 
-// listEach lists, on every endpoint at once, what list asks of its client.
-// An endpoint whose client cannot be made, or whose listing fails, has
-// its Err set; the others' Runs are there.
-func listEach(ctx context.Context, eps *luxapi.Endpoints, list []config.Endpoint, fn func(context.Context, *luxapi.Client) ([]*api.Run, error)) []state.Listing {
+// Timeouts of the commands' requests. Each endpoint's listing has its own
+// listTimeout, so a lux that never answers costs a command that long and
+// no more; the requests after the listing get a context made once it
+// returned. Variables: tests shorten them.
+var (
+	listTimeout = 10 * time.Second
+	// opTimeout bounds new's and new-window's dry run and submit.
+	opTimeout = 30 * time.Second
+	// bulkTimeout bounds kill-session's and spares' terminates.
+	bulkTimeout = 2 * time.Minute
+)
+
+// listEach lists, on every endpoint at once, what list asks of its client,
+// each under its own listTimeout. An endpoint whose client cannot be made,
+// or whose listing fails, has its Err set; the others' Runs are there.
+func listEach(eps *luxapi.Endpoints, list []config.Endpoint, fn func(context.Context, *luxapi.Client) ([]*api.Run, error)) []state.Listing {
 	out := make([]state.Listing, len(list))
 	var wg sync.WaitGroup
 	for i, ep := range list {
 		out[i].Endpoint = ep
-		c, err := eps.Client(ep)
-		if err != nil {
-			out[i].Err = err
-			continue
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runs, err := fn(ctx, c)
+			c, err := eps.Client(ep)
 			if err != nil {
-				err = fmt.Errorf("%s", luxapi.Describe(err))
+				out[i].Err = err
+				return
 			}
-			out[i].Runs, out[i].Err = runs, err
+			ctx, cancel := context.WithTimeout(context.Background(), listTimeout)
+			defer cancel()
+			runs, err := fn(ctx, c)
+			out[i].Runs, out[i].Err = runs, luxapi.Described(err)
 		}()
 	}
 	wg.Wait()
@@ -79,10 +91,39 @@ func listEach(ctx context.Context, eps *luxapi.Endpoints, list []config.Endpoint
 }
 
 // listSession is every endpoint's listing of session's Runs.
-func listSession(ctx context.Context, eps *luxapi.Endpoints, list []config.Endpoint, session string) []state.Listing {
-	return listEach(ctx, eps, list, func(ctx context.Context, c *luxapi.Client) ([]*api.Run, error) {
+func listSession(eps *luxapi.Endpoints, list []config.Endpoint, session string) []state.Listing {
+	return listEach(eps, list, func(ctx context.Context, c *luxapi.Client) ([]*api.Run, error) {
 		return c.ListSession(ctx, session)
 	})
+}
+
+// listAll is every endpoint's listing of the Runs luxmux made.
+func listAll(eps *luxapi.Endpoints, list []config.Endpoint) []state.Listing {
+	return listEach(eps, list, func(ctx context.Context, c *luxapi.Client) ([]*api.Run, error) {
+		return c.ListAll(ctx)
+	})
+}
+
+// target is a Run and the endpoint it was listed on.
+type target struct {
+	ep config.Endpoint
+	r  *api.Run
+}
+
+// liveRuns are the listed Runs that are not terminated and that keep
+// takes, each once (one lux under two key sources lists it twice).
+func liveRuns(ls []state.Listing, keep func(*api.Run) bool) []target {
+	var out []target
+	seen := map[string]bool{}
+	for _, l := range ls {
+		for _, r := range l.Runs {
+			if state.Live(r.State) && keep(r) && !seen[r.ID] {
+				seen[r.ID] = true
+				out = append(out, target{l.Endpoint, r})
+			}
+		}
+	}
+	return out
 }
 
 // reportFailed says on w which endpoints could not be listed while others

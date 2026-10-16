@@ -212,9 +212,7 @@ func newSession(env Env, o windowFlags) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	ls := listSession(ctx, eps, knownEndpoints(eps, cfg), name)
+	ls := listSession(eps, knownEndpoints(eps, cfg), name)
 	for _, l := range ls {
 		if l.Endpoint == ep && l.Err != nil {
 			return l.Err
@@ -228,6 +226,8 @@ func newSession(env Env, o windowFlags) error {
 	if err := reportFailed(env.Stderr, ls); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
 	if err := dryRun(ctx, env, c, name, profile, p); err != nil {
 		return err
 	}
@@ -238,7 +238,7 @@ func newSession(env Env, o windowFlags) error {
 	}
 	// Only -p pins the session's default; without it C-b c follows
 	// default_profile.
-	return runMux(env, eps, &state.Session{Name: name, DefaultProfile: o.Profile}, name, unlock, &p)
+	return startMux(env, eps, &state.Session{Name: name, DefaultProfile: o.Profile}, name, unlock, &p)
 }
 
 // attach attaches name: its file, else rebuilt from its Runs' labels on
@@ -264,9 +264,7 @@ func attach(env Env, name string, create bool) error {
 		return err
 	}
 	eps := endpoints(env)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	ls := listSession(ctx, eps, knownEndpoints(eps, cfg, sess), name)
+	ls := listSession(eps, knownEndpoints(eps, cfg, sess), name)
 	if err := reportFailed(env.Stderr, ls); err != nil {
 		return err
 	}
@@ -284,8 +282,12 @@ func attach(env Env, name string, create bool) error {
 		}
 		return fmt.Errorf("no session %s: luxmux new -s %s", name, name)
 	}
-	return runMux(env, eps, sess, name, unlock, nil)
+	return startMux(env, eps, sess, name, unlock, nil)
 }
+
+// startMux is runMux; tests see the session it is given without a
+// terminal.
+var startMux = runMux
 
 // lockSession makes this process the session's only one until unlock.
 func lockSession(env Env, name string) (func(), error) {
@@ -375,24 +377,20 @@ func list(env Env) error {
 	}
 	files := loadSessions(env)
 	eps := endpoints(env)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	ls := listEach(ctx, eps, knownEndpoints(eps, cfg, files...), func(ctx context.Context, c *luxapi.Client) ([]*api.Run, error) {
-		return c.ListAll(ctx)
-	})
+	ls := listAll(eps, knownEndpoints(eps, cfg, files...))
 	if err := reportFailed(env.Stderr, ls); err != nil {
 		return err
 	}
-	down := downOf(ls)
-	byS := map[string][]*api.Run{}
-	seen := map[string]bool{}
+	failedOn := map[config.Endpoint]error{}
 	for _, l := range ls {
-		for _, r := range l.Runs {
-			if s := r.Labels[config.LabelSession]; s != "" && state.Live(r.State) && !seen[r.ID] {
-				seen[r.ID] = true
-				byS[s] = append(byS[s], r)
-			}
+		if l.Err != nil {
+			failedOn[l.Endpoint] = l.Err
 		}
+	}
+	byS := map[string][]*api.Run{}
+	for _, t := range liveRuns(ls, func(r *api.Run) bool { return r.Labels[config.LabelSession] != "" }) {
+		s := t.r.Labels[config.LabelSession]
+		byS[s] = append(byS[s], t.r)
 	}
 	names := map[string]bool{}
 	fileOf := map[string]*state.Session{}
@@ -435,12 +433,13 @@ func list(env Env) error {
 			spares = len(s.Spares)
 			unreachable := map[string]bool{}
 			for _, w := range s.Windows {
-				if ep := w.EndpointOr(eps.Default()); down(ep) {
-					unreachable[ep.Label()] = true
+				ep := w.EndpointOr(eps.Default())
+				if _, down := failedOn[ep]; down {
+					unreachable["endpoint unreachable: "+ep.Label()] = true
 				}
 			}
 			for _, l := range slices.Sorted(maps.Keys(unreachable)) {
-				notes = append(notes, "endpoint unreachable: "+l)
+				notes = append(notes, l)
 			}
 		} else {
 			notes = append(notes, "no local file: attach rebuilds it from lux")
@@ -463,26 +462,11 @@ func killSession(env Env, name string, yes bool) error {
 	}
 	file, hasFile, _ := state.Load(env.StateDir, name)
 	eps := endpoints(env)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	ls := listSession(ctx, eps, knownEndpoints(eps, cfg, file), name)
+	ls := listSession(eps, knownEndpoints(eps, cfg, file), name)
 	if err := reportFailed(env.Stderr, ls); err != nil {
 		return err
 	}
-	type target struct {
-		ep config.Endpoint
-		r  *api.Run
-	}
-	var live []target
-	seen := map[string]bool{}
-	for _, l := range ls {
-		for _, r := range l.Runs {
-			if state.Live(r.State) && !seen[r.ID] {
-				seen[r.ID] = true
-				live = append(live, target{l.Endpoint, r})
-			}
-		}
-	}
+	live := liveRuns(ls, func(*api.Run) bool { return true })
 	if len(live) == 0 && !hasFile {
 		return fmt.Errorf("no session %s", name)
 	}
@@ -493,6 +477,8 @@ func killSession(env Env, name string, yes bool) error {
 			return errors.New("not killed")
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), bulkTimeout)
+	defer cancel()
 	var errs []error
 	for _, t := range live {
 		c, err := eps.Client(t.ep)
@@ -524,11 +510,7 @@ func spares(env Env, rm bool) error {
 	}
 	files := loadSessions(env)
 	eps := endpoints(env)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	ls := listEach(ctx, eps, knownEndpoints(eps, cfg, files...), func(ctx context.Context, c *luxapi.Client) ([]*api.Run, error) {
-		return c.ListAll(ctx)
-	})
+	ls := listAll(eps, knownEndpoints(eps, cfg, files...))
 	if err := reportFailed(env.Stderr, ls); err != nil {
 		return err
 	}
@@ -543,20 +525,7 @@ func spares(env Env, rm bool) error {
 			claimed[w.RunID] = true
 		}
 	}
-	type spare struct {
-		ep config.Endpoint
-		r  *api.Run
-	}
-	var out []spare
-	seen := map[string]bool{}
-	for _, l := range ls {
-		for _, r := range l.Runs {
-			if r.Labels[config.LabelSpare] == "true" && state.Live(r.State) && !claimed[r.ID] && !seen[r.ID] {
-				seen[r.ID] = true
-				out = append(out, spare{l.Endpoint, r})
-			}
-		}
-	}
+	out := liveRuns(ls, func(r *api.Run) bool { return r.Labels[config.LabelSpare] == "true" && !claimed[r.ID] })
 	if !rm {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "RUN\tSESSION\tPROFILE\tSTATE\tLUX")
@@ -565,6 +534,8 @@ func spares(env Env, rm bool) error {
 		}
 		return tw.Flush()
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), bulkTimeout)
+	defer cancel()
 	var errs []error
 	for _, s := range out {
 		c, err := eps.Client(s.ep)

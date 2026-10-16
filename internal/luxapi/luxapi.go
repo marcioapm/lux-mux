@@ -251,3 +251,22 @@ func Describe(err error) string {
 	}
 	return err.Error()
 }
+
+// Described is err with Describe's text that still unwraps to err, so
+// IsStatus and errors.Is see through it.
+func Described(err error) error {
+	if err == nil {
+		return nil
+	}
+	return described{err}
+}
+
+type described struct{ err error }
+
+func (d described) Error() string { return Describe(d.err) }
+func (d described) Unwrap() error { return d.err }
+
+// Refused reports whether err is luxd refusing the key: 401 or 403.
+func Refused(err error) bool {
+	return IsStatus(err, http.StatusUnauthorized) || IsStatus(err, http.StatusForbidden)
+}

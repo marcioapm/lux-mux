@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
@@ -86,6 +89,69 @@ func noKeysIn(t *testing.T, dir string, outs ...string) {
 	}
 }
 
+// hangingLux is a lux that takes every request and never answers it.
+func hangingLux(t *testing.T) string {
+	t.Helper()
+	h := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(func() { h.CloseClientConnections(); h.Close() })
+	return h.URL
+}
+
+// shortTimeouts shortens the commands' timeouts for one test: the
+// requests after a listing get less time than the listing may take, so
+// one that shares the listing's deadline fails.
+func shortTimeouts(t *testing.T) {
+	l, o, b := listTimeout, opTimeout, bulkTimeout
+	listTimeout, opTimeout, bulkTimeout = time.Second, 700*time.Millisecond, 700*time.Millisecond
+	t.Cleanup(func() { listTimeout, opTimeout, bulkTimeout = l, o, b })
+}
+
+// TestHungLuxCostsOneListing: a configured lux that never answers costs
+// new, new-window and kill-session one listing's timeout; what they then
+// do on a healthy lux has its own time.
+func TestHungLuxCostsOneListing(t *testing.T) {
+	shortTimeouts(t)
+	a := fakelux.NewWithKey(cliKeyA)
+	t.Cleanup(a.Close)
+	env, out, errb := testEnv(t, a, "")
+	env.Lookup = func(k string) (string, bool) { return cliKeyB, k == cliKeyEnv }
+	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
+	const bound = 5 * time.Second
+
+	start := time.Now()
+	code := Main(env, []string{"new", "-s", "fresh", "-p", "a"})
+	if d := time.Since(start); d > bound || code == 0 || !strings.Contains(errb.String(), "needs a terminal") {
+		t.Fatalf("new -p a: %d after %v: %q", code, d, errb.String())
+	}
+
+	submitTo(t, a, "work", "a")
+	errb.Reset()
+	start = time.Now()
+	code = Main(env, []string{"new-window", "-t", "work", "-p", "a"})
+	if d := time.Since(start); d > bound || code != 0 || len(a.Submits()) != 2 {
+		t.Fatalf("new-window -p a: %d after %v, %d submits: %q", code, d, len(a.Submits()), errb.String())
+	}
+
+	// new-window recorded the hung lux as unlisted: the file is kept.
+	id := strings.TrimSpace(out.String())
+	errb.Reset()
+	start = time.Now()
+	code = Main(env, []string{"kill-session", "-t", "work", "-y"})
+	if d := time.Since(start); d > bound || code == 0 || !strings.Contains(errb.String(), "session file kept") || !slices.Contains(a.Terminated(), id) {
+		t.Fatalf("kill-session: %d after %v, a terminated %v: %q", code, d, a.Terminated(), errb.String())
+	}
+}
+
+// lineOf is the line of out that starts with prefix.
+func lineOf(out, prefix string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	return ""
+}
+
 // TestNewWindowOnProfileEndpoint: new-window -p remote submits on the
 // remote profile's lux, with its key and tenant, and records that
 // endpoint (never the key) for the window; its labels carry no key.
@@ -150,7 +216,7 @@ func TestNewDryRunsOnProfileEndpoint(t *testing.T) {
 // there.
 func TestLsAcrossEndpoints(t *testing.T) {
 	env, a, b, out, errb := twoLuxEnv(t)
-	submitTo(t, a, "here", "a")
+	here := submitTo(t, a, "here", "a")
 	far := submitTo(t, b, "there", "remote")
 	if code := Main(env, []string{"ls"}); code != 0 {
 		t.Fatal(errb.String())
@@ -160,6 +226,9 @@ func TestLsAcrossEndpoints(t *testing.T) {
 	}
 	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
 	if err := state.Save(env.StateDir, &state.Session{Name: "there", Windows: []state.Window{{RunID: far, Name: "remote", Profile: "remote", Endpoint: &ep}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(env.StateDir, &state.Session{Name: "here", Windows: []state.Window{{RunID: here, Name: "a", Profile: "a"}}}); err != nil {
 		t.Fatal(err)
 	}
 	b.SetDown(true)
@@ -172,14 +241,11 @@ func TestLsAcrossEndpoints(t *testing.T) {
 		!strings.Contains(errb.String(), strings.TrimPrefix(b.URL, "http://")+" · tenant example") || !strings.Contains(errb.String(), "$"+cliKeyEnv) {
 		t.Fatalf("ls with b down:\n%s\nstderr: %s", out.String(), errb.String())
 	}
-	var thereLine string
-	for _, l := range strings.Split(out.String(), "\n") {
-		if strings.HasPrefix(l, "there") {
-			thereLine = l
-		}
-	}
-	if !strings.Contains(thereLine, "endpoint unreachable") {
+	if !strings.Contains(lineOf(out.String(), "there"), "endpoint unreachable") {
 		t.Fatalf("session there not marked:\n%s", out.String())
+	}
+	if l := lineOf(out.String(), "here"); l == "" || strings.Contains(l, "endpoint") {
+		t.Fatalf("session here, with no window on b, marked:\n%s", out.String())
 	}
 	noKeysIn(t, env.StateDir, out.String(), errb.String())
 }
