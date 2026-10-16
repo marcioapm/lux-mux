@@ -59,6 +59,14 @@ func run(id, session, profile, state string, at int, spare bool) *api.Run {
 	return r
 }
 
+// testEP is the one endpoint of rebuildOne.
+var testEP = config.Endpoint{URL: "https://lux.example.com"}
+
+// rebuildOne is RebuildFrom over one endpoint's listing of runs.
+func rebuildOne(session string, runs []*api.Run, profiles map[string]config.Profile) *Session {
+	return RebuildFrom(session, []Listing{{Endpoint: testEP, Runs: runs}}, testEP, profiles)
+}
+
 // TestSessionDefaultProfile: a session's default profile is kept in its
 // file, and a file from before it has none.
 func TestSessionDefaultProfile(t *testing.T) {
@@ -101,7 +109,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	r := run("run_1", "work", "dev", "running", 1, false)
 	r.Spec = sp
 	r.Labels[config.LabelWindow] = "named"
-	s := RebuildLabelled("work", "work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
+	s := rebuildOne("work", []*api.Run{r}, map[string]config.Profile{"dev": prof})
 	if len(s.Windows) != 1 || s.Windows[0].Name != "named" || s.Windows[0].Profile != "dev" || s.Windows[0].Spec == nil {
 		t.Fatalf("%+v", s.Windows)
 	}
@@ -115,7 +123,7 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	}
 	// A Run listed without its spec keeps the profile name only.
 	bare := run("run_2", "work", "dev", "running", 2, false)
-	if s := RebuildLabelled("work", "work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
+	if s := rebuildOne("work", []*api.Run{bare}, nil); s.Windows[0].Spec != nil || s.Windows[0].Name != "dev" {
 		t.Fatalf("%+v", s.Windows[0])
 	}
 }
@@ -212,7 +220,7 @@ func TestRebuild(t *testing.T) {
 		run("run_2", "work", "app", "stopped", 20, true), // an older spare: claimed
 		run("run_4", "work", "app", "running", 40, true), // the newest spare: waiting
 	}
-	s := RebuildLabelled("work", "work", runs, nil)
+	s := rebuildOne("work", runs, nil)
 	var ids []string
 	for _, w := range s.Windows {
 		ids = append(ids, w.RunID)
@@ -240,7 +248,7 @@ func TestRebuildBySpec(t *testing.T) {
 		spec(run("run_d", "work", "renamed", "running", 40, true), "k3"), // newest of k3: waiting
 		run("run_e", "work", "legacy", "running", 50, true),
 	}
-	s := RebuildLabelled("work", "work", runs, nil)
+	s := rebuildOne("work", runs, nil)
 	want := map[string]string{"k1": "run_a", "k2": "run_b", "k3": "run_d", "legacy": "run_e"}
 	if !reflect.DeepEqual(s.Spares, want) {
 		t.Fatalf("spares %v, want %v", s.Spares, want)
@@ -254,7 +262,7 @@ func TestReconcile(t *testing.T) {
 	s := &Session{Windows: []Window{{RunID: "a"}, {RunID: "b"}, {RunID: "c"}}, Active: 2, Last: 1,
 		Spares:  map[string]string{"p": "s1", "q": "s2"},
 		Claimed: []string{"a", "b", "gone"}}
-	s.Reconcile(map[string]string{"a": "running", "b": "terminated", "c": "stopped", "s1": "running"})
+	s.ReconcileUp(map[string]string{"a": "running", "b": "terminated", "c": "stopped", "s1": "running"}, testEP, nil)
 	if len(s.Windows) != 2 || s.Windows[0].RunID != "a" || s.Windows[1].RunID != "c" {
 		t.Fatalf("%+v", s.Windows)
 	}

@@ -29,6 +29,7 @@ import (
 type multi struct {
 	t    *testing.T
 	lux  *fakelux.Server
+	eps  *luxapi.Endpoints
 	cl   *luxapi.Client
 	rt   *hookRT
 	dir  string
@@ -84,7 +85,9 @@ func newMulti(t *testing.T) *multi {
 	t.Helper()
 	h := &multi{t: t, lux: fakelux.New(), dir: t.TempDir(), term: newClientTerm(24, 80), ui: &fakeUI{choose: -1}}
 	t.Cleanup(h.lux.Close)
-	h.cl, _ = luxapi.New(h.lux.Config())
+	// Endpoints keeps the client it made: the default lux's is this one.
+	h.eps = luxapi.NewEndpoints(h.lux.Config(), func(string) (string, bool) { return "", false })
+	h.cl, _ = h.eps.Client(h.eps.Default())
 	h.rt = &hookRT{base: http.DefaultTransport}
 	h.cl.C.HTTP = &http.Client{Transport: h.rt}
 	cfg, err := config.Parse(nil)
@@ -114,7 +117,7 @@ func (h *multi) attach(name string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	opt := Options{Session: name, Label: label, Unlock: unlock, Console: h.con, Config: h.cfg, Lux: h.cl, StateDir: h.dir,
+	opt := Options{Session: name, Label: label, Unlock: unlock, Console: h.con, Config: h.cfg, Endpoints: h.eps, StateDir: h.dir,
 		Size: func() (int, int) { return 24, 80 }, UI: h.ui, Lookup: func(string) (string, bool) { return "", false },
 		Crash:   func(msg string) { h.t.Errorf("crash: %s", msg); runtime.Goexit() },
 		Backoff: 5 * time.Millisecond, MaxBackoff: 50 * time.Millisecond, NoticeFor: 300 * time.Millisecond,

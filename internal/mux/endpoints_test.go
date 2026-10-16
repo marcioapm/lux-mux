@@ -64,7 +64,7 @@ func newTwoLux(t *testing.T, opts func(*Options)) *twoLux {
 	return &twoLux{harness: h, b: b}
 }
 
-// onB reports whether window i is attached to its Run on b.
+// liveOnB waits until window i is attached to its Run on b.
 func (x *twoLux) liveOnB(i int) string {
 	x.t.Helper()
 	x.waitFor("window live on b", func() bool {

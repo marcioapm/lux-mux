@@ -53,10 +53,8 @@ type Options struct {
 	// Notice is shown once the session is on the terminal.
 	Notice string
 	Config *config.Config
-	// Endpoints makes the client of each window's lux. Nil: one made over
-	// Lux's configuration (the lux CLI's), Lux its default endpoint's.
+	// Endpoints makes the client of each window's lux.
 	Endpoints *luxapi.Endpoints
-	Lux       *luxapi.Client
 	StateDir  string
 	// In is the keyboard (raw mode is the caller's), Out the terminal.
 	In  io.Reader
@@ -248,20 +246,11 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 		opt.Label = opt.Session
 	}
 	eps := opt.Endpoints
-	if eps == nil {
-		var base api.Config
-		if opt.Lux != nil {
-			base = api.Config{URL: opt.Lux.C.Base, APIKey: opt.Lux.C.Key, Tenant: opt.Lux.C.Tenant}
-		}
-		eps = luxapi.NewEndpoints(base, opt.Lookup)
-	}
-	m := &Mux{opt: opt, eps: eps, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
+	m := &Mux{opt: opt, eps: eps, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
 		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1)}
-	if m.lux == nil {
-		m.lux, _ = eps.Client(eps.Default())
-	}
+	m.lux, _ = eps.Client(eps.Default())
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())

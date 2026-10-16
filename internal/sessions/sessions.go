@@ -205,7 +205,7 @@ func Reopen(ctx context.Context, c *luxapi.Client, dir string, cfg *config.Confi
 			known[r.ID] = r.State
 		}
 		state.RecordExternal(sess, label, runs, cfg.Profiles)
-		sess.Reconcile(known)
+		sess.ReconcileUp(known, config.Endpoint{}, nil)
 		state.RecordSpares(sess, label, runs)
 		return sess, label, true, nil
 	}

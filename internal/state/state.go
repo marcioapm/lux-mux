@@ -390,11 +390,16 @@ type Listing struct {
 	Err      error
 }
 
-// RebuildFrom is RebuildLabelled over every endpoint's listing: each window
-// records the endpoint its Run was listed on, and each spare's slot is
-// config.SpareSlot of its spec on that endpoint (def: the lux CLI
-// configuration's). A Run two endpoints list (one lux, two key sources)
-// is taken from the first. Listings that failed add nothing.
+// RebuildFrom makes a session from what every endpoint lists for it
+// (Runs labelled with the session), for when its file is gone: its
+// non-terminated Runs that are not a waiting warm spare, oldest first.
+// Names are lost: each window is named after its profile. A Run whose
+// spec lux returns gets that spec as its window's (profiles: the
+// configuration's, by name). Each window and spare records the endpoint
+// its Run was listed on, and each spare's slot is config.SpareSlot of its
+// spec on that endpoint (def: the lux CLI configuration's). A Run two
+// endpoints list (one lux, two key sources) is taken from the first.
+// Listings that failed add nothing and are recorded in Unlisted.
 func RebuildFrom(session string, ls []Listing, def config.Endpoint, profiles map[string]config.Profile) *Session {
 	return rebuild(session, session, ls, &def, profiles)
 }
@@ -405,9 +410,7 @@ func rebuild(name, label string, ls []Listing, def *config.Endpoint, profiles ma
 	epOf := map[string]config.Endpoint{}
 	for _, l := range ls {
 		if l.Err != nil {
-			if def != nil {
-				s.Unlisted = append(s.Unlisted, l.Endpoint)
-			}
+			s.Unlisted = append(s.Unlisted, l.Endpoint)
 			continue
 		}
 		for _, r := range l.Runs {
@@ -422,6 +425,7 @@ func rebuild(name, label string, ls []Listing, def *config.Endpoint, profiles ma
 		}
 	}
 	sort.SliceStable(live, func(i, j int) bool { return live[i].CreatedAt.Before(live[j].CreatedAt) })
+	// def nil (RebuildLabelled): one lux, the default; nothing records it.
 	window := func(id, prof string) Window {
 		w := Window{RunID: id, Name: prof, Profile: prof}
 		if def != nil {
@@ -551,7 +555,7 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 }
 
 // sortWindowsByCreation orders windows by their Runs' creation, after
-// RebuildLabelled appended claimed spares out of order.
+// RebuildFrom appended claimed spares out of order.
 func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	at := map[string]time.Time{}
 	for _, r := range runs {
@@ -560,16 +564,12 @@ func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	sort.SliceStable(s.Windows, func(i, j int) bool { return at[s.Windows[i].RunID].Before(at[s.Windows[j].RunID]) })
 }
 
-// Reconcile drops windows whose Runs lux no longer has or has terminated
-// (known maps a Run id to its state; ids it lacks are gone), keeping
-// Active and Last pointing at the same windows where they survive.
-func (s *Session) Reconcile(known map[string]string) {
-	s.ReconcileUp(known, config.Endpoint{}, nil)
-}
-
-// ReconcileUp is Reconcile when some endpoints could not be listed: the
-// windows and spares on an endpoint down reports (def is a window's
-// endpoint when it records none) are kept as they are.
+// ReconcileUp drops windows whose Runs lux no longer has or has
+// terminated (known maps a Run id to its state; ids it lacks are gone),
+// keeping Active and Last pointing at the same windows where they
+// survive. The windows and spares on an endpoint down reports (nil: none)
+// are kept as they are; def is the endpoint of a window or spare that
+// records none.
 func (s *Session) ReconcileUp(known map[string]string, def config.Endpoint, down func(config.Endpoint) bool) {
 	isDown := func(ep config.Endpoint) bool { return down != nil && down(ep) }
 	keep := func(id string) bool { st, ok := known[id]; return ok && Live(st) }
