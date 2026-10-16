@@ -473,7 +473,21 @@ func killSession(env Env, name string, yes bool) error {
 		return err
 	}
 	live := liveRuns(ls, func(*api.Run) bool { return true })
+	// Without a file, a lux that did not answer may hold any of the
+	// session's Runs.
+	var unlisted []string
+	for _, l := range ls {
+		if l.Err != nil {
+			unlisted = append(unlisted, l.Endpoint.Label())
+		}
+	}
+	mayRemain := func() error {
+		return fmt.Errorf("session %s may still have Runs on %s: run kill-session again when it answers", name, strings.Join(unlisted, ", "))
+	}
 	if len(live) == 0 && !hasFile {
+		if len(unlisted) > 0 {
+			return mayRemain()
+		}
 		return fmt.Errorf("no session %s", name)
 	}
 	if !yes && len(live) > 0 {
@@ -503,6 +517,9 @@ func killSession(env Env, name string, yes bool) error {
 	if hasFile && slices.ContainsFunc(knownEndpoints(eps, &config.Config{}, file), downOf(ls)) {
 		// Its Runs on a lux that did not answer may still be there.
 		return errors.New("session file kept: a lux it has windows on did not answer")
+	}
+	if !hasFile && len(unlisted) > 0 {
+		return mayRemain()
 	}
 	return state.Remove(env.StateDir, name)
 }

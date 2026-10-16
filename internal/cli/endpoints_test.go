@@ -173,6 +173,28 @@ func TestNewOverRunsOnDownLux(t *testing.T) {
 	}
 }
 
+// TestKillSessionNoFileOneDown: kill-session of a session with no file
+// while one of its luxes is down terminates what it can and fails naming
+// the lux it could not list.
+func TestKillSessionNoFileOneDown(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	near := submitTo(t, a, "work", "a")
+	submitTo(t, b, "work", "remote")
+	b.SetDown(true)
+	code := Main(env, []string{"kill-session", "-t", "work", "-y"})
+	if code == 0 || !strings.Contains(errb.String(), "may still have Runs on "+strings.TrimPrefix(b.URL, "http://")) {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	if !slices.Equal(a.Terminated(), []string{near}) || !strings.Contains(out.String(), "terminated "+near) {
+		t.Fatalf("a terminated %v; stdout %q", a.Terminated(), out.String())
+	}
+	// Nothing listed anywhere, one lux down: not "no session".
+	errb.Reset()
+	if code := Main(env, []string{"kill-session", "-t", "work", "-y"}); code == 0 || !strings.Contains(errb.String(), "may still have Runs") {
+		t.Fatalf("second: %d %q", code, errb.String())
+	}
+}
+
 // lineOf is the line of out that starts with prefix.
 func lineOf(out, prefix string) string {
 	for _, l := range strings.Split(out, "\n") {
