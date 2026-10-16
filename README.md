@@ -301,7 +301,10 @@ Run is also labelled `luxmux-session=<session>` and
 `luxmux-profile=<profile>` (and `app=luxmux`), so when that file is gone —
 another machine, a cleaned home directory — `luxmux attach -t NAME`
 rebuilds the session from lux: its non-terminated Runs, ordered by
-creation, each with its Run's spec (all its repositories included). That
+creation, each with its Run's spec (all its repositories included). A
+window's size, cpus, memory and disk come from what it asked
+(`luxmux-resources`, e.g. `cpus=4`, or lux's `sizing.requested` on a
+shaped pool), never from the defaults lux fills in. That
 rebuild is lossy: window names become their profile names (or the name
 `new-window -n` gave), the session's default profile is forgotten, and of
 several spares of one spec the newest is taken to be the waiting one.
