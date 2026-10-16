@@ -23,15 +23,9 @@ run() {
 	echo "ok: $*"
 }
 
-run claude --version
-run opencode --version
-run codex --version
-run git --version
-run gh --version
-run node --version
-run uv --version
-run rg --version
-run fd --version
+for tool in claude opencode codex git gh node uv rg fd; do
+	run "$tool" --version
+done
 run bash -lc true
 
 # luxmux starts `bash -l`: the agents must stay on its PATH.
