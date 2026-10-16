@@ -308,3 +308,31 @@ func TestLock(t *testing.T) {
 		t.Fatalf("lock files listed as sessions: %v", names)
 	}
 }
+
+// TestRecordSpares: lux's waiting spares of the session fill only its
+// empty slots, the newest Run per slot; a filled slot keeps its spare,
+// and a spare being terminated, ended, or of another label is skipped.
+func TestRecordSpares(t *testing.T) {
+	spare := func(id, label, key, st string, at int) *api.Run {
+		r := run(id, label, "dev", st, at, true)
+		r.Labels[config.LabelSpec] = key
+		return r
+	}
+	stopping := spare("run_stop", "work", "k3", "running", 9)
+	stopping.StateReason = "terminate"
+	runs := []*api.Run{
+		spare("run_old", "work", "k1", "running", 1),
+		spare("run_new", "work", "k1", "starting", 2),
+		spare("run_lux", "work", "k2", "running", 3),
+		stopping,
+		spare("run_k3", "work", "k3", "running", 4),
+		spare("run_end", "work", "k4", "terminated", 5),
+		spare("run_other", "play", "k5", "running", 6),
+	}
+	s := &Session{Name: "work", Spares: map[string]string{"k1": "", "k2": "run_kept"}}
+	RecordSpares(s, "work", runs)
+	want := map[string]string{"k1": "run_new", "k2": "run_kept", "k3": "run_k3"}
+	if !reflect.DeepEqual(s.Spares, want) {
+		t.Fatalf("spares %v, want %v", s.Spares, want)
+	}
+}

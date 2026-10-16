@@ -3,6 +3,7 @@ package sessions
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/marcioapm/lux-mux/internal/config"
@@ -169,12 +170,17 @@ func TestEntryHeldHereDroppedOnlyByOpen(t *testing.T) {
 
 // TestMoveInterrupted: a rename that stopped after any of its steps is
 // recovered when the session is opened by its new name: one file, under
-// the new name, with its windows; the old name hidden.
+// the new name, with its windows; the old name hidden. A new-name file
+// already written wins over the leftover, and another session's file
+// with no windows is not taken for the leftover.
 func TestMoveInterrupted(t *testing.T) {
 	for _, step := range []string{"entry written", "new file written"} {
 		t.Run(step, func(t *testing.T) {
 			f := newFixture(t)
 			id := f.run("a")
+			if err := state.Save(f.dir, &state.Session{Name: "empty"}); err != nil {
+				t.Fatal(err)
+			}
 			s := &state.Session{Name: "a", Windows: []state.Window{{RunID: id, Name: "kept"}}}
 			if err := state.Save(f.dir, s); err != nil {
 				t.Fatal(err)
@@ -187,9 +193,13 @@ func TestMoveInterrupted(t *testing.T) {
 				if err := state.Save(f.dir, s); err != nil {
 					t.Fatal(err)
 				}
+				old := &state.Session{Name: "a", Windows: []state.Window{{RunID: id, Name: "leftover"}}}
+				if err := state.Save(f.dir, old); err != nil {
+					t.Fatal(err)
+				}
 			}
 			list, err := List(context.Background(), f.c, f.dir)
-			if err != nil || len(list) != 1 || list[0].Name != "b" {
+			if err != nil || len(list) != 2 || list[0].Name != "b" || list[1].Name != "empty" {
 				t.Fatalf("list %+v %v", list, err)
 			}
 			sess, label, ok, err := Open(context.Background(), f.c, f.dir, f.cfg, "b")
@@ -202,6 +212,35 @@ func TestMoveInterrupted(t *testing.T) {
 			if s, ok, _ := state.Load(f.dir, "b"); !ok || s.Windows[0].RunID != id {
 				t.Fatalf("b.json %+v", s)
 			}
+			if _, ok, _ := state.Load(f.dir, "empty"); !ok {
+				t.Fatal("empty.json was taken for the leftover")
+			}
 		})
+	}
+}
+
+// TestRecoverMoveKeepsMappedFile: the file of a session that has a rename
+// entry of its own is never taken for a leftover of another Move, even
+// when its windows are all Runs of the session being opened.
+func TestRecoverMoveKeepsMappedFile(t *testing.T) {
+	f := newFixture(t)
+	id := f.run("a")
+	if err := state.SetRenamed(f.dir, "a", "b", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRenamed(f.dir, "x", "c", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(f.dir, &state.Session{Name: "c", Windows: []state.Window{{RunID: id, Name: "c's"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := Open(context.Background(), f.c, f.dir, f.cfg, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok, _ := state.Load(f.dir, "c"); !ok || len(s.Windows) != 1 || s.Windows[0].Name != "c's" {
+		t.Fatalf("c.json after opening b: %+v %v", s, ok)
+	}
+	if s, ok, _ := state.Load(f.dir, "b"); ok && slices.ContainsFunc(s.Windows, func(w state.Window) bool { return w.Name == "c's" }) {
+		t.Fatalf("b.json took c's windows: %+v", s)
 	}
 }
