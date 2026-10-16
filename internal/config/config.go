@@ -58,6 +58,10 @@ type Profile struct {
 	SecretsFrom   string            `toml:"secrets_from,omitempty" json:"secretsFrom,omitempty"`
 	Workdir       string            `toml:"workdir,omitempty" json:"workdir,omitempty"`
 	WarmSpare     bool              `toml:"warm_spare,omitempty" json:"warmSpare,omitempty"`
+	// OnStart runs in the window's shell process on the Run's first
+	// start, OnResume on each later placement (see StartWrapper).
+	OnStart  string `toml:"on_start,omitempty" json:"onStart,omitempty"`
+	OnResume string `toml:"on_resume,omitempty" json:"onResume,omitempty"`
 	// lux denies egress by default: Egress lists the hosts (or CIDRs) the
 	// shell may reach, UnrestrictedNetwork lifts the filter.
 	Egress              []string `toml:"egress,omitempty" json:"egress,omitempty"`
@@ -373,6 +377,13 @@ func (p Profile) Validate() error {
 	for k := range p.Env {
 		if !envNameRe.MatchString(k) || strings.HasPrefix(k, "LUX_") {
 			fail("env: invalid name %q", k)
+		} else if reservedEnv(k) {
+			fail("env: %q is set by luxmux", k)
+		}
+	}
+	for name, v := range map[string]string{"on_start": p.OnStart, "on_resume": p.OnResume} {
+		if strings.ContainsRune(v, 0) {
+			fail("%s: a command cannot contain a NUL byte", name)
 		}
 	}
 	for k, v := range p.Labels {
@@ -390,6 +401,8 @@ func (p Profile) Validate() error {
 	for _, s := range named {
 		if s != "" && !envNameRe.MatchString(s) {
 			fail("secrets: invalid name %q", s)
+		} else if reservedEnv(s) {
+			fail("secrets: %q is set by luxmux", s)
 		}
 	}
 	return errors.Join(errs...)

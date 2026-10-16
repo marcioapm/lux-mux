@@ -292,9 +292,12 @@ func TestRunSpec(t *testing.T) {
 		Name:   "luxmux-work",
 		Labels: map[string]string{"app": "luxmux", "luxmux-session": "work", "luxmux-profile": "app", "team": "x", "luxmux-resources": "size=m-2-arm64"},
 		Image:  api.Image{Ref: "ghcr.io/example/dev:1"},
-		Workload: api.Workload{Adapter: "generic", TTY: true, Command: DefaultShell,
+		Workload: api.Workload{Adapter: "generic", TTY: true, Command: WindowCommand(Profile{}),
 			Workdir: "/workspace/repos/my-app"},
-		Env:     map[string]string{"A": "1"},
+		Env: map[string]string{"A": "1", "LUXMUX_SESSION": "work", "LUXMUX_PROFILE": "app", "LUXMUX_IMAGE": "ghcr.io/example/dev:1",
+			"LUXMUX_POOL": "m", "LUXMUX_SIZE": "m-2-arm64", "LUXMUX_REPOSITORY": "git@github.com:example/My.App.git", "LUXMUX_BRANCH": "dev",
+			"LUXMUX_REPO_NAME": "my-app", "LUXMUX_REPO_DIR": "/workspace/repos/my-app", "LUXMUX_WORKDIR": "/workspace/repos/my-app",
+			"LUXMUX_REPOSITORIES": "my-app\tgit@github.com:example/My.App.git\tdev\t/workspace/repos/my-app"},
 		Secrets: []api.Secret{{Name: "NPM_TOKEN", Value: "n", As: "env"}, {Name: "GH_TOKEN", Value: "g"}},
 		Git: &api.Git{Repositories: []api.Repository{{Name: "my-app", URL: "git@github.com:example/My.App.git",
 			Ref: "dev", Credential: "GH_TOKEN"}}},
@@ -317,7 +320,7 @@ func TestRunSpec(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sp.Resources.CPUs != 1 || sp.Resources.Memory != 2<<30 || sp.Workload.Workdir != "/workspace" ||
-		!reflect.DeepEqual(sp.Workload.Command, []string{"zsh"}) || sp.Labels[LabelSpare] != "true" || sp.Git != nil {
+		!reflect.DeepEqual(sp.Workload.Command, WindowCommand(Profile{Shell: []string{"zsh"}})) || sp.Labels[LabelSpare] != "true" || sp.Git != nil {
 		t.Fatalf("%+v", sp)
 	}
 }

@@ -224,8 +224,9 @@ func TestDialogValuesProfile(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 	sp, err := config.RunSpec(p, config.Target{Session: "s", Profile: "dev"}, nil)
+	shell, _, _, ok := config.ParseWindowCommand(sp.Workload.Command)
 	if err != nil || sp.Resources.CPUs != 4 || sp.Resources.Memory != 8<<30 || sp.Git.Repositories[0].URL != "https://e.com/b.git" ||
-		sp.Git.Repositories[0].Credential != "" || len(sp.Workload.Command) != 1 {
+		sp.Git.Repositories[0].Credential != "" || !ok || !reflect.DeepEqual(shell, []string{"zsh"}) {
 		t.Fatalf("spec %+v %v", sp, err)
 	}
 	v.CPUs = "lots"

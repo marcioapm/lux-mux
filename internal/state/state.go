@@ -490,7 +490,10 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 	sp := r.Spec
 	p := base
 	p.Image, p.Pool, p.Workdir = sp.Image.Ref, sp.Placement.Pool, sp.Workload.Workdir
-	p.Shell, p.Env, p.UnrestrictedNetwork = sp.Workload.Command, sp.Env, sp.Network.Unrestricted
+	p.Shell, p.Env, p.UnrestrictedNetwork = sp.Workload.Command, config.UserEnv(sp.Env), sp.Network.Unrestricted
+	if shell, onStart, onResume, ok := config.ParseWindowCommand(sp.Workload.Command); ok {
+		p.Shell, p.OnStart, p.OnResume = shell, onStart, onResume
+	}
 	// luxd stores resources filled in: its defaults for what the submit
 	// left unset, or the resolved size on a shaped pool; spec.resources is
 	// never read. What the window asked is sizing.requested (shaped pools
