@@ -440,8 +440,8 @@ func list(env Env) error {
 			unreachable := map[string]bool{}
 			for _, w := range s.Windows {
 				ep := w.EndpointOr(eps.Default())
-				if _, down := failedOn[ep]; down {
-					unreachable["endpoint unreachable: "+ep.Label()] = true
+				if err, down := failedOn[ep]; down {
+					unreachable[failedWord(err)+": "+ep.Label()] = true
 				}
 			}
 			for _, l := range slices.Sorted(maps.Keys(unreachable)) {

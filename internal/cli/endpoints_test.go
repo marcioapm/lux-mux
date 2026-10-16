@@ -195,6 +195,36 @@ func TestKillSessionNoFileOneDown(t *testing.T) {
 	}
 }
 
+// TestWrongKeyRefused: a lux that refuses the profile's key is reported
+// as refusing it, not as unreachable, by new-window and ls; nothing is
+// submitted there and the key is shown nowhere.
+func TestWrongKeyRefused(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	env.Lookup = func(k string) (string, bool) { return cliKeyA, k == cliKeyEnv }
+	submitTo(t, a, "work", "a")
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote"}); code == 0 ||
+		!strings.Contains(errb.String(), "refused the key") || strings.Contains(errb.String(), "unreachable") ||
+		!strings.Contains(errb.String(), "invalid API key") || !strings.Contains(errb.String(), "$"+cliKeyEnv) {
+		t.Fatalf("new-window: %d %q", code, errb.String())
+	}
+	if len(b.Submits()) != 0 || b.Refused() == 0 {
+		t.Fatalf("b: %d submits, %d refused", len(b.Submits()), b.Refused())
+	}
+	ep := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	if err := state.Save(env.StateDir, &state.Session{Name: "there", Windows: []state.Window{{RunID: "run_b0001", Endpoint: &ep}}}); err != nil {
+		t.Fatal(err)
+	}
+	stderr1 := errb.String()
+	errb.Reset()
+	if code := Main(env, []string{"ls"}); code != 0 || !strings.Contains(errb.String(), "refused the key") || strings.Contains(errb.String(), "unreachable") {
+		t.Fatalf("ls: %d %q", code, errb.String())
+	}
+	if l := lineOf(out.String(), "there"); !strings.Contains(l, "refused the key") {
+		t.Fatalf("ls:\n%s", out.String())
+	}
+	noKeysIn(t, env.StateDir, out.String(), stderr1, errb.String())
+}
+
 // lineOf is the line of out that starts with prefix.
 func lineOf(out, prefix string) string {
 	for _, l := range strings.Split(out, "\n") {

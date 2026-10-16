@@ -126,6 +126,15 @@ func liveRuns(ls []state.Listing, keep func(*api.Run) bool) []target {
 	return out
 }
 
+// failedWord is how a failed listing is named: a lux that refused the key
+// is not unreachable.
+func failedWord(err error) string {
+	if luxapi.Refused(err) {
+		return "endpoint refused the key"
+	}
+	return "endpoint unreachable"
+}
+
 // reportFailed says on w which endpoints could not be listed while others
 // could. When every one failed it says nothing and returns their errors,
 // each naming its endpoint (one endpoint: its error as it is).
@@ -133,7 +142,7 @@ func reportFailed(w io.Writer, ls []state.Listing) error {
 	var errs []error
 	for _, l := range ls {
 		if l.Err != nil {
-			errs = append(errs, fmt.Errorf("endpoint unreachable: %s: %w", l.Endpoint, l.Err))
+			errs = append(errs, fmt.Errorf("%s: %s: %w", failedWord(l.Err), l.Endpoint, l.Err))
 		}
 	}
 	switch {
