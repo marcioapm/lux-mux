@@ -2,12 +2,17 @@ package mux
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/marcioapm/lux/api"
+
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 const hooksConfig = `default_profile = "app"
@@ -107,6 +112,15 @@ func TestHooksStartMoveReattach(t *testing.T) {
 	h.waitFor("rename in the env file", func() bool {
 		return strings.Contains(envFile(t, dir, id), `export LUXMUX_WINDOW='renamed it'\''s'`)
 	})
+	// Sourced back exactly: $, a backtick and spaces stay literal; a
+	// control character becomes a space, so the value is one line.
+	h.m.Rename(0, "a $HOME `id`  b\nc\x1b")
+	const want = "a $HOME `id`  b c "
+	h.waitFor("odd name sourced back", func() bool {
+		cmd := exec.Command("sh", "-c", `. "$1" && printf %s "$LUXMUX_WINDOW"`, "t", filepath.Join(fakelux.WorkspaceDir(dir, id), ".luxmux", "env"))
+		b, err := cmd.Output()
+		return err == nil && string(b) == want
+	})
 	if leaks := fakelux.KeyLeaks([]string{exampleSecret}, filepath.Join(fakelux.WorkspaceDir(dir, id), ".luxmux")); len(leaks) > 0 {
 		t.Fatalf("secret in %v", leaks)
 	}
@@ -143,6 +157,77 @@ func TestHooksWarmSpare(t *testing.T) {
 	h.waitScreen("claimed shell", h.contains("CLAIMED"))
 	if got := hookRuns(dir, spare); got != "START-HOOK start feature-x \n" {
 		t.Fatalf("the claimed spare's hook runs: %q", got)
+	}
+	h.detach()
+}
+
+// rebuildFromLux detaches h and starts it again on its session rebuilt
+// from lux (the session file lost), over the configured profiles.
+func rebuildFromLux(h *harness) {
+	h.t.Helper()
+	h.detach()
+	var runs []*api.Run
+	for _, id := range h.lux.RunIDs() {
+		r := h.lux.Run(id)
+		runs = append(runs, &r)
+	}
+	def := config.DefaultEndpoint(h.lux.Config())
+	h.start(state.RebuildFrom("s", []state.Listing{{Endpoint: def, Runs: runs}}, def, h.cfg.Profiles))
+}
+
+// TestHooksRebuiltSessionClaimsSpare: in a session rebuilt from lux, a
+// window's spec keeps its Run's hooks, so its SpecKey is its profile's:
+// r on its ended Run takes the waiting spare, whose on_start already ran
+// and does not run again.
+func TestHooksRebuiltSessionClaimsSpare(t *testing.T) {
+	h, dir := shellHarness(t, strings.Replace(hooksConfig, "shell = [\"sh\"]", "shell = [\"sh\"]\nwarm_spare = true", 1))
+	first := h.live(0)
+	key := config.SpecKey(h.cfg.Profiles["app"])
+	var spare string
+	h.waitFor("spare", func() bool { spare = h.spares()[key]; return spare != "" })
+	h.waitFor("spare's on_start", func() bool { return hookRuns(dir, spare) != "" })
+	rebuildFromLux(h)
+	if got := h.spares()[key]; got != spare {
+		t.Fatalf("rebuilt spares %v, want %s in %s", h.spares(), spare, key)
+	}
+	h.live(0)
+	h.lux.End(first, "failed", "timeout")
+	h.waitFor("dead", func() bool { return h.phase(0) == phaseDead })
+	h.type_("r")
+	h.waitFor("relaunched", func() bool { return h.window(0) != first && h.window(0) != "" })
+	if got := h.window(0); got != spare {
+		t.Fatalf("relaunched on %s, want the waiting spare %s", got, spare)
+	}
+	h.live(0)
+	h.waitScreen("the spare's on_start output", h.contains("START-HOOK start feature-x"))
+	h.type_("echo CLAIMED\r")
+	h.waitScreen("claimed shell", h.contains("CLAIMED"))
+	if got := hookRuns(dir, spare); got != "START-HOOK start feature-x \n" {
+		t.Fatalf("the claimed spare's hook runs: %q", got)
+	}
+	h.detach()
+}
+
+// TestHooksRebuiltSessionRelaunch: r on an ended window of a session
+// rebuilt from lux starts a Run with the same hooks: its on_start runs
+// before the prompt.
+func TestHooksRebuiltSessionRelaunch(t *testing.T) {
+	h, dir := shellHarness(t, hooksConfig)
+	first := h.live(0)
+	h.waitScreen("first on_start", h.contains("START-HOOK start feature-x"))
+	rebuildFromLux(h)
+	h.live(0)
+	h.lux.End(first, "failed", "timeout")
+	h.waitFor("dead", func() bool { return h.phase(0) == phaseDead })
+	h.type_("r")
+	var id string
+	h.waitFor("relaunched", func() bool { id = h.window(0); return id != first && id != "" })
+	h.live(0)
+	h.waitFor("the relaunched Run's on_start", func() bool { return hookRuns(dir, id) == "START-HOOK start feature-x \n" })
+	h.type_("echo RELAUNCHED-$LUXMUX_START\r")
+	h.waitScreen("relaunched shell", h.contains("RELAUNCHED-start"))
+	if got, want := h.lux.Run(id).Spec.Workload.Command, h.lux.Run(first).Spec.Workload.Command; !slices.Equal(got, want) {
+		t.Fatalf("relaunched command %q, want %q", got, want)
 	}
 	h.detach()
 }

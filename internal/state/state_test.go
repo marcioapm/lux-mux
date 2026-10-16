@@ -128,6 +128,53 @@ func TestRebuildSpecFromRun(t *testing.T) {
 	}
 }
 
+// TestRebuildHooksFromRun: a rebuilt window's on_start, on_resume and
+// shell are its Run's, read back from the start wrapper's argv, over
+// whatever the configured profile now says (none, or other commands), so
+// its SpecKey is that of the spec it was made with.
+func TestRebuildHooksFromRun(t *testing.T) {
+	made := config.Profile{Image: "alpine", OnStart: `printf 'it'\''s "$X"'; make deps`, OnResume: "make warm", Shell: []string{"zsh", "-l"}}
+	sp, err := config.RunSpec(made, config.Target{Session: "work", Profile: "dev"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		base config.Profile
+	}{
+		{"profile without hooks", config.Profile{Image: "alpine"}},
+		{"profile with other hooks", config.Profile{Image: "alpine", OnStart: "other", OnResume: "other", Shell: []string{"bash"}}},
+		{"same profile", made},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := run("run_1", "work", "dev", "running", 1, false)
+			r.Spec = sp
+			s := rebuildOne("work", []*api.Run{r}, map[string]config.Profile{"dev": tc.base})
+			if len(s.Windows) != 1 || s.Windows[0].Spec == nil {
+				t.Fatalf("%+v", s.Windows)
+			}
+			got := *s.Windows[0].Spec
+			if got.OnStart != made.OnStart || got.OnResume != made.OnResume || !reflect.DeepEqual(got.Shell, made.Shell) {
+				t.Fatalf("on_start %q on_resume %q shell %q, want %q %q %q", got.OnStart, got.OnResume, got.Shell, made.OnStart, made.OnResume, made.Shell)
+			}
+			if config.SpecKey(got) != config.SpecKey(made) {
+				t.Fatalf("SpecKey of %+v differs from the spec it was made with", got)
+			}
+			again, err := config.RunSpec(got, config.Target{Session: "work", Profile: "dev"}, nil)
+			if err != nil || !reflect.DeepEqual(again.Workload.Command, sp.Workload.Command) {
+				t.Fatalf("relaunch command %q, want %q (%v)", again.Workload.Command, sp.Workload.Command, err)
+			}
+		})
+	}
+	// A command that is not the wrapper is the window's shell as it is.
+	foreign := run("run_2", "work", "dev", "running", 2, false)
+	foreign.Spec = sp
+	foreign.Spec.Workload.Command = []string{"bash", "-l"}
+	if got := WindowFromRun(foreign, config.Profile{Image: "alpine"}).Spec; !reflect.DeepEqual(got.Shell, []string{"bash", "-l"}) || got.OnStart != "" || got.OnResume != "" {
+		t.Fatalf("foreign command: %+v", got)
+	}
+}
+
 // TestRebuildSizedRun: a Run of a sized profile comes back from luxd with
 // the size resolved into cpus, memory and disk and no size in its spec;
 // what was asked is in sizing.requested. The window's spec is the

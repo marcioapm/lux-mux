@@ -3,7 +3,9 @@ package mux
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/marcioapm/lux-mux/internal/config"
 )
@@ -44,11 +46,23 @@ func (m *Mux) execName(ep config.Endpoint, id, name string) error {
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
 	defer cancel()
-	code, err := lux.Exec(ctx, id, config.WindowNameCommand(name))
+	code, err := lux.Exec(ctx, id, config.WindowNameCommand(envName(name)))
 	if err == nil && code != 0 {
 		return errExecFailed
 	}
 	return err
+}
+
+// envName is name as LUXMUX_WINDOW carries it: each control character
+// (a newline, ESC, DEL) replaced by a space, so the value is one printable
+// line whoever sources or prints it.
+func envName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, name)
 }
 
 var errExecFailed = errors.New("writing the window name failed")
