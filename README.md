@@ -152,8 +152,12 @@ around, and skip those attached elsewhere, with a notice that says so.
 event feed are closed, its Runs keep running, its file is saved and its
 lock released. Then the other session's lock is taken and it is attached
 as `luxmux attach -t` attaches it, its shown window's screen restored
-from lux. If another process took that session in between, luxmux
-reattaches the one you were on and says why.
+from lux. If that session cannot be opened (another process took it in
+between, it is gone, or lux does not answer within 10 s), luxmux
+reattaches the one you were on from the state it just saved, without
+waiting for lux, and says why. A warm-spare submit still in flight is
+not waited for: the spare lux makes anyway is recorded the next time
+that session is attached.
 
 **Renaming** (`$` for this session, `,` in the chooser) renames the
 session's file. lux cannot change the labels of a Run, so the session's
@@ -163,8 +167,9 @@ maps the new name to it. `ls`, `attach`, `new-window` and `kill-session`
 follow the map, and a session rebuilt from lux after its file is gone
 gets its new name, as long as that map is there. The old name stays taken
 while those Runs live: `attach -t` with it says what it was renamed to,
-and `new -s` refuses it. On another machine (an empty state directory)
-the session is found under its old name.
+and `new -s` refuses it. Once none of them is live (and no luxmux has the
+session), both names are free again. On another machine (an empty state
+directory) the session is found under its old name.
 
 **Direct bindings** work without the prefix, and are off unless configured:
 
