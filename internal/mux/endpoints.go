@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/marcioapm/lux/api"
@@ -20,9 +21,35 @@ func (m *Mux) followEndpointLocked(ep config.Endpoint) {
 		return
 	}
 	m.feeds[ep] = true
+	m.listedLocked(ep)
 	m.wg.Add(2)
 	m.goSafe(func() { m.followEvents(ep) })
 	m.goSafe(func() { m.discoverWindows(ep) })
+}
+
+// listedLocked is the channel closed once ep's first listing was tried.
+func (m *Mux) listedLocked(ep config.Endpoint) chan struct{} {
+	c := m.listed[ep]
+	if c == nil {
+		c = make(chan struct{})
+		m.listed[ep] = c
+	}
+	return c
+}
+
+// waitListed waits for ep's first listing (ensuring it is followed),
+// false if the session ended first.
+func (m *Mux) waitListed(ep config.Endpoint) bool {
+	m.mu.Lock()
+	m.followEndpointLocked(ep)
+	c := m.listedLocked(ep)
+	m.mu.Unlock()
+	select {
+	case <-c:
+		return true
+	case <-m.ctx.Done():
+		return false
+	}
 }
 
 // followEvents follows ep's tenant's event feed and routes each event of
@@ -75,6 +102,7 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 	// An endpoint the rebuild could not list is retried with the backoff,
 	// not every discoverEvery: its windows are missing until it answers.
 	bo := m.opt.Backoff
+	first, adopted := true, false
 	for {
 		var runs []*api.Run
 		lux, err := m.clientOf(ep)
@@ -85,12 +113,22 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 		}
 		if err == nil {
 			m.addUnlisted(ep, runs)
+			if !adopted {
+				adopted = true
+				m.adoptSpares(ep, runs)
+			}
 			m.pruneConsidered(ep, runs)
 			for _, r := range runs {
 				if state.Adoptable(r, m.opt.Session) && m.markConsidered(ep, r.ID) {
 					m.adoptRun(ep, r)
 				}
 			}
+		}
+		if first {
+			first = false
+			m.mu.Lock()
+			close(m.listedLocked(ep))
+			m.mu.Unlock()
 		}
 		wait := m.opt.discoverEvery
 		m.mu.Lock()
@@ -148,6 +186,63 @@ func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 	}
 	m.saveLocked()
 	m.setNoticeLocked(fmt.Sprintf("lux %s answered: %d window(s) added", ep.Label(), added))
+}
+
+// adoptSpares records the waiting spares of this session ep's first
+// successful listing has that the session does not: one whose submit an
+// earlier detach stopped waiting for, made by lux anyway. Each takes its
+// slot if that is free; any other is terminated, so none runs unrecorded.
+// A spare is submitted on ep only after the first listing was tried
+// (waitListed), so this normally runs first.
+func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
+	m.mu.Lock()
+	if m.ending || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return
+	}
+	known := map[string]bool{}
+	for _, id := range m.sess.Spares {
+		known[id] = true
+	}
+	for _, id := range m.sess.Claimed {
+		known[id] = true
+	}
+	var found []*api.Run
+	for _, r := range runs {
+		if r.Labels[config.LabelSession] == m.opt.Session && r.Labels[config.LabelSpare] == "true" &&
+			state.Live(r.State) && !state.Terminating(r) && !known[r.ID] && m.byRun[r.ID] == nil && !m.considered[r.ID] {
+			found = append(found, r)
+		}
+	}
+	// The newest is the one a slot keeps.
+	slices.SortStableFunc(found, func(a, b *api.Run) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	var extra []string
+	for _, r := range found {
+		key := r.Labels[config.LabelSpec]
+		if key == "" {
+			key = r.Labels[config.LabelProfile]
+		}
+		slot := config.SpareSlot(key, ep, m.eps.Default())
+		if _, taken := m.sess.Spares[slot]; taken {
+			extra = append(extra, r.ID)
+			m.considerLocked(ep, r.ID)
+			continue
+		}
+		m.sess.SetSpare(slot, r.ID, ep)
+	}
+	if len(found) > len(extra) {
+		m.saveLocked()
+	}
+	m.mu.Unlock()
+	for _, id := range extra {
+		m.wg.Add(1)
+		m.goSafe(func() {
+			defer m.wg.Done()
+			if err := m.terminate(ep, id); err != nil {
+				m.Notice(cannotTerminate(ep, err))
+			}
+		})
+	}
 }
 
 func (m *Mux) unlistedLocked(ep config.Endpoint) bool {

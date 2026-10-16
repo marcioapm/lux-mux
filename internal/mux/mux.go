@@ -97,6 +97,9 @@ type Options struct {
 	// afterSwitchUnlock, when set, runs once a switch released this
 	// session's lock and before it takes the target's. Only tests set it.
 	afterSwitchUnlock func()
+	// spareDetachWait: how long a detach waits for spare submits in
+	// flight (default spareDetachWait). Unexported: only tests change it.
+	spareDetachWait time.Duration
 	// writeKeys writes one message of keystrokes to a stream (default
 	// wsjson.Write). Unexported: only tests change it.
 	writeKeys func(ctx context.Context, c *websocket.Conn, d api.StreamData) error
@@ -120,7 +123,8 @@ type Mux struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	// spareCtx bounds spare submits: a detach does not cancel them (lux
-	// may make the Run, and its id must be recorded); a switch does.
+	// may make the Run, and its id must be recorded) until it has waited
+	// spareDetachWait for them; a switch cancels them at once.
 	spareCtx   context.Context
 	stopSpares context.CancelFunc
 	// inputDone closes when the input loop returned: the next session's
@@ -156,6 +160,10 @@ type Mux struct {
 	byRun        map[string]*Window
 	// feeds are the endpoints whose event stream is followed: one each.
 	feeds map[config.Endpoint]bool
+	// listed is closed for an endpoint once its first listing of the
+	// session was tried; a spare is submitted there only after it, so a
+	// spare an earlier attach left unrecorded is found first.
+	listed map[config.Endpoint]chan struct{}
 	// promptState is the open prompt.
 	promptState *prompt
 	// shown is the window whose screen the terminal shows, painted and
@@ -210,6 +218,9 @@ func (o *Options) defaults() {
 	if o.switchOpenWait == 0 {
 		o.switchOpenWait = switchOpenWait
 	}
+	if o.spareDetachWait == 0 {
+		o.spareDetachWait = spareDetachWait
+	}
 	if o.writeKeys == nil {
 		o.writeKeys = func(ctx context.Context, c *websocket.Conn, d api.StreamData) error {
 			return wsjson.Write(ctx, c, d)
@@ -247,7 +258,7 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	m := &Mux{opt: opt, eps: eps, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
-		feeds: map[config.Endpoint]bool{}, done: make(chan string, 1)}
+		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1)}
 	if m.lux == nil {
 		m.lux, _ = eps.Client(eps.Default())
 	}
@@ -255,6 +266,15 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
 	def := eps.Default()
+	// A slot reserved with no id is a submit a detach stopped waiting for:
+	// it is free, and the Run lux may have made is found by its labels
+	// (adoptSpares).
+	for slot, id := range sess.Spares {
+		if id == "" {
+			delete(sess.Spares, slot)
+			delete(sess.SpareEndpoints, slot)
+		}
+	}
 	for _, sw := range sess.Windows {
 		spec := opt.Config.Profiles[sw.Profile]
 		if sw.Spec != nil {
@@ -422,12 +442,17 @@ func (m *Mux) finish(reason string) {
 	m.cancel()
 }
 
-// shutdown closes every stream, the event feed and the session preview,
+// spareDetachWait is how long a detach waits for spare submits in
+// flight; a lux that does not answer would otherwise hold it for the
+// submit's 30 s.
+const spareDetachWait = 5 * time.Second
+
+// shutdown closes every stream, the event feeds and the session preview,
 // and waits for the session's goroutines, the input loop's included; the
-// Runs keep running and the state is saved. For a switch, spare submits
-// in flight are cancelled rather than waited for. A Console the session
-// made is closed; a shared one is left to the next session, its terminal
-// reset.
+// Runs keep running and the state is saved. Spare submits in flight are
+// waited for up to spareDetachWait; for a switch they are cancelled
+// rather than waited for. A Console the session made is closed; a shared
+// one is left to the next session, its terminal reset.
 func (m *Mux) shutdown(switching bool) {
 	m.mu.Lock()
 	ws := append([]*Window{}, m.windows...)
@@ -447,7 +472,9 @@ func (m *Mux) shutdown(switching bool) {
 	// preview until it returns.
 	<-m.inputDone
 	m.stopSessionPreview()
+	capWait := time.AfterFunc(m.opt.spareDetachWait, m.stopSpares)
 	m.wg.Wait()
+	capWait.Stop()
 	m.stopSpares()
 	m.mu.Lock()
 	for _, w := range ws {

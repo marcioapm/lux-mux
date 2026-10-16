@@ -278,27 +278,38 @@ func (m *Mux) dropClaimedLocked(id string) {
 }
 
 // keepSpares keeps one waiting spare of every configured profile with
-// warm_spare on, on the profile's endpoint.
+// warm_spare on, on the profile's endpoint: one goroutine each, so a lux
+// that does not answer holds up only its own.
 func (m *Mux) keepSpares() {
 	defer m.wg.Done()
 	cfg := m.config()
 	for _, n := range cfg.ProfileNames() {
 		if p := cfg.Profiles[n]; p.WarmSpare {
-			m.ensureSpare(n, p)
+			m.wg.Add(1)
+			m.goSafe(func() {
+				defer m.wg.Done()
+				m.ensureSpare(n, p)
+			})
 		}
 	}
 }
 
 // ensureSpare submits a spare of profile name on its endpoint, in the
-// slot of its spec there, unless there is one. A submit in flight when
-// the session detaches is waited for (shutdown waits on m.wg) and its Run
-// recorded; one in flight when the session ends is terminated.
+// slot of its spec there, unless there is one. It waits for the
+// endpoint's first listing, which records a spare an earlier detach left
+// unrecorded. A submit in flight when the session detaches is waited for
+// up to spareDetachWait and its Run recorded; one cut off then leaves its
+// slot free, and the next attach's listing finds the Run by its labels.
+// One in flight when the session ends is terminated.
 func (m *Mux) ensureSpare(name string, p config.Profile) {
 	slot := m.spareSlotOf(p)
 	if slot == "" {
 		return
 	}
 	ep := m.eps.Of(p)
+	if !m.waitListed(ep) {
+		return
+	}
 	m.mu.Lock()
 	if m.ending || m.ctx.Err() != nil {
 		m.mu.Unlock()
@@ -321,10 +332,10 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 			var sp api.RunSpec
 			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
 			if err == nil {
-				// Not cancelled by a detach: lux may make the Run anyway,
+				// Not cancelled by a detach at once: lux may make the Run,
 				// and luxmux must learn its id to record it. A switch does
 				// cancel it (stopSpares): the next attach's listing records
-				// the Run lux made (sessions.Open).
+				// the Run lux made.
 				ctx, cancel := context.WithTimeout(m.spareCtx, 30*time.Second)
 				run, err = lux.Submit(ctx, sp)
 				cancel()

@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/marcioapm/lux/api"
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
@@ -353,6 +356,101 @@ func TestKeyUnsetThenKill(t *testing.T) {
 	x.m.Kill(1)
 	x.waitFor("terminated on b", func() bool { return slices.Contains(x.b.Terminated(), b1) })
 	x.detach()
+}
+
+// gate holds what passes it while closed.
+type gate struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func newGate() *gate { return &gate{ch: make(chan struct{})} }
+
+func (g *gate) wait() {
+	g.mu.Lock()
+	ch := g.ch
+	g.mu.Unlock()
+	<-ch
+}
+
+func (g *gate) open() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	select {
+	case <-g.ch:
+	default:
+		close(g.ch)
+	}
+}
+
+// TestDetachWithHungSpareLux: a warm-spare profile on a lux that takes
+// the spare's submit and does not answer holds a detach up only for
+// spareDetachWait. The Run that lux makes after all is recorded as the
+// slot's spare by the next attach's listing, and no other is submitted;
+// another unrecorded spare of the session, its slot taken, is terminated.
+func TestDetachWithHungSpareLux(t *testing.T) {
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	g := newGate()
+	t.Cleanup(g.open)
+	b.SubmitHook = g.wait
+	t.Cleanup(b.Close)
+	h := &harness{t: t, lux: fakelux.NewWithKey(keyA), rows: 24, cols: 80, dir: t.TempDir(),
+		env: map[string]string{remoteEnv: keyB}, crashed: make(chan string, 1),
+		opts: func(o *Options) { o.spareDetachWait = 300 * time.Millisecond }}
+	t.Cleanup(h.lux.Close)
+	cfg, err := config.Parse([]byte(`
+default_profile = "here"
+[profiles.here]
+image = "alpine"
+[profiles.there]
+image = "alpine"
+warm_spare = true
+lux_url = "` + b.URL + `"
+api_key_env = "` + remoteEnv + `"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+	h.start(nil)
+	h.live(0)
+	h.waitFor("the spare's submit reached b", func() bool { return slices.Contains(b.Requests(), "POST /v1/runs") })
+	start := time.Now()
+	h.detach()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("detach took %v", d)
+	}
+	g.open()
+	h.waitFor("b made the spare", func() bool { return len(b.RunIDs()) == 1 })
+	late := b.RunIDs()[0]
+
+	// One more spare of the session's, recorded nowhere, for the same slot.
+	sp, err := config.RunSpec(cfg.Profiles["there"], config.Target{Session: "s", Profile: "there", Spare: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := luxapi.New(api.Config{URL: b.URL, APIKey: keyB})
+	stray, err := c.Submit(context.Background(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.start(nil)
+	h.live(0)
+	slot := config.SpareSlot(config.SpecKey(cfg.Profiles["there"]), cfg.Profiles["there"].Endpoint(h.lux.Config()), config.DefaultEndpoint(h.lux.Config()))
+	h.waitFor("the stray spare terminated", func() bool { return slices.Contains(b.Terminated(), stray.ID) || slices.Contains(b.Terminated(), late) })
+	// The newer (stray) one keeps the slot; the late one is terminated.
+	if got := h.spares()[slot]; got != stray.ID || !slices.Equal(b.Terminated(), []string{late}) {
+		t.Fatalf("slot %s = %s; b terminated %v (late %s, stray %s)", slot, got, b.Terminated(), late, stray.ID)
+	}
+	h.detach()
+	if n := len(b.RunIDs()); n != 2 {
+		t.Fatalf("b has %v", b.RunIDs())
+	}
+	if s, _, _ := state.Load(h.dir, "s"); s.Spares[slot] != stray.ID || s.SpareEndpoints[slot].URL != b.URL {
+		t.Fatalf("file spares %v endpoints %v", s.Spares, s.SpareEndpoints)
+	}
 }
 
 // TestSparesPerEndpoint: a warm-spare profile on each lux keeps its spare
