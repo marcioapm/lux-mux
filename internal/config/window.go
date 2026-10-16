@@ -52,6 +52,23 @@ func reservedEnv(name string) bool {
 		name == EnvTestWorkspace || name == EnvTestCgroup
 }
 
+// reservedSecretNamespace reports whether an env secret named name could
+// replace a variable lux sets. lux v0.1.30's shim overlays env secrets on
+// its own LUX_RUN_ID, LUX_EPOCH, LUX_INPUTS and LUX_SERVICE_* (LUX_RUN_ID is
+// copied into the world-readable env file), and lux reserves LUX_ for a
+// spec's env, so the whole prefix is refused. luxmux's own names are
+// reservedEnv's.
+func reservedSecretNamespace(name string) bool {
+	return strings.HasPrefix(name, "LUX_")
+}
+
+// MaxEnvString bounds one workload environment string, NAME=value and its
+// NUL. Linux refuses a string over MAX_ARG_STRLEN (32 pages, 128 KiB with
+// 4 KiB pages) with E2BIG; 8 KiB of headroom stays clear of that limit.
+const MaxEnvString = 120 << 10
+
+func envStringSize(name, value string) int { return len(name) + 1 + len(value) + 1 }
+
 // UserEnv is env without the variables luxmux sets (nil when none is left):
 // a Run's stored env read back as its profile's.
 func UserEnv(env map[string]string) map[string]string {
@@ -123,17 +140,70 @@ func WindowNameCommand(name string) []string {
 	return []string{"sh", "-c", WindowNameScript, "luxmux-window", name}
 }
 
+// The files under the state volume's .luxmux directory. FactsFile and
+// WindowFile are complete sh fragments (export lines, values single-quoted,
+// so a value may span lines); EnvFile is always regenerated whole as facts
+// followed by the window fragment, never edited line by line. LockFile is
+// never replaced or removed: both writers lock its inode with flock(1), and
+// the kernel drops a lock when its holder's descriptor closes, crash
+// included.
+const (
+	FactsFile  = "facts.sh"
+	WindowFile = "window.sh"
+	EnvFile    = "env"
+	LockFile   = "env.lock"
+)
+
+// lockSeconds bounds the wait for the lock. WindowNameScript runs within
+// the mux's 5 s exec deadline; the wrapper delays the prompt by at most this.
+const lockSeconds = "2"
+
+// probeSeconds bounds each external fact command (df, stat, git). A probe
+// that times out skips its fallback, so a placement waits at most twice
+// probeSeconds plus timeout(1)'s one-second kill grace for each.
+const probeSeconds = "1"
+
 // StartWrapper is the POSIX sh script every window's Run starts with. Its
 // text is the same for every profile: on_start ($1) and on_resume ($2)
 // are arguments, only ever run as sh -c "$cmd", never part of the text.
 // It computes the placement's facts (each empty when its source is
-// missing: no cgroup file, a read-only or absent /sys, no git), decides
-// start or resume by a marker on the state volume (written before
-// on_start runs, so a Run moved during it resumes), writes every
-// LUXMUX_* variable to the env file atomically, runs the command, then
-// execs the shell: "$@" when the profile has one, else bash -l or sh -l
-// as luxmux always has. Without commands it prints nothing.
+// missing, or when it cannot be read within probeSeconds), decides start or
+// resume by a marker on the state volume (written before on_start runs:
+// a failed or interrupted on_start is not retried, the next placement
+// runs on_resume), publishes the facts and env files under the lock, runs
+// the command, then execs the shell: "$@" when the profile has one, else
+// bash -l or sh -l as luxmux always has. Without commands it prints
+// nothing.
 var StartWrapper = buildWrapper()
+
+// WindowNameScript is what luxmux execs in a Run (lux's exec API) when a
+// window takes it or is renamed. Under the lock it publishes $1 as the
+// window fragment and, once a wrapper has published facts, regenerates the
+// env file from the current facts and that fragment. The name is never part
+// of the text. It exits non-zero when nothing could be published (no flock,
+// lock timeout, read-only volume), so luxmux retries at the next attach.
+var WindowNameScript = `_lm_ws=${` + EnvTestWorkspace + `:-/workspace}
+_lm_d=$_lm_ws/.luxmux
+mkdir -p "$_lm_d" 2>/dev/null
+` + quoteFunc + lockFunc + putFunc + `_lm_lock || exit 1
+_lm_rc=1 _lm_tw=$_lm_d/.lm-tmp.window.$$ _lm_te=$_lm_d/.lm-tmp.env.$$
+_lm_quote "$1"
+if printf 'export %s=%s\n' ` + EnvWindow + ` "$_lm_qv" 2>/dev/null >"$_lm_tw" && _lm_put "$_lm_tw" "$_lm_d/` + WindowFile + `"; then
+	_lm_rc=0
+	if [ -e "$_lm_d/` + FactsFile + `" ]; then
+		if cat "$_lm_d/` + FactsFile + `" "$_lm_d/` + WindowFile + `" 2>/dev/null >"$_lm_te"; then
+			_lm_put "$_lm_te" "$_lm_d/` + EnvFile + `" || _lm_rc=1
+		else
+			rm -f "$_lm_te" 2>/dev/null
+			_lm_rc=1
+		fi
+	fi
+else
+	rm -f "$_lm_tw" 2>/dev/null
+fi
+_lm_unlock
+exit "$_lm_rc"
+`
 
 // quoteFunc defines _lm_quote, which sets _lm_qv to $1 single-quoted for
 // sh.
@@ -149,22 +219,52 @@ const quoteFunc = `_lm_quote() {
 }
 `
 
-// WindowNameScript is what luxmux execs in a Run (lux's exec API) when a
-// window takes it or is renamed: $1, the window's name, goes to
-// .luxmux/window, and the env file's LUXMUX_WINDOW line is replaced, each
-// atomically. The name is never part of the text.
-var WindowNameScript = `_lm_ws=${` + EnvTestWorkspace + `:-/workspace}
-_lm_d=$_lm_ws/.luxmux
-mkdir -p "$_lm_d" || exit 1
-printf '%s\n' "$1" >"$_lm_d/.window.$$" && mv -f "$_lm_d/.window.$$" "$_lm_d/window" || exit 1
-[ -f "$_lm_d/env" ] || exit 0
-` + quoteFunc + `_lm_quote "$1"
-{
-	while IFS= read -r _lm_l || [ -n "$_lm_l" ]; do
-		case $_lm_l in export\ ` + EnvWindow + `=*) ;; *) printf '%s\n' "$_lm_l" ;; esac
-	done <"$_lm_d/env"
-	printf 'export %s=%s\n' ` + EnvWindow + ` "$_lm_qv"
-} >"$_lm_d/.env.$$" && chmod 644 "$_lm_d/.env.$$" && mv -f "$_lm_d/.env.$$" "$_lm_d/env"
+// lockFunc defines _lm_lock and _lm_unlock: an exclusive flock(1) on fd 9,
+// open on LockFile. util-linux flock waits with -w and reports a timeout as
+// -E's 75; any other failure (BusyBox flock has neither option) falls back
+// to bounded -n retries. Without flock, or when the file cannot be opened
+// (read-only volume), _lm_lock fails and the caller publishes nothing.
+// Temporary files are only made under the lock, so the holder removes any
+// left by a holder that died.
+const lockFunc = `_lm_lock() {
+	command -v flock >/dev/null 2>&1 || return 1
+	{ command exec 9>>"$_lm_d/` + LockFile + `"; } 2>/dev/null || return 1
+	flock -E 75 -w ` + lockSeconds + ` 9 >/dev/null 2>&1
+	case $? in
+	0) ;;
+	75) _lm_unlock; return 1 ;;
+	*)
+		_lm_li=0
+		until flock -n 9 >/dev/null 2>&1; do
+			_lm_li=$((_lm_li + 1))
+			[ "$_lm_li" -le $((` + lockSeconds + ` * 10)) ] || { _lm_unlock; return 1; }
+			sleep 0.1 2>/dev/null || { sleep 1 2>/dev/null; _lm_li=$((_lm_li + 9)); }
+		done
+		;;
+	esac
+	rm -f "$_lm_d"/.lm-tmp.* 2>/dev/null
+	return 0
+}
+_lm_unlock() { command exec 9>&-; }
+`
+
+// putFunc defines _lm_put TMP DEST: mode 0644, then rename over DEST, so a
+// reader holding DEST open keeps the complete old file. TMP is removed on
+// failure.
+const putFunc = `_lm_put() {
+	{ chmod 644 "$1" && mv -f "$1" "$2"; } 2>/dev/null || { rm -f "$1" 2>/dev/null; return 1; }
+}
+`
+
+// probeFunc defines _lm_probe NAME CMD...: CMD's stdout into $_lm_t/NAME,
+// under timeout(1) with a kill-after. Its status is CMD's, or 124, 137 or
+// 143 at the deadline (GNU and BusyBox differ); _lm_late tells those apart.
+const probeFunc = `_lm_probe() {
+	_lm_pf=$_lm_t/$1
+	shift
+	timeout -k 1 ` + probeSeconds + ` "$@" 2>/dev/null >"$_lm_pf" </dev/null
+}
+_lm_late() { case $1 in 124|137|143) return 0 ;; esac; return 1; }
 `
 
 func buildWrapper() string {
@@ -176,7 +276,7 @@ _lm_ws=${` + EnvTestWorkspace + `:-/workspace}
 _lm_cg=${` + EnvTestCgroup + `:-/sys/fs/cgroup}
 _lm_d=$_lm_ws/.luxmux
 _lm_num() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
-LUXMUX_CPU='' _lm_q='' _lm_p=''
+` + quoteFunc + lockFunc + putFunc + probeFunc + `LUXMUX_CPU='' _lm_q='' _lm_p=''
 { read -r _lm_q _lm_p <"$_lm_cg/cpu.max"; } 2>/dev/null
 if _lm_num "$_lm_q" && _lm_num "$_lm_p" && [ "$_lm_p" -gt 0 ]; then
 	_lm_m=$((_lm_q * 1000 / _lm_p))
@@ -191,20 +291,42 @@ fi
 LUXMUX_MEMORY='' _lm_v=''
 { read -r _lm_v <"$_lm_cg/memory.max"; } 2>/dev/null
 _lm_num "$_lm_v" && LUXMUX_MEMORY=$_lm_v
-LUXMUX_DISK=
-_lm_v=$(df -Pk "$_lm_ws" 2>/dev/null | { read -r _lm_x; read -r _lm_x _lm_b _lm_x; printf %s "$_lm_b"; })
-if _lm_num "$_lm_v"; then
-	LUXMUX_DISK=$((_lm_v * 1024))
-else
-	_lm_v=$(stat -f -c '%S %b' "$_lm_ws" 2>/dev/null)
-	_lm_b=${_lm_v% *} _lm_n=${_lm_v#* }
-	_lm_num "$_lm_b" && _lm_num "$_lm_n" && LUXMUX_DISK=$((_lm_b * _lm_n))
+# df, stat and git run only under a timeout(1) that accepts -k, writing to
+# a private directory rather than a pipe, so none can hold the prompt past
+# its deadline. Without such a timeout they are skipped. The check runs sh,
+# which is on PATH: the Run's command is sh.
+LUXMUX_DISK='' LUXMUX_BRANCH_CHECKED_OUT='' _lm_t=''
+if command -v timeout >/dev/null 2>&1 && timeout -k 1 ` + probeSeconds + ` sh -c : >/dev/null 2>&1; then
+	for _lm_t in "${TMPDIR:-/tmp}" "$_lm_d" ''; do
+		[ -n "$_lm_t" ] || break
+		_lm_t=$_lm_t/.luxmux-probe.$$
+		{ rm -rf "$_lm_t" && mkdir -m 700 "$_lm_t"; } 2>/dev/null && break
+	done
 fi
-LUXMUX_BRANCH_CHECKED_OUT=
-_lm_g=${LUXMUX_REPO_DIR-}
-if [ -n "$_lm_g" ] && [ -e "$_lm_g/.git" ] && command -v git >/dev/null 2>&1; then
-	LUXMUX_BRANCH_CHECKED_OUT=$(git -C "$_lm_g" symbolic-ref -q --short HEAD 2>/dev/null ||
-		git -C "$_lm_g" rev-parse --short -q --verify HEAD 2>/dev/null)
+if [ -n "$_lm_t" ]; then
+	_lm_b='' _lm_n=''
+	_lm_probe df df -Pk "$_lm_ws"
+	_lm_prc=$?
+	[ "$_lm_prc" -eq 0 ] && { read -r _lm_x; read -r _lm_x _lm_b _lm_x; } <"$_lm_t/df" 2>/dev/null
+	if _lm_num "$_lm_b"; then
+		LUXMUX_DISK=$((_lm_b * 1024))
+	elif ! _lm_late "$_lm_prc" && _lm_probe stat stat -f -c '%S %b' "$_lm_ws"; then
+		{ read -r _lm_b _lm_n; } <"$_lm_t/stat" 2>/dev/null
+		_lm_num "$_lm_b" && _lm_num "$_lm_n" && LUXMUX_DISK=$((_lm_b * _lm_n))
+	fi
+	_lm_g=${LUXMUX_REPO_DIR-}
+	if [ -n "$_lm_g" ] && [ -e "$_lm_g/.git" ] && command -v git >/dev/null 2>&1; then
+		_lm_v=''
+		_lm_probe git git -C "$_lm_g" symbolic-ref -q --short HEAD
+		_lm_prc=$?
+		if [ "$_lm_prc" -eq 0 ]; then
+			{ IFS= read -r _lm_v <"$_lm_t/git"; } 2>/dev/null
+		elif ! _lm_late "$_lm_prc" && _lm_probe git git -C "$_lm_g" rev-parse --short -q --verify HEAD; then
+			{ IFS= read -r _lm_v <"$_lm_t/git"; } 2>/dev/null
+		fi
+		LUXMUX_BRANCH_CHECKED_OUT=$_lm_v
+	fi
+	rm -rf "$_lm_t" 2>/dev/null
 fi
 mkdir -p "$_lm_d" 2>/dev/null
 if [ -e "$_lm_d/started" ]; then
@@ -213,35 +335,33 @@ else
 	LUXMUX_START=start
 	{ printf '' >"$_lm_d/started"; } 2>/dev/null
 fi
-LUXMUX_RUN_ID=${LUX_RUN_ID-}
+# Only a value shaped like lux's Run ids is copied: a secret that took
+# LUX_RUN_ID's place never reaches the world-readable env file.
+LUXMUX_RUN_ID=
+case ${LUX_RUN_ID-} in run_*[!a-z0-9]*) ;; run_?*) LUXMUX_RUN_ID=$LUX_RUN_ID ;; esac
 export LUXMUX_CPU LUXMUX_MEMORY LUXMUX_DISK LUXMUX_BRANCH_CHECKED_OUT LUXMUX_START LUXMUX_RUN_ID
+_lm_facts() {
+	for _lm_n in ` + names + `; do
+		eval "_lm_quote \"\${$_lm_n-}\""
+		printf 'export %s=%s\n' "$_lm_n" "$_lm_qv" || return 1
+	done
+}
 # The window name is only in the env file: renames change it there, never
-# in a running process's environment. A name written while the file is
-# made (luxmux writes .luxmux/window, then the file if it exists) is
-# picked up by the second pass.
-` + quoteFunc + `_lm_w='' _lm_pass=0
-while [ -d "$_lm_d" ] && [ "$_lm_pass" -lt 2 ]; do
-	_lm_pass=$((_lm_pass + 1)) _lm_o=$_lm_w _lm_w=
-	{ IFS= read -r _lm_w <"$_lm_d/window"; } 2>/dev/null
-	[ "$_lm_pass" -eq 2 ] && [ "$_lm_w" = "$_lm_o" ] && break
-	_lm_t=$_lm_d/.env.$$
-	if {
-		for _lm_n in ` + names + `; do
-			eval "_lm_quote \"\${$_lm_n-}\""
-			printf 'export %s=%s\n' "$_lm_n" "$_lm_qv"
-		done
-		if [ -n "$_lm_w" ]; then
-			_lm_quote "$_lm_w"
-			printf 'export %s=%s\n' ` + EnvWindow + ` "$_lm_qv"
+# in a running process's environment. Under the lock the window fragment
+# is the latest name WindowNameScript published.
+if _lm_lock; then
+	_lm_tf=$_lm_d/.lm-tmp.facts.$$ _lm_te=$_lm_d/.lm-tmp.env.$$
+	if _lm_facts 2>/dev/null >"$_lm_tf" && _lm_put "$_lm_tf" "$_lm_d/` + FactsFile + `"; then
+		if { _lm_facts && { [ ! -e "$_lm_d/` + WindowFile + `" ] || cat "$_lm_d/` + WindowFile + `"; }; } 2>/dev/null >"$_lm_te"; then
+			_lm_put "$_lm_te" "$_lm_d/` + EnvFile + `"
+		else
+			rm -f "$_lm_te" 2>/dev/null
 		fi
-	} 2>/dev/null >"$_lm_t"; then
-		chmod 644 "$_lm_t" 2>/dev/null
-		mv -f "$_lm_t" "$_lm_d/env" 2>/dev/null || rm -f "$_lm_t" 2>/dev/null
 	else
-		rm -f "$_lm_t" 2>/dev/null
-		break
+		rm -f "$_lm_tf" 2>/dev/null
 	fi
-done
+	_lm_unlock
+fi
 _lm_run() {
 	[ -n "$2" ] || return 0
 	trap : INT QUIT

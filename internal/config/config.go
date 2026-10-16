@@ -58,8 +58,9 @@ type Profile struct {
 	SecretsFrom   string            `toml:"secrets_from,omitempty" json:"secretsFrom,omitempty"`
 	Workdir       string            `toml:"workdir,omitempty" json:"workdir,omitempty"`
 	WarmSpare     bool              `toml:"warm_spare,omitempty" json:"warmSpare,omitempty"`
-	// OnStart runs in the window's shell process on the Run's first
-	// start, OnResume on each later placement (see StartWrapper).
+	// OnStart runs as a child sh -c of the window's start wrapper, before
+	// it execs the shell, on the Run's first start; OnResume on each later
+	// placement (see StartWrapper).
 	OnStart  string `toml:"on_start,omitempty" json:"onStart,omitempty"`
 	OnResume string `toml:"on_resume,omitempty" json:"onResume,omitempty"`
 	// lux denies egress by default: Egress lists the hosts (or CIDRs) the
@@ -396,11 +397,17 @@ func (p Profile) Validate() error {
 		named = append(named, r.GitCredential)
 	}
 	for _, s := range named {
-		if s != "" && !envNameRe.MatchString(s) {
+		switch {
+		case s != "" && !envNameRe.MatchString(s):
 			fail("secrets: invalid name %q", s)
-		} else if reservedEnv(s) {
+		case reservedEnv(s):
 			fail("secrets: %q is set by luxmux", s)
+		case reservedSecretNamespace(s):
+			fail("secrets: %q: the LUX_ prefix is lux's (it sets LUX_RUN_ID, LUX_EPOCH and others in every Run): a secret of that name would replace its value", s)
 		}
+	}
+	if n := envStringSize(EnvRepositories, windowEnv(p, Target{}, Workspace)[EnvRepositories]); n > MaxEnvString {
+		fail("repositories: %s would be %d bytes, over the %d a Run's environment variable may hold: use fewer repositories or shorter urls, branches and paths", EnvRepositories, n, MaxEnvString)
 	}
 	return errors.Join(errs...)
 }
