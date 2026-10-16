@@ -53,6 +53,9 @@ func TestConfigInit(t *testing.T) {
 	if err != nil || c.DefaultProfile != "default" {
 		t.Fatalf("written config: %v %+v", err, c)
 	}
+	if got := c.Profiles["default"].Image; got != config.DefaultImage {
+		t.Fatalf("config init wrote image %q, want DefaultImage %q", got, config.DefaultImage)
+	}
 	if code := Main(env, []string{"config", "init"}); code == 0 {
 		t.Fatal("overwrote without --force")
 	}

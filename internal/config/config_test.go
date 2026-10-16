@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -20,6 +21,45 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if len(c.Keys.Direct) != 0 {
 		t.Fatalf("direct bindings must be off by default: %v", c.Keys.Direct)
+	}
+}
+
+func TestImageForVersion(t *testing.T) {
+	for version, want := range map[string]string{
+		"v0.2.0":                         "ghcr.io/marcioapm/luxmux:0.2.0",
+		"v1.10.3":                        "ghcr.io/marcioapm/luxmux:1.10.3",
+		"(devel)":                        "ghcr.io/marcioapm/luxmux:latest",
+		"v0.2.0-0.20261015000000-abcdef": "ghcr.io/marcioapm/luxmux:latest",
+		"v0.1.1-0.20261015000000-abcdef": "ghcr.io/marcioapm/luxmux:latest",
+		"v0.2.0-rc.1":                    "ghcr.io/marcioapm/luxmux:latest",
+		"v2.0.0+incompatible":            "ghcr.io/marcioapm/luxmux:latest",
+		"foo-v0.2.0":                     "ghcr.io/marcioapm/luxmux:latest",
+		"":                               "ghcr.io/marcioapm/luxmux:latest",
+	} {
+		if got := imageForVersion(version); got != want {
+			t.Errorf("imageForVersion(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
+func TestImageFromBuildInfo(t *testing.T) {
+	read := func(version string, ok bool) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Main: debug.Module{Path: "github.com/marcioapm/lux-mux", Version: version}}, ok
+		}
+	}
+	for name, c := range map[string]struct {
+		read func() (*debug.BuildInfo, bool)
+		want string
+	}{
+		"release":       {read("v0.2.0", true), "ghcr.io/marcioapm/luxmux:0.2.0"},
+		"other release": {read("v3.4.5", true), "ghcr.io/marcioapm/luxmux:3.4.5"},
+		"devel":         {read("(devel)", true), "ghcr.io/marcioapm/luxmux:latest"},
+		"no build info": {read("v0.2.0", false), "ghcr.io/marcioapm/luxmux:latest"},
+	} {
+		if got := imageFromBuildInfo(c.read); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
 	}
 }
 
@@ -91,8 +131,11 @@ func TestExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prefix != "C-b" || c.DefaultProfile != "default" || c.Profiles["default"].Image == "" || c.Profiles["default"].WarmSpare {
+	if c.Prefix != "C-b" || c.DefaultProfile != "default" || c.Profiles["default"].WarmSpare {
 		t.Fatalf("example: %+v", c)
+	}
+	if got := c.Profiles["default"].Image; got != DefaultImage {
+		t.Fatalf("example image = %q, want DefaultImage %q", got, DefaultImage)
 	}
 	// Uncommenting every commented setting must still parse.
 	setting := regexp.MustCompile(`^# (\[|"?[a-z_0-9-]+"? = )`)
@@ -177,6 +220,49 @@ func TestRunSpec(t *testing.T) {
 	if sp.Resources.CPUs != 1 || sp.Resources.Memory != 2<<30 || sp.Workload.Workdir != "/workspace" ||
 		!reflect.DeepEqual(sp.Workload.Command, []string{"zsh"}) || sp.Labels[LabelSpare] != "true" || sp.Git != nil {
 		t.Fatalf("%+v", sp)
+	}
+}
+
+// TestHomeVolume: the default image's Runs, windows and spares alike, keep
+// /home/agent on a state volume; other images get it only with
+// persist_home = true, and persist_home = false turns it off.
+func TestHomeVolume(t *testing.T) {
+	home := api.Volume{Name: "home", Path: "/home/agent", Kind: "state"}
+	work := api.Volume{Name: "workspace", Path: "/workspace", Kind: "state"}
+	withHome := []api.Volume{work, home}
+	without := []api.Volume{work}
+	for name, c := range map[string]struct {
+		p    Profile
+		want []api.Volume
+	}{
+		"default image":             {Profile{Image: DefaultImage}, withHome},
+		"default image, version":    {Profile{Image: "ghcr.io/marcioapm/luxmux:0.2.0"}, withHome},
+		"default image, digest":     {Profile{Image: "ghcr.io/marcioapm/luxmux@sha256:abcd"}, withHome},
+		"default image, opted out":  {Profile{Image: DefaultImage, PersistHome: boolPtr(false)}, without},
+		"custom image":              {Profile{Image: "ubuntu:24.04"}, without},
+		"similar name":              {Profile{Image: "ghcr.io/marcioapm/luxmux-dev:1"}, without},
+		"other registry, same path": {Profile{Image: "example.com/marcioapm/luxmux:1"}, without},
+		"custom image, opted in":    {Profile{Image: "ubuntu:24.04", PersistHome: boolPtr(true)}, withHome},
+	} {
+		for _, spare := range []bool{false, true} {
+			sp, err := RunSpec(c.p, Target{Session: "s", Profile: "p", Spare: spare}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(sp.Volumes, c.want) {
+				t.Errorf("%s (spare %v): volumes %+v, want %+v", name, spare, sp.Volumes, c.want)
+			}
+		}
+	}
+}
+
+func TestPersistHomeParses(t *testing.T) {
+	c, err := Parse([]byte("[profiles.a]\nimage = \"ubuntu:24.04\"\npersist_home = true\n[profiles.b]\nimage = \"" + DefaultImage + "\"\npersist_home = false\n[profiles.c]\nimage = \"" + DefaultImage + "\""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Profiles["a"].HomeVolume() || c.Profiles["b"].HomeVolume() || !c.Profiles["c"].HomeVolume() {
+		t.Fatalf("persist_home: %+v", c.Profiles)
 	}
 }
 

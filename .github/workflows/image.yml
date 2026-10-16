@@ -1,0 +1,173 @@
+name: Default image
+
+on:
+  # Every push to main builds and smoke-tests both architectures, so an image
+  # that stopped building (a moved apt package, a rotated key) fails there,
+  # before a release tag names it.
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths: ['images/**', '.github/workflows/image.yml']
+  workflow_dispatch:
+    inputs:
+      latest:
+        description: On a release tag, also move :latest (only if it is the highest release tag)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+
+jobs:
+  # One job per architecture on its native runner (no QEMU). Every event
+  # builds and smoke-tests here, with read-only permissions.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_TYPE" == tag && "$REF_NAME" == v* ]]; then
+            echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=latest" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: images/default
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: luxmux-smoke:local
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max
+      # No --user: lux runs the image's USER, so the smoke test does too.
+      - name: Smoke test (image USER, empty home, no network or credentials)
+        run: |
+          docker run --rm --network none \
+            --tmpfs /home/agent:uid=1000,gid=1000,mode=0700 \
+            -v "$PWD/images/default/smoke.sh:/smoke.sh:ro" \
+            luxmux-smoke:local sh /smoke.sh
+
+  # On a v* tag, after both smoke tests pass: the only jobs that may write
+  # packages. Each arch is rebuilt from build's cache and pushed by digest;
+  # merge assembles the tagged multi-arch manifest.
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image version
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish architecture digest
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: images/default
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=ghcr.io/marcioapm/luxmux,push-by-digest=true,name-canonical=true,push=true
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  merge:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # All tags, to tell whether this one is the highest release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # :latest moves only to a release tag (vX.Y.Z, no pre-release suffix)
+      # that is the highest release tag, so it never lands on an rc or moves
+      # backwards; a workflow_dispatch moves it only with latest=true.
+      - name: Merge manifests
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          LATEST_INPUT: ${{ inputs.latest }}
+        run: |
+          release='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "publishing needs a vX.Y.Z or vX.Y.Z-pre tag, not $REF_NAME" >&2
+            exit 1
+          fi
+          tags=(-t "ghcr.io/marcioapm/luxmux:${REF_NAME#v}")
+          highest=$(git tag --list 'v*' --sort=-v:refname | grep -E "$release" | head -n 1 || true)
+          if [[ ! "$REF_NAME" =~ $release ]]; then
+            echo ":latest not moved: $REF_NAME is a pre-release"
+          elif [[ "$REF_NAME" != "$highest" ]]; then
+            echo ":latest not moved: $REF_NAME is not the highest release tag ($highest)"
+          elif [[ "$EVENT" == workflow_dispatch && "$LATEST_INPUT" != true ]]; then
+            echo ":latest not moved: workflow_dispatch without latest=true"
+          else
+            tags+=(-t ghcr.io/marcioapm/luxmux:latest)
+          fi
+          digests=()
+          for digest in digests/*; do
+            digests+=("ghcr.io/marcioapm/luxmux@sha256:${digest##*/}")
+          done
+          docker buildx imagetools create "${tags[@]}" "${digests[@]}"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -42,6 +43,29 @@ type Profile struct {
 	// shell may reach, UnrestrictedNetwork lifts the filter.
 	Egress              []string `toml:"egress,omitempty" json:"egress,omitempty"`
 	UnrestrictedNetwork bool     `toml:"unrestricted_network,omitempty" json:"unrestrictedNetwork,omitempty"`
+	// PersistHome puts /home/agent on a state volume. Unset means true
+	// for luxmux's default image and false for any other.
+	PersistHome *bool `toml:"persist_home,omitempty" json:"persistHome,omitempty"`
+}
+
+// HomeVolume reports whether the profile's Runs get the home volume.
+func (p Profile) HomeVolume() bool {
+	if p.PersistHome != nil {
+		return *p.PersistHome
+	}
+	return IsDefaultImage(p.Image)
+}
+
+// IsDefaultImage reports whether ref names luxmux's default image, at any
+// tag or digest.
+func IsDefaultImage(ref string) bool {
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		ref = ref[:i]
+	}
+	return ref == ImageRepository
 }
 
 // Keys holds the optional bindings that work without the prefix.
@@ -57,9 +81,35 @@ type Config struct {
 	Profiles       map[string]Profile `toml:"profiles,omitempty"`
 }
 
+// ImageRepository is where luxmux's default image is published.
+const ImageRepository = "ghcr.io/marcioapm/luxmux"
+
 // DefaultImage is the image of the built-in profile used when the
-// configuration defines none.
-const DefaultImage = "ubuntu:24.04"
+// configuration defines none, and the one `config init` writes: the
+// default image tagged with this binary's release version, :latest for
+// any other build.
+var DefaultImage = imageFromBuildInfo(debug.ReadBuildInfo)
+
+func imageFromBuildInfo(read func() (*debug.BuildInfo, bool)) string {
+	info, ok := read()
+	if !ok || info == nil {
+		return imageForVersion("")
+	}
+	return imageForVersion(info.Main.Version)
+}
+
+// imageForVersion maps a release version (v0.2.0) to its tag (0.2.0).
+// Everything else maps to latest: "(devel)" and pseudo-versions have no
+// image of their own, and pre-release binaries use latest even though the
+// image workflow publishes :X.Y.Z-rc.N for an rc tag.
+func imageForVersion(version string) string {
+	if releaseRe.MatchString(version) {
+		return ImageRepository + ":" + strings.TrimPrefix(version, "v")
+	}
+	return ImageRepository + ":latest"
+}
+
+var releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
 // DefaultShell starts bash as a login shell where the image has it, sh otherwise.
 var DefaultShell = []string{"sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"}

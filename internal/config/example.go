@@ -1,7 +1,7 @@
 package config
 
 // Example is what `luxmux config init` writes: every setting, commented.
-const Example = `# luxmux configuration.
+var Example = `# luxmux configuration.
 # luxmux signs in to lux as the lux CLI does: ~/.config/lux/config.toml,
 # or LUX_URL, LUX_API_KEY and LUX_TENANT.
 
@@ -21,7 +21,10 @@ default_profile = "default"
 # "alt-p" = "prev"
 
 [profiles.default]
-image = "ubuntu:24.04"
+image = "` + DefaultImage + `"
+# This luxmux's image; it stays at this tag when luxmux is upgraded. If the
+# tag cannot be pulled, use ghcr.io/marcioapm/luxmux:latest.
+# Light alternative (no preinstalled agents): ubuntu:24.04
 # pool = "default"          # omitted: your tenant's default pool
 # On a shaped pool, a size (lux pools sizes <pool>), e.g. size = "m-2-arm64";
 # on an unshaped pool, cpus, memory and disk instead:
@@ -30,6 +33,9 @@ image = "ubuntu:24.04"
 # disk = "20Gi"
 # workdir = "/workspace"
 # warm_spare = false        # keep one started Run ready: instant windows, billed while idle
+# Keep /home/agent (agent config and sessions) on a state volume that
+# survives moves. Default: true for luxmux's image, false for others.
+# persist_home = true
 # lux denies the Run's network egress by default: allow hosts or CIDRs,
 # or lift the filter.
 # egress = ["github.com", "*.ubuntu.com", "140.82.112.0/20"]

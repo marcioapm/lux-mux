@@ -31,6 +31,19 @@ luxmux                    # attach the session "main", creating it
 The first window starts at once and shows its Run's progress (queued,
 pulling image, cloning, running) until the shell is ready.
 
+The built-in profile, and the profile `luxmux config init` writes, use
+`ghcr.io/marcioapm/luxmux:<version>` for a release binary and `:latest` for
+development, pseudo-version or pre-release builds. It includes
+Claude Code, OpenCode, Codex and common development tools; see the
+[image guide](images/default/README.md) for pins, runtime defaults and builds.
+A release's image is published by a workflow that starts with the release
+tag; if `:<version>` cannot be pulled yet (or its build failed), luxmux does
+not fall back by itself: set `image = "ghcr.io/marcioapm/luxmux:latest"`.
+The GHCR package must be made public by its owner after its first push.
+Until then, or for a light image without agents, set `image = "ubuntu:24.04"`
+in `[profiles.default]`. No credentials are included in the image: pass keys
+through profile `secrets` and allow the required provider hosts in `egress`.
+
 | Command | |
 | --- | --- |
 | `luxmux` | attach the default session (`main`), or create it |
@@ -117,6 +130,7 @@ labels = { team = "example" }
 secrets = ["NPM_TOKEN"]
 secrets_from = "~/.config/luxmux/app.env"
 workdir = "/workspace/repos/app"
+persist_home = false           # /home/agent on a state volume; default: true only for luxmux's image
 egress = ["github.com", "registry.npmjs.org"]   # lux denies egress by default
 # unrestricted_network = true
 warm_spare = false
@@ -124,7 +138,12 @@ warm_spare = false
 
 Each window's Run is a generic tty workload running the profile's shell,
 with a state volume at `/workspace`; the repository is cloned to
-`/workspace/repos/<name>` and is the shell's working directory.
+`/workspace/repos/<name>` and is the shell's working directory. For
+luxmux's default image (`ghcr.io/marcioapm/luxmux`, any tag), the Run also
+has a state volume at `/home/agent`, the image's `agent` HOME, so agent
+configuration and sessions survive moves too. Other images get it only with
+`persist_home = true` (their `USER`'s home must then be `/home/agent`);
+`persist_home = false` turns it off for the default image.
 
 Secret values come from the `secrets_from` .env file, else from the
 environment variable of the same name, as with `lux run`. They are sent
