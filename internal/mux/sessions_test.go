@@ -423,12 +423,16 @@ func TestSessionPreview(t *testing.T) {
 	defer unlock()
 	prev := make(chan [2][]string, 1)
 	h.ui.sessionOpen = func(m *Mux) {
+		// c first: previewing a session attached elsewhere ends the
+		// preview before it, so b's must be the one open when the
+		// chooser closes.
+		c := m.SessionPreview("c", 10, 80)
 		var b []string
 		fakelux.WaitFor(context.Background(), 5*time.Second, func() bool {
 			b = m.SessionPreview("b", 10, 80)
 			return strings.Contains(strings.Join(b, "\n"), "B-SCREEN")
 		})
-		prev <- [2][]string{b, m.SessionPreview("c", 10, 80)}
+		prev <- [2][]string{b, c}
 	}
 	resizes := len(h.lux.Term(idB).Resizes())
 	attachesC := 0
