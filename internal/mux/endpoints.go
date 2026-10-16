@@ -72,8 +72,9 @@ func (m *Mux) followEvents(ep config.Endpoint) {
 // session's rebuild could not list adds every window it has there.
 func (m *Mux) discoverWindows(ep config.Endpoint) {
 	defer m.wg.Done()
-	tick := time.NewTicker(m.opt.discoverEvery)
-	defer tick.Stop()
+	// An endpoint the rebuild could not list is retried with the backoff,
+	// not every discoverEvery: its windows are missing until it answers.
+	bo := m.opt.Backoff
 	for {
 		var runs []*api.Run
 		lux, err := m.clientOf(ep)
@@ -91,10 +92,17 @@ func (m *Mux) discoverWindows(ep config.Endpoint) {
 				}
 			}
 		}
+		wait := m.opt.discoverEvery
+		m.mu.Lock()
+		if m.unlistedLocked(ep) {
+			wait = min(bo, wait)
+			bo = min(2*bo, m.opt.MaxBackoff)
+		}
+		m.mu.Unlock()
 		select {
 		case <-m.ctx.Done():
 			return
-		case <-tick.C:
+		case <-time.After(wait):
 		}
 	}
 }

@@ -239,7 +239,7 @@ func TestAdoptFromBothEndpoints(t *testing.T) {
 // other lux's windows work; a session rebuilt while a lux was down gets
 // that lux's windows once it answers.
 func TestEndpointDown(t *testing.T) {
-	x := newTwoLux(t, func(o *Options) { o.discoverEvery = 20 * time.Millisecond })
+	x := newTwoLux(t, nil)
 	x.live(0)
 	x.newRemote()
 	b1 := x.liveOnB(1)
