@@ -47,6 +47,167 @@ func (h *harness) claimed() []string {
 // TestWarmSpare: a profile with warm_spare keeps one extra Run labelled
 // as a spare; a new window claims it at once and a replacement is made.
 // A profile without it has none.
+func TestSpareProfileLabelGuard(t *testing.T) {
+	h := newHarness(t, `
+default_profile = "plain"
+[profiles.plain]
+image = "busybox"
+[profiles.a]
+image = "alpine"
+warm_spare = true
+[profiles.b]
+image = "alpine"
+warm_spare = true
+`, nil)
+	h.live(0)
+	slot := h.m.spareSlotOf(h.cfg.Profiles["a"])
+	if slot != h.m.spareSlotOf(h.cfg.Profiles["b"]) {
+		t.Fatal("identical profiles must share a spare slot")
+	}
+	var spare string
+	h.waitFor("shared spare", func() bool { spare = h.spares()[slot]; return spare != "" })
+	owner := h.lux.Run(spare).Labels[config.LabelProfile]
+	other := map[string]string{"a": "b", "b": "a"}[owner]
+	if other == "" {
+		t.Fatalf("spare profile %q", owner)
+	}
+	h.m.opt.UI = &fakeUI{choose: -1, req: &NewWindowRequest{ProfileName: other, Profile: h.cfg.Profiles[other]}}
+	h.type_("\x02C")
+	h.waitFor("other profile window", func() bool { return h.nwindows() == 2 })
+	id := h.live(1)
+	r := h.lux.Run(id)
+	if id == spare || r.Labels[config.LabelProfile] != other || r.Spec.Env[config.EnvProfile] != other {
+		t.Fatalf("window %s labels %v env %s; spare %s belongs to %s", id, r.Labels, r.Spec.Env[config.EnvProfile], spare, owner)
+	}
+	if h.spares()[slot] != spare || h.lux.Run(spare).State != "running" {
+		t.Fatalf("matching spare not kept: %v state %s", h.spares(), h.lux.Run(spare).State)
+	}
+	h.detach()
+}
+
+func TestSpareClaimRecordedBeforeGet(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	h.detach()
+	h.start(nil)
+	h.live(0)
+	gate := newGate()
+	t.Cleanup(gate.open)
+	var held atomic.Bool
+	h.lux.SetGetHook(func(id string) {
+		if id == spare && held.CompareAndSwap(false, true) {
+			gate.wait()
+		}
+	})
+	h.type_("\x02c")
+	h.waitFor("claim GET held", held.Load)
+	r := h.lux.Run(spare)
+	h.m.adoptSpares(h.m.eps.Default(), []*api.Run{&r})
+	s, _, err := state.Load(h.dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(s.Claimed, spare) || recordedSpare(s.Spares, spare) {
+		t.Fatalf("in-flight claim re-adopted: claimed %v spares %v", s.Claimed, s.Spares)
+	}
+	gate.open()
+	h.waitFor("claimed window", func() bool { return h.window(1) == spare })
+	h.live(1)
+	h.waitFor("replacement", func() bool { id := spareOf(h); return id != "" && id != spare })
+	h.detach()
+}
+
+func TestMigrateObsoleteSpareOnAttach(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	h.detach()
+	s, _, _ := state.Load(h.dir, "s")
+	ep := h.m.eps.Default()
+	s.DropSpare(config.SpecKey(h.cfg.Profiles["dev"]))
+	s.SetSpare("76d9621a3223b5c5", spare, ep)
+	gate := newGate()
+	t.Cleanup(gate.open)
+	var calls atomic.Int32
+	h.lux.SetTerminateHook(func(id string) {
+		if id == spare {
+			calls.Add(1)
+			gate.wait()
+		}
+	})
+	h.start(s)
+	h.live(0)
+	h.waitFor("termination held", func() bool { return calls.Load() > 0 })
+	stored, _, err := state.Load(h.dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Spares[state.LeftoverPrefix+spare] != spare || stored.Spares["76d9621a3223b5c5"] != "" || stored.SpareEndpoint(state.LeftoverPrefix+spare, config.Endpoint{}) != ep {
+		t.Fatalf("not durably migrated before termination: %+v", stored)
+	}
+	h.waitFor("current spare", func() bool { id := spareOf(h); return id != "" && id != spare })
+	gate.open()
+	h.waitFor("obsolete spare removed", func() bool { return !recordedSpare(h.spares(), spare) })
+	if calls.Load() != 1 || h.lux.Run(spare).State != "terminated" {
+		t.Fatalf("termination calls %d, state %s", calls.Load(), h.lux.Run(spare).State)
+	}
+	h.detach()
+}
+
+func TestMigrateObsoleteSpareDurableBeforeReturn(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare", func() bool { return spareOf(h) != "" })
+	ep := h.m.eps.Default()
+	h.m.mu.Lock()
+	h.m.sess.SetSpare("76d9621a3223b5c5", "obsolete-run", ep)
+	h.m.mu.Unlock()
+	old := h.m.migrateObsoleteSpares()
+	s, _, err := state.Load(h.dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old["obsolete-run"] != ep || s.Spares[state.LeftoverPrefix+"obsolete-run"] != "obsolete-run" || s.Spares["76d9621a3223b5c5"] != "" {
+		t.Fatalf("returned %v before durable leftover: %v", old, s.Spares)
+	}
+	h.detach()
+}
+
+func TestMigrateObsoleteSparePreservesOwnedRuns(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	first := h.live(0)
+	h.waitFor("spare", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	h.detach()
+	s, _, _ := state.Load(h.dir, "s")
+	ep := h.m.eps.Default()
+	s.SetSpare("old-window", first, ep)
+	s.SetSpare("old-claimed", "in-flight-claim", ep)
+	s.Claimed = append(s.Claimed, "in-flight-claim")
+	s.SetSpare(state.LeftoverPrefix+"existing", "existing", ep)
+	h.start(s)
+	h.live(0)
+	// Insert an existing leftover after startup's normal cleanup, then migrate alone.
+	h.m.mu.Lock()
+	h.m.sess.SetSpare(state.LeftoverPrefix+"existing", "existing", ep)
+	h.m.saveLocked()
+	h.m.mu.Unlock()
+	if old := h.m.migrateObsoleteSpares(); len(old) != 0 {
+		t.Fatalf("owned Runs migrated: %v", old)
+	}
+	got := h.spares()
+	if got["old-window"] != first || got["old-claimed"] != "in-flight-claim" || got[state.LeftoverPrefix+"existing"] != "existing" || spareOf(h) != spare {
+		t.Fatalf("owned/current/leftover slots changed: %v", got)
+	}
+	if !slices.Contains(h.claimed(), "in-flight-claim") || h.lux.Run(first).State != "running" {
+		t.Fatal("claimed/window ownership changed")
+	}
+	h.detach()
+}
+
 func TestWarmSpare(t *testing.T) {
 	h := newHarness(t, cfgSpare, nil)
 	first := h.live(0)

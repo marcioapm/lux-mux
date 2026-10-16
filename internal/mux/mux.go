@@ -366,7 +366,10 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 		case <-m.ctx.Done():
 		}
 	})
-	// Before any endpoint is listed, so no listing adopts a leftover.
+	// Before any endpoint is listed, so no listing adopts a leftover. Spare
+	// slots no configured warm-spare profile has (an upgrade changed every
+	// spec key) become leftovers first, so they are terminated too.
+	m.migrateObsoleteSpares()
 	m.terminateLeftovers()
 	m.mu.Lock()
 	if len(m.windows) == 0 {

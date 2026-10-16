@@ -233,6 +233,9 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 	for _, id := range extra {
 		m.retire(ep, id)
 	}
+	for id, endpoint := range m.migrateObsoleteSpares() {
+		m.goEndLeftover(endpoint, id)
+	}
 }
 
 // pruneConsidered keeps only the considered ids of ep that ep's listing

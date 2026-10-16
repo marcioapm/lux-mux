@@ -217,6 +217,41 @@ func (m *Mux) goEndLeftover(ep config.Endpoint, id string) {
 	})
 }
 
+// migrateObsoleteSpares records every normal spare slot whose spec key or
+// endpoint no configured warm-spare profile has as a leftover, writing the
+// file before returning those Runs for the caller to terminate once.
+// Claimed and window Runs and existing leftovers keep their owner.
+func (m *Mux) migrateObsoleteSpares() map[string]config.Endpoint {
+	cfg := m.config()
+	current := map[string]config.Endpoint{}
+	for _, name := range cfg.ProfileNames() {
+		p := cfg.Profiles[name]
+		if p.WarmSpare {
+			current[m.spareSlotOf(p)] = m.eps.Of(p)
+		}
+	}
+	old := map[string]config.Endpoint{}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for slot, id := range m.sess.Spares {
+		if state.IsLeftover(slot) || id == "" || slices.Contains(m.sess.Claimed, id) || m.byRun[id] != nil {
+			continue
+		}
+		ep := m.sess.SpareEndpoint(slot, m.eps.Default())
+		if want, ok := current[slot]; ok && want == ep {
+			continue
+		}
+		m.sess.DropSpare(slot)
+		m.sess.SetSpare(state.LeftoverPrefix+id, id, ep)
+		m.considerLocked(ep, id)
+		old[id] = ep
+	}
+	if len(old) > 0 {
+		m.persistLocked()
+	}
+	return old
+}
+
 // terminateLeftovers terminates the leftovers the file recorded, each
 // marked considered so the listing never adopts it as a window.
 func (m *Mux) terminateLeftovers() {
