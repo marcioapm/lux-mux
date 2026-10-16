@@ -213,9 +213,15 @@ func newSession(env Env, o windowFlags) error {
 		return err
 	}
 	ls := listSession(eps, knownEndpoints(eps, cfg), name)
+	// Runs of name on a lux that did not answer are added to the session
+	// once it does, as a rebuild's are.
+	var failed []config.Endpoint
 	for _, l := range ls {
 		if l.Endpoint == ep && l.Err != nil {
 			return l.Err
+		}
+		if l.Err != nil {
+			failed = append(failed, l.Endpoint)
 		}
 		for _, r := range l.Runs {
 			if state.Live(r.State) {
@@ -238,7 +244,7 @@ func newSession(env Env, o windowFlags) error {
 	}
 	// Only -p pins the session's default; without it C-b c follows
 	// default_profile.
-	return startMux(env, eps, &state.Session{Name: name, DefaultProfile: o.Profile}, name, unlock, &p)
+	return startMux(env, eps, &state.Session{Name: name, DefaultProfile: o.Profile, Unlisted: failed}, name, unlock, &p)
 }
 
 // attach attaches name: its file, else rebuilt from its Runs' labels on

@@ -142,6 +142,37 @@ func TestHungLuxCostsOneListing(t *testing.T) {
 	}
 }
 
+// muxSession makes the next runMux record the session it was given and
+// return without a terminal.
+func muxSession(t *testing.T) func() *state.Session {
+	t.Helper()
+	var got *state.Session
+	prev := startMux
+	startMux = func(_ Env, _ *luxapi.Endpoints, s *state.Session, _ string, _ func(), _ *config.Profile) error {
+		got = s
+		return nil
+	}
+	t.Cleanup(func() { startMux = prev })
+	return func() *state.Session { return got }
+}
+
+// TestNewOverRunsOnDownLux: new -s work while the lux holding work's Runs
+// is down makes the session with that lux unlisted, so its Runs join the
+// session once it answers.
+func TestNewOverRunsOnDownLux(t *testing.T) {
+	env, _, b, _, errb := twoLuxEnv(t)
+	submitTo(t, b, "work", "remote")
+	b.SetDown(true)
+	got := muxSession(t)
+	if code := Main(env, []string{"new", "-s", "work", "-p", "a"}); code != 0 {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	want := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	if s := got(); s == nil || !slices.Equal(s.Unlisted, []config.Endpoint{want}) {
+		t.Fatalf("session %+v", s)
+	}
+}
+
 // lineOf is the line of out that starts with prefix.
 func lineOf(out, prefix string) string {
 	for _, l := range strings.Split(out, "\n") {
