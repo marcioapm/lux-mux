@@ -112,6 +112,8 @@ type Server struct {
 	// feeds: event streams open now; feedOpens: ever opened.
 	feeds     int
 	feedOpens int
+	// down: every request is answered 503 (SetDown).
+	down bool
 }
 
 // Feeds is how many event feed requests are being served.
@@ -230,9 +232,25 @@ func NewWithKey(key string) *Server {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid API key")
 			return
 		}
+		s.mu.Lock()
+		down := s.down
+		s.mu.Unlock()
+		if down {
+			writeErr(w, http.StatusServiceUnavailable, "unavailable", "luxd is unavailable")
+			return
+		}
 		mux.ServeHTTP(w, req)
 	}))
 	return s
+}
+
+// SetDown makes the server answer every request 503 and ends its event
+// streams (on), or serve again.
+func (s *Server) SetDown(on bool) {
+	s.mu.Lock()
+	s.down = on
+	s.cond.Broadcast()
+	s.mu.Unlock()
 }
 
 // Refused is how many requests were answered 401 for their key.
@@ -822,10 +840,10 @@ func (s *Server) feed(w http.ResponseWriter, req *http.Request) {
 	defer stop()
 	for {
 		s.mu.Lock()
-		for len(s.events) <= after && ctx.Err() == nil {
+		for len(s.events) <= after && ctx.Err() == nil && !s.down {
 			s.cond.Wait()
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || s.down {
 			s.mu.Unlock()
 			return
 		}
