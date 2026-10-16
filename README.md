@@ -419,8 +419,10 @@ at most 2 s for it, and regenerate the whole file from the current facts
 the kernel. An image without `flock(1)` gets no env file, the variables
 are still in the shell's environment. Secrets are never in these
 variables or in the file: a profile cannot name a secret or an `env` entry
-after one of them, nor a secret with lux's `LUX_` prefix (lux sets
-`LUX_RUN_ID` and others in every Run).
+after one of them, nor a secret named after a variable lux sets in every
+Run (`LUX_RUN_ID`, `LUX_EPOCH`, `LUX_INPUTS`, `LUX_SERVICE_*`). Other
+`LUX_` names, such as `LUX_API_KEY` for the lux CLI in a window, are
+ordinary secrets.
 
 ## Moves and reconnects
 

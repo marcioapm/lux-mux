@@ -52,14 +52,17 @@ func reservedEnv(name string) bool {
 		name == EnvTestWorkspace || name == EnvTestCgroup
 }
 
-// reservedSecretNamespace reports whether an env secret named name could
-// replace a variable lux sets. lux v0.1.30's shim overlays env secrets on
-// its own LUX_RUN_ID, LUX_EPOCH, LUX_INPUTS and LUX_SERVICE_* (LUX_RUN_ID is
-// copied into the world-readable env file), and lux reserves LUX_ for a
-// spec's env, so the whole prefix is refused. luxmux's own names are
-// reservedEnv's.
-func reservedSecretNamespace(name string) bool {
-	return strings.HasPrefix(name, "LUX_")
+// luxShimEnv is what lux v0.1.30's shim sets in a Run's environment
+// (internal/shim/shim.go, Shim.environment): LUX_RUN_ID, LUX_EPOCH,
+// LUX_INPUTS, and LUX_SERVICE_<NAME> plus LUX_SERVICE_<NAME>_URL per service.
+var luxShimEnv = []string{"LUX_RUN_ID", "LUX_EPOCH", "LUX_INPUTS"}
+
+// luxSecretRefused reports whether an env secret named name would replace a
+// variable lux's shim sets: environment() applies env secrets after its own
+// variables, and LUX_RUN_ID is copied into the world-readable env file.
+// Other LUX_ names (LUX_API_KEY for the lux CLI in a window) are allowed.
+func luxSecretRefused(name string) bool {
+	return slices.Contains(luxShimEnv, name) || strings.HasPrefix(name, "LUX_SERVICE_")
 }
 
 // MaxEnvString bounds one workload environment string, NAME=value and its

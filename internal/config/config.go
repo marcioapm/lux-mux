@@ -402,8 +402,8 @@ func (p Profile) Validate() error {
 			fail("secrets: invalid name %q", s)
 		case reservedEnv(s):
 			fail("secrets: %q is set by luxmux", s)
-		case reservedSecretNamespace(s):
-			fail("secrets: %q: the LUX_ prefix is lux's (it sets LUX_RUN_ID, LUX_EPOCH and others in every Run): a secret of that name would replace its value", s)
+		case luxSecretRefused(s):
+			fail("secrets: %q is set by lux in every Run (LUX_RUN_ID, LUX_EPOCH, LUX_INPUTS, LUX_SERVICE_*): a secret of that name would replace its value", s)
 		}
 	}
 	if n := envStringSize(EnvRepositories, windowEnv(p, Target{}, Workspace)[EnvRepositories]); n > MaxEnvString {

@@ -41,14 +41,28 @@ func TestWindowFacts(t *testing.T) {
 	}
 }
 
-// TestSecretNamespaceRefused: a secret in lux's LUX_ namespace (including
-// names lux does not set today) or named after a variable luxmux sets is
-// refused before a RunSpec exists, so its value is never submitted. A real
-// wrapper run with what lux would export for such a secret (LUX_RUN_ID
-// holding the value) still keeps the value out of the env file.
+// TestSecretNamespaceRefused: a secret named after a variable lux's shim
+// sets or one luxmux sets is refused before a RunSpec exists, so its value
+// is never submitted; other LUX_ names are accepted. A real wrapper run
+// with what lux would export for such a secret (LUX_RUN_ID holding the
+// value) still keeps the value out of the env file.
 func TestSecretNamespaceRefused(t *testing.T) {
 	const value = "secret-run-id-value"
-	for _, n := range []string{"LUX_RUN_ID", "LUX_EPOCH", "LUX_INPUTS", "LUX_SERVICE_DB", "LUX_NOT_YET_DEFINED", "LUXMUX_RUN_ID", EnvWindow, EnvTestWorkspace} {
+	for _, n := range []string{"LUX_API_KEY", "LUX_TOKEN", "LUX_SERVICE", "LUX_RUN_ID_X"} {
+		for name, p := range map[string]Profile{
+			"secrets":        {Image: "alpine", Secrets: []string{n}},
+			"git_credential": {Image: "alpine", Repository: "https://example.com/a.git", GitCredential: n},
+			"repository":     {Image: "alpine", Repositories: []Repository{{URL: "https://example.com/a.git", GitCredential: n}}},
+		} {
+			if _, err := RunSpec(p, Target{Session: "s", Profile: "p"}, map[string]string{n: value}); err != nil {
+				t.Fatalf("%s %s refused: %v", name, n, err)
+			}
+		}
+		if _, err := Parse([]byte("[profiles.a]\nimage = \"x\"\nsecrets = [\"" + n + "\"]\n")); err != nil {
+			t.Fatalf("config with secret %s refused: %v", n, err)
+		}
+	}
+	for _, n := range []string{"LUX_RUN_ID", "LUX_EPOCH", "LUX_INPUTS", "LUX_SERVICE_DB", "LUX_SERVICE_DB_URL", "LUXMUX_RUN_ID", EnvWindow, EnvTestWorkspace} {
 		for name, p := range map[string]Profile{
 			"secrets":        {Image: "alpine", Secrets: []string{n}},
 			"git_credential": {Image: "alpine", Repository: "https://example.com/a.git", GitCredential: n},
