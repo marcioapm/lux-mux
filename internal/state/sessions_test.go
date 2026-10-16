@@ -1,9 +1,11 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,6 +45,44 @@ func TestHeld(t *testing.T) {
 		t.Fatalf("Lock after the probe: %v", err)
 	} else {
 		u()
+	}
+}
+
+// TestLockPastProbe: a Lock racing Held's probe of a lock file left with
+// a dead holder's pid (a crash does not unlock) takes the lock: the
+// probe's shared lock, held here for a few ms, is retried past.
+func TestLockPastProbe(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/s.lock"
+	if err := os.WriteFile(path, []byte("999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		time.AfterFunc(3*time.Millisecond, func() { f.Close() })
+		u, err := Lock(dir, "s")
+		if err != nil {
+			t.Fatalf("Lock while a probe held the file: %v", err)
+		}
+		u()
+		if err := os.WriteFile(path, []byte("999999\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A real holder is still refused, after the retries.
+	u, err := Lock(dir, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u()
+	if _, err := Lock(dir, "s"); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second Lock: %v", err)
 	}
 }
 

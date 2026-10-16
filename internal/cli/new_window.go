@@ -183,8 +183,3 @@ func newWindow(env Env, o windowFlags) error {
 	fmt.Fprintln(env.Stdout, w.RunID)
 	return nil
 }
-
-// recordExternal is state.RecordExternal for a session not renamed.
-func recordExternal(sess *state.Session, runs []*api.Run, cfg *config.Config) {
-	state.RecordExternal(sess, sess.Name, runs, cfg.Profiles)
-}

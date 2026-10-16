@@ -112,6 +112,13 @@ func Save(dir string, s *Session) error {
 // ErrLocked is Lock's error when another process has the session.
 var ErrLocked = errors.New("session is attached elsewhere")
 
+// lockTries×lockEvery is how long Lock retries a held lock: Held's probe
+// holds a shared lock for a moment.
+const (
+	lockTries = 4
+	lockEvery = 5 * time.Millisecond
+)
+
 // Lock takes the session's advisory lock, <dir>/<session>.lock, held
 // until unlock is called or the process exits: one luxmux process per
 // session. The file names the process that holds it.
@@ -124,7 +131,14 @@ func Lock(dir, session string) (unlock func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	for i := 1; ; i++ {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) || i == lockTries {
+			break
+		}
+		time.Sleep(lockEvery)
+	}
+	if err != nil {
 		b := make([]byte, 32)
 		n, _ := f.ReadAt(b, 0)
 		f.Close()
@@ -178,10 +192,9 @@ func List(dir string) ([]string, error) {
 }
 
 // Held reports whether another process holds session's lock, and the pid
-// it wrote. The probe takes a shared lock and drops it at once; it only
-// probes a lock file that names a pid (Unlock empties it), so a Lock
-// racing the probe can fail only on a session whose holder was killed
-// without unlocking.
+// it wrote. The probe takes a shared lock without blocking and drops it
+// at once; Lock retries past it. It only probes a lock file that names a
+// pid (Unlock empties it).
 func Held(dir, session string) (pid string, held bool) {
 	f, err := os.Open(filepath.Join(dir, session+".lock"))
 	if err != nil {
@@ -350,17 +363,12 @@ func RecordSpares(sess *Session, label string, runs []*api.Run) {
 // waitingSpare are the states of a spare that may still be claimed.
 var waitingSpare = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
 
-// Rebuild makes a session from the Runs lux lists for it (those labelled
-// with the session), for when its file is gone: its non-terminated Runs
-// that are not a waiting warm spare, oldest first. Names are lost: each
-// window is named after its profile. A Run whose spec lux returns gets
-// that spec as its window's (profiles: the configuration's, by name).
-func Rebuild(session string, runs []*api.Run, profiles map[string]config.Profile) *Session {
-	return RebuildLabelled(session, session, runs, profiles)
-}
-
-// RebuildLabelled is Rebuild for session name whose Runs are labelled
-// label (a renamed session's, see Renames).
+// RebuildLabelled makes session name from the Runs lux lists for it (those
+// labelled label: its name, or its old one if it was renamed, see
+// Renames), for when its file is gone: its non-terminated Runs that are
+// not a waiting warm spare, oldest first. Names are lost: each window is
+// named after its profile. A Run whose spec lux returns gets that spec
+// as its window's (profiles: the configuration's, by name).
 func RebuildLabelled(name, label string, runs []*api.Run, profiles map[string]config.Profile) *Session {
 	s := &Session{Name: name}
 	live := make([]*api.Run, 0, len(runs))
@@ -483,7 +491,7 @@ func WindowFromRun(r *api.Run, base config.Profile) Window {
 }
 
 // sortWindowsByCreation orders windows by their Runs' creation, after
-// Rebuild appended claimed spares out of order.
+// RebuildLabelled appended claimed spares out of order.
 func sortWindowsByCreation(s *Session, runs []*api.Run) {
 	at := map[string]time.Time{}
 	for _, r := range runs {

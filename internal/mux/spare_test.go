@@ -467,7 +467,7 @@ func TestRebuiltSessionClaimsSpareBySpec(t *testing.T) {
 		r := h.lux.Run(id)
 		runs = append(runs, &r)
 	}
-	sess := state.Rebuild("s", runs, nil)
+	sess := state.RebuildLabelled("s", "s", runs, nil)
 	submits := len(h.lux.Submits())
 	h.start(sess)
 	h.live(0)
