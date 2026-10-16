@@ -103,6 +103,9 @@ The prefix is `C-b` (configurable). Press it twice to send it to the shell.
 | `,` | rename window |
 | `&` | kill window (asks y/N; terminates its Run) |
 | `r` | resume a stopped Run / relaunch an ended one |
+| `s` | session chooser |
+| `(` / `)` | previous / next session |
+| `$` | rename this session |
 | `d` | detach |
 | `?` | key help |
 
@@ -122,6 +125,46 @@ back on.
 repository@branch (the first, and `+N` for N more) and age; arrows or `j`/`k` move, Enter switches, `/`
 filters as you type, `,` renames, `x` kills (with confirmation), Esc or `q`
 closes. The lower part previews the highlighted window's screen.
+
+## Sessions inside luxmux
+
+One luxmux shows one session at a time, and can move between them
+without leaving the terminal.
+
+**The session chooser** (`s`) has the window chooser's look and keys: one
+row per session with its window count, whether another luxmux has it
+attached (`elsewhere`; `here` marks this one, also starred), its default
+profile and its age, and a live preview of the highlighted session's shown
+window, read from lux with a restore attach that sends no keys and does
+not resize it. A session attached elsewhere is not attached for a preview:
+it shows `attached elsewhere — preview unavailable`. `/` filters by name
+or default profile, Enter switches, `,` renames, `x` kills (it asks, then
+terminates that session's Runs, as `kill-session` does; the session
+attached here, and one attached elsewhere, are refused), `n` opens a small
+dialog for a new session: its name, its first window's profile and that
+window's repositories and branches. The profile becomes the new session's
+default; the window keeps the profile's image, size and secrets.
+
+`(` and `)` switch to the previous and next session by name, wrapping
+around, and skip those attached elsewhere, with a notice that says so.
+
+**Switching** detaches the session shown as `d` does: its streams and its
+event feed are closed, its Runs keep running, its file is saved and its
+lock released. Then the other session's lock is taken and it is attached
+as `luxmux attach -t` attaches it, its shown window's screen restored
+from lux. If another process took that session in between, luxmux
+reattaches the one you were on and says why.
+
+**Renaming** (`$` for this session, `,` in the chooser) renames the
+session's file. lux cannot change the labels of a Run, so the session's
+Runs (and the windows it makes later) keep the `luxmux-session` label of
+the name they were made under; `$XDG_STATE_HOME/luxmux/.renames.json`
+maps the new name to it. `ls`, `attach`, `new-window` and `kill-session`
+follow the map, and a session rebuilt from lux after its file is gone
+gets its new name, as long as that map is there. The old name stays taken
+while those Runs live: `attach -t` with it says what it was renamed to,
+and `new -s` refuses it. On another machine (an empty state directory)
+the session is found under its old name.
 
 **Direct bindings** work without the prefix, and are off unless configured:
 
@@ -310,7 +353,9 @@ rebuild is lossy: window names become their profile names (or the name
 several spares of one spec the newest is taken to be the waiting one.
 
 One luxmux process attaches a session at a time: a second `luxmux attach`
-of an attached session fails, naming the process that has it.
+of an attached session fails, naming the process that has it. Switching
+sessions inside luxmux (see [Sessions inside luxmux](#sessions-inside-luxmux))
+moves that lock.
 
 ## Development
 

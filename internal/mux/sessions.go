@@ -369,6 +369,12 @@ func (m *Mux) RenameSession(old, new string) error {
 		return err
 	}
 	m.mu.Lock()
+	if m.ctx.Err() != nil {
+		// Detaching or switching: its lock is being released.
+		m.mu.Unlock()
+		unlockNew()
+		return errors.New("the session is detaching")
+	}
 	m.saveLocked()
 	if err = sessions.Move(m.opt.StateDir, old, new, label); err != nil {
 		m.mu.Unlock()
