@@ -441,7 +441,7 @@ func list(env Env) error {
 			for _, w := range s.Windows {
 				ep := w.EndpointOr(eps.Default())
 				if err, down := failedOn[ep]; down {
-					unreachable[failedWord(err)+": "+ep.Label()] = true
+					unreachable[luxapi.FailedWord(err)+": "+ep.Label()] = true
 				}
 			}
 			for _, l := range slices.Sorted(maps.Keys(unreachable)) {

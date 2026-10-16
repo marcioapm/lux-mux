@@ -270,3 +270,12 @@ func (d described) Unwrap() error { return d.err }
 func Refused(err error) bool {
 	return IsStatus(err, http.StatusUnauthorized) || IsStatus(err, http.StatusForbidden)
 }
+
+// FailedWord names why a lux did not answer a request: a 401 or 403 is
+// the key refused, anything else the lux unreachable.
+func FailedWord(err error) string {
+	if Refused(err) {
+		return "endpoint refused the key"
+	}
+	return "endpoint unreachable"
+}
