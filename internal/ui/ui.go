@@ -94,6 +94,18 @@ func (dialogs) Choose(m *mux.Mux) (mux.ChooseResult, error) {
 	return mux.ChooseResult{Select: c.Chosen}, err
 }
 
+// ChooseSession runs the session chooser; its n opens the new-session
+// dialog over it.
+func (dialogs) ChooseSession(m *mux.Mux) (mux.SessionChoice, error) {
+	_, rows, cols := m.Terminal()
+	c := NewSessionChooser(m, rows, cols)
+	p := &sessionProgram{c: c, newDialog: func(rows, cols int) *Dialog {
+		return NewSessionDialogModel(m.Context(), muxHost{m}, rows, cols, m.CheckSessionName)
+	}}
+	_, err := run(m, p)
+	return mux.SessionChoice{Switch: c.Switch, New: p.New}, err
+}
+
 // Help shows the keys until it is closed.
 func (dialogs) Help(m *mux.Mux) error {
 	_, rows, cols := m.Terminal()

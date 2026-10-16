@@ -27,6 +27,11 @@ var opWords = map[string]string{
 	config.OpRelaunch:  "resume a stopped Run / relaunch an ended one",
 	config.OpDetach:    "detach (the Runs keep running)",
 	config.OpHelp:      "this help",
+
+	config.OpChooseSession: "session chooser (switch, n new, , rename, x kill)",
+	config.OpNextSession:   "next session (by name; skips those attached elsewhere)",
+	config.OpPrevSession:   "previous session",
+	config.OpRenameSession: "rename this session",
 }
 
 // helpSections lists the prefix table's commands by section, in order.
@@ -36,7 +41,8 @@ var helpSections = []struct {
 }{
 	{"Windows", []string{config.OpNew, config.OpNewDialog, config.OpNext, config.OpPrev, config.OpSelect, config.OpLast,
 		config.OpPrompt, config.OpChoose, config.OpRename, config.OpKill, config.OpRelaunch}},
-	{"Session", []string{config.OpDetach, config.OpHelp}},
+	{"Session", []string{config.OpChooseSession, config.OpNextSession, config.OpPrevSession, config.OpRenameSession,
+		config.OpDetach, config.OpHelp}},
 }
 
 // helpEntry is one line of the help: a section title (key empty) or a

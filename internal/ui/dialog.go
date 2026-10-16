@@ -48,6 +48,8 @@ const (
 	stSaveAs
 	stCreate
 	stCancel
+	// stName is the new-session dialog's session name.
+	stName
 	// stRepos is where the repository rows' stops start: row i's URL is
 	// repoURL(i), its branch repoBranch(i).
 	stRepos stop = 1000
@@ -94,10 +96,13 @@ type poolsMsg struct {
 }
 
 type validatedMsg struct {
-	gen int
-	req *mux.NewWindowRequest
-	ans *api.SubmitAnswer
-	err error
+	gen  int
+	req  *mux.NewWindowRequest
+	sreq *mux.NewSessionRequest
+	ans  *api.SubmitAnswer
+	err  error
+	// nameErr: the session name was refused (checkSession).
+	nameErr error
 }
 
 // Dialog is the new-window dialog's model: one form with every field of
@@ -135,11 +140,33 @@ type Dialog struct {
 	gen int
 	// confirm is the request a dry run found valid but not startable now:
 	// a second Create makes it.
-	confirm *mux.NewWindowRequest
+	confirm  *mux.NewWindowRequest
+	sconfirm *mux.NewSessionRequest
+
+	// session: the new-session dialog, which asks for a name, the first
+	// window's profile and its repository rows only; checkSession checks
+	// the name is free.
+	session      bool
+	checkSession func(ctx context.Context, name string) error
 
 	// Request is what to create once Done (nil: cancelled).
 	Request *mux.NewWindowRequest
-	Done    bool
+	// SessionRequest is the new-session dialog's (nil: cancelled).
+	SessionRequest *mux.NewSessionRequest
+	Done           bool
+}
+
+// NewSessionDialogModel opens the new-session dialog on the
+// configuration's default profile; check says whether a name is free.
+func NewSessionDialogModel(ctx context.Context, h DialogHost, rows, cols int, check func(ctx context.Context, name string) error) *Dialog {
+	d := NewDialogModel(ctx, h, rows, cols)
+	d.session, d.checkSession = true, check
+	// The profile's pool and size are kept as they are: nothing to load.
+	d.poolsState = poolsLoaded
+	d.in[stName] = newInput("session name", nil)
+	d.resize(rows, cols)
+	d.setFocus(stName)
+	return d
 }
 
 // NewDialogModel opens the dialog on the configuration's default profile.
@@ -238,6 +265,9 @@ func (d *Dialog) valueWidth() int { return max(1, innerWidth(d.cols)-labelWidth)
 
 // Init loads the pools.
 func (d *Dialog) Init() tea.Cmd {
+	if d.session {
+		return nil
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(d.ctx, poolsFor)
 		defer cancel()
@@ -293,6 +323,10 @@ func (d *Dialog) refreshPoolOptions() {
 
 // stops are the places Tab visits, in order.
 func (d *Dialog) stops() []stop {
+	if d.session {
+		s := append([]stop{stName, stProfile}, d.repoStops()...)
+		return append(s, stAddRepo, stCreate, stCancel)
+	}
 	s := []stop{stProfile, stImage, stPool}
 	if d.shaped() || d.poolsState == poolsLoading {
 		s = append(s, stSize)
@@ -408,8 +442,8 @@ func (d *Dialog) changed(s stop) {
 	}
 	d.gen++
 	d.validating = false
-	if d.confirm != nil {
-		d.confirm = nil
+	if d.confirm != nil || d.sconfirm != nil {
+		d.confirm, d.sconfirm = nil, nil
 		d.status, d.statusErr = "", false
 	}
 }
@@ -585,17 +619,77 @@ func (d *Dialog) picked(s stop) {
 }
 
 func (d *Dialog) cancel() tea.Cmd {
-	d.Done, d.Request = true, nil
+	d.Done, d.Request, d.SessionRequest = true, nil, nil
 	return tea.Quit
 }
 
 func (d *Dialog) setStatus(s string, isErr bool) { d.status, d.statusErr = s, isErr }
+
+// submitSession checks the new-session dialog's name and first window,
+// then asks whether the name is free and lux's dry run.
+func (d *Dialog) submitSession() tea.Cmd {
+	if d.sconfirm != nil {
+		d.SessionRequest, d.Done = d.sconfirm, true
+		return tea.Quit
+	}
+	clear(d.errs)
+	name := strings.TrimSpace(d.in[stName].Value())
+	base := d.profile.value
+	baseProf := d.cfg.Profiles[base]
+	v := ValuesFrom(base, baseProf)
+	v.Repos = d.repoRows()
+	// The profile as it is, but for its repositories.
+	v.WarmSpare = baseProf.WarmSpare
+	prof, err := v.Profile(baseProf, baseProf.Size != "")
+	if !config.NameRe.MatchString(name) {
+		d.errs[stName] = "a session name is letters, digits, '.', '_' and '-'"
+	}
+	if err != nil {
+		var general []string
+		for f, msgs := range FieldErrors(err) {
+			if s, ok := fieldStop[f]; ok && (s == stRepo || s == stBranch) {
+				d.errs[s] = strings.Join(msgs, "; ")
+			} else {
+				general = append(general, msgs...)
+			}
+		}
+		slices.Sort(general)
+		d.setStatus(strings.Join(append([]string{"fix the marked fields"}, general...), "; "), true)
+	}
+	if len(d.errs) > 0 || err != nil {
+		if d.errs[stName] != "" {
+			d.setFocus(stName)
+			d.setStatus("fix the marked fields", true)
+		} else if d.errs[stRepo] != "" {
+			d.setFocus(stRepo)
+		}
+		return nil
+	}
+	d.validating = true
+	d.setStatus("checking with lux…", false)
+	gen := d.gen
+	req := &mux.NewSessionRequest{Name: name, ProfileName: base, Profile: prof}
+	return tea.Batch(d.spin.Tick, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(d.ctx, validateFor)
+		defer cancel()
+		if d.checkSession != nil {
+			if err := d.checkSession(ctx, name); err != nil {
+				return validatedMsg{gen: gen, sreq: req, nameErr: err}
+			}
+		}
+		ans, err := d.host.Validate(ctx, base, prof)
+		return validatedMsg{gen: gen, sreq: req, ans: ans, err: err}
+	})
+}
 
 // submit checks the fields, then asks lux's dry run; a second press after
 // a "would not start now" answer creates the window.
 func (d *Dialog) submit() tea.Cmd {
 	if d.validating {
 		return nil
+	}
+	if d.session {
+		return d.submitSession()
 	}
 	if d.confirm != nil {
 		d.Request, d.Done = d.confirm, true
@@ -652,17 +746,21 @@ func (d *Dialog) validated(m validatedMsg) tea.Cmd {
 	}
 	d.validating = false
 	switch {
+	case m.nameErr != nil:
+		d.errs[stName] = m.nameErr.Error()
+		d.setStatus("fix the marked fields", true)
+		d.setFocus(stName)
 	case m.err != nil:
 		d.refused(luxapi.Describe(m.err))
 	case m.ans == nil || !m.ans.Valid:
 		d.refused("lux's dry run did not find it valid")
 	case !m.ans.WouldStartNow:
-		d.confirm = m.req
+		d.confirm, d.sconfirm = m.req, m.sreq
 		d.setStatus("valid, but would not start now (it waits for capacity): "+strings.Join(Blockers(m.ans), "; ")+
 			". Create again to create it anyway", false)
 		d.setFocus(stCreate)
 	default:
-		d.Request, d.Done = m.req, true
+		d.Request, d.SessionRequest, d.Done = m.req, m.sreq, true
 		return tea.Quit
 	}
 	return nil
@@ -702,6 +800,7 @@ func (d *Dialog) secretNames() []string {
 var stopLabel = map[stop]string{
 	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size",
 	stSpare: "Warm spare", stDefault: "Session default", stSaveAs: "Save as profile",
+	stName: "Session name",
 }
 
 // label is s's label: a repository row's URL is numbered from the second.
@@ -768,7 +867,11 @@ func (d *Dialog) View() string {
 		d.scroll = min(max(d.scroll, 0), len(lines)-avail)
 		lines = lines[d.scroll : d.scroll+avail]
 	}
-	return frame(d.rows, d.cols, d.bg, "New window", append(lines, footer...))
+	title := "New window"
+	if d.session {
+		title = "New session"
+	}
+	return frame(d.rows, d.cols, d.bg, title, append(lines, footer...))
 }
 
 func (d *Dialog) helpLine() string {
@@ -837,6 +940,45 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	textRow := func(s stop) {
 		row(s, d.focus == s, d.in[s].View(), errLine(s)...)
 	}
+	addRow := func() {
+		add := "+ add repository"
+		if d.focus == stAddRepo {
+			add = palette.focus.Render(add)
+		} else {
+			add = palette.accent.Render(add)
+		}
+		row(stAddRepo, d.focus == stAddRepo, add+palette.dim.Render("  ctrl-x on a row removes it"))
+	}
+	btn := func(s stop, name string) string {
+		b := "[ " + name + " ]"
+		if d.focus == s {
+			return palette.focus.Render(b)
+		}
+		if s == stCreate {
+			return palette.accent.Render(b)
+		}
+		return b
+	}
+	buttons := func() {
+		out = append(out, "")
+		start := len(out)
+		out = append(out, pad+btn(stCreate, "Create")+"  "+btn(stCancel, "Cancel"))
+		at[stCreate] = [2]int{start, len(out)}
+		at[stCancel] = at[stCreate]
+	}
+
+	if d.session {
+		textRow(stName)
+		ddRow(stProfile, d.profile)
+		for _, s := range d.repoStops() {
+			textRow(s)
+		}
+		addRow()
+		out = append(out, "  "+fitLine("", labelWidth-2)+palette.dim.Render(ansi.Truncate(
+			"the profile's image, size and secrets; it becomes the session's default", vw, "…")))
+		buttons()
+		return out, at
+	}
 
 	ddRow(stProfile, d.profile)
 	textRow(stImage)
@@ -877,13 +1019,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	for _, s := range d.repoStops() {
 		textRow(s)
 	}
-	add := "+ add repository"
-	if d.focus == stAddRepo {
-		add = palette.focus.Render(add)
-	} else {
-		add = palette.accent.Render(add)
-	}
-	row(stAddRepo, d.focus == stAddRepo, add+palette.dim.Render("  ctrl-x on a row removes it"))
+	addRow()
 	secrets := "none"
 	if n := d.secretNames(); len(n) > 0 {
 		secrets = strings.Join(n, ", ")
@@ -902,21 +1038,7 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 	checkbox(stSpare, d.spare, "billed while it waits")
 	checkbox(stDefault, d.useAsDefault, "use as this session's default profile (C-b c)")
 	textRow(stSaveAs)
-	out = append(out, "")
-	btn := func(s stop, name string) string {
-		b := "[ " + name + " ]"
-		if d.focus == s {
-			return palette.focus.Render(b)
-		}
-		if s == stCreate {
-			return palette.accent.Render(b)
-		}
-		return b
-	}
-	start := len(out)
-	out = append(out, pad+btn(stCreate, "Create")+"  "+btn(stCancel, "Cancel"))
-	at[stCreate] = [2]int{start, len(out)}
-	at[stCancel] = at[stCreate]
+	buttons()
 	return out, at
 }
 

@@ -79,7 +79,7 @@ func keyHints(s string) string {
 	for _, word := range strings.SplitAfter(s, " ") {
 		key := strings.TrimSpace(word)
 		switch key {
-		case "tab/↑↓", "tab/↓", "⇧tab/↑", "↑/↓", "↑↓", "↑↓/jk", "pgup/pgdn", "tab", "enter", "space", "ctrl-s", "esc", "esc,", "q", "?", "/", ",", "x":
+		case "tab/↑↓", "tab/↓", "⇧tab/↑", "↑/↓", "↑↓", "↑↓/jk", "pgup/pgdn", "tab", "enter", "space", "ctrl-s", "esc", "esc,", "q", "?", "/", ",", "x", "n":
 			out.WriteString(palette.accent.Render(word))
 		default:
 			out.WriteString(palette.dim.Render(word))

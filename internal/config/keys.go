@@ -76,14 +76,21 @@ const (
 	OpPrompt    = "prompt-index"
 	OpRelaunch  = "relaunch"
 	OpSendPfx   = "send-prefix"
+	// Sessions.
+	OpChooseSession = "choose-session" // session chooser
+	OpNextSession   = "next-session"
+	OpPrevSession   = "prev-session"
+	OpRenameSession = "rename-session"
 )
 
 var ops = map[string]bool{OpNext: true, OpPrev: true, OpLast: true, OpNew: true, OpNewDialog: true,
-	OpChoose: true, OpRename: true, OpKill: true, OpDetach: true, OpHelp: true, OpPrompt: true}
+	OpChoose: true, OpRename: true, OpKill: true, OpDetach: true, OpHelp: true, OpPrompt: true,
+	OpChooseSession: true, OpNextSession: true, OpPrevSession: true, OpRenameSession: true}
 
 // ParseCommand reads a binding's command: "select 3", "next", "prev",
 // "last", "new", "new-dialog", "choose", "rename", "kill", "detach",
-// "help" or "prompt-index".
+// "help", "prompt-index", "choose-session", "next-session",
+// "prev-session" or "rename-session".
 func ParseCommand(s string) (Command, error) {
 	f := strings.Fields(s)
 	if len(f) == 0 {

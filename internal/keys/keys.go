@@ -72,6 +72,8 @@ var PrefixKeys = map[byte]config.Command{
 	'\'': {Op: config.OpPrompt}, 'w': {Op: config.OpChoose},
 	',': {Op: config.OpRename}, '&': {Op: config.OpKill}, 'd': {Op: config.OpDetach},
 	'?': {Op: config.OpHelp}, 'r': {Op: config.OpRelaunch},
+	's': {Op: config.OpChooseSession}, '(': {Op: config.OpPrevSession}, ')': {Op: config.OpNextSession},
+	'$': {Op: config.OpRenameSession},
 }
 
 // Feed takes the bytes of one read and returns what to do with them, in
