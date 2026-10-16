@@ -968,3 +968,68 @@ func TestTwoEndpointsRebuildOneDown(t *testing.T) {
 		t.Errorf("%s holds a key", l)
 	}
 }
+
+// TestAttachRecordsExternalOnItsLux: a Run new-window -p far made on the
+// far lux while the session was attached elsewhere (never adopted there)
+// is recorded by the next attach with the far lux as its endpoint: the
+// window attaches to it there, and the file names that lux.
+func TestAttachRecordsExternalOnItsLux(t *testing.T) {
+	lux, env := e2eEnv(t)
+	const keyB = "lux_fake_key_BBBB_e2e_test"
+	b := fakelux.NewWithKey(keyB)
+	b.IDPrefix = "run_b"
+	t.Cleanup(b.Close)
+	b.NewTerminal = lux.NewTerminal
+	var cfgDir, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgDir = filepath.Join(dir, "luxmux")
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile = \"near\"\n[profiles.near]\nimage = \"alpine\"\n[profiles.far]\nimage = \"alpine\"\n" +
+		"lux_url = \"" + b.URL + "\"\ntenant = \"example\"\napi_key_env = \"LMX_E2E_FAR_KEY\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "LMX_E2E_FAR_KEY="+keyB)
+	p := startLuxmux(t, env, "new -s ext")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	unlock, err := state.Lock(stateDir, "ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := startLuxmux(t, env, "new-window -t ext -p far -n far")
+	q.exited()
+	unlock()
+	if len(b.RunIDs()) != 1 {
+		t.Fatalf("far lux has %v", b.RunIDs())
+	}
+	far := b.RunIDs()[0]
+	if s, _, _ := state.Load(stateDir, "ext"); len(s.Windows) != 1 {
+		t.Fatalf("new-window wrote the file of an attached session: %+v", s.Windows)
+	}
+
+	p = startLuxmux(t, env, "attach -t ext")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("far window shown", func(string) bool { return p.scr.title() == "luxmux:ext [1] far" })
+	p.wait("far window attached on the far lux", func(string) bool { return b.Streams(far) > 0 })
+	p.typ("\x02d")
+	p.exited()
+	s, _, _ := state.Load(stateDir, "ext")
+	if len(s.Windows) != 2 || s.Windows[1].RunID != far || s.Windows[1].Endpoint == nil ||
+		s.Windows[1].Endpoint.URL != b.URL || s.Windows[1].Endpoint.Tenant != "example" {
+		t.Fatalf("file %+v", s.Windows)
+	}
+	if slices.Contains(lux.Requests(), "GET /v1/runs/"+far) {
+		t.Fatal("the far Run was looked for on the near lux")
+	}
+}

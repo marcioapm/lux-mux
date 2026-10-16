@@ -367,6 +367,37 @@ func TestKillSessionAcrossEndpoints(t *testing.T) {
 	}
 }
 
+// TestAttachRecordsExternalOnB: a Run new-window -p remote made on b
+// while the session was attached elsewhere is recorded by the next
+// attach with b's endpoint, not the default lux's.
+func TestAttachRecordsExternalOnB(t *testing.T) {
+	env, a, b, out, errb := twoLuxEnv(t)
+	near := submitTo(t, a, "work", "a")
+	def := config.Endpoint{URL: a.URL}
+	if err := state.Save(env.StateDir, &state.Session{Name: "work", Windows: []state.Window{{RunID: near, Profile: "a", Endpoint: &def}}}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := state.Lock(env.StateDir, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(env, []string{"new-window", "-t", "work", "-p", "remote", "-n", "far"}); code != 0 {
+		unlock()
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	unlock()
+	far := strings.TrimSpace(out.String())
+	got := muxSession(t)
+	if code := Main(env, []string{"attach", "-t", "work"}); code != 0 {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+	want := config.Endpoint{URL: b.URL, Tenant: "example", KeyEnv: cliKeyEnv}
+	s := got()
+	if s == nil || len(s.Windows) != 2 || s.Windows[1].RunID != far || s.Windows[1].Endpoint == nil || *s.Windows[1].Endpoint != want {
+		t.Fatalf("session %+v", s)
+	}
+}
+
 // TestAttachWithEndpointDown: attach of a session whose file is gone and
 // whose only Runs are on a lux that does not answer makes no window in
 // their place, and says which lux failed.
