@@ -15,7 +15,6 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 	"github.com/marcioapm/lux-mux/internal/screen"
-	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // snapshotPrefix is how a restore snapshot starts (vterm.Snapshot resets
@@ -57,6 +56,12 @@ func (m *Mux) startSupervisor(w *Window) {
 // it ended: a stopped Run waits for r to resume it, an ended one for r to
 // relaunch.
 func (m *Mux) supervise(ctx context.Context, w *Window) {
+	lux, err := m.clientOf(w.Endpoint)
+	if err != nil {
+		m.markDead(w, err.Error())
+		m.waitClosed(ctx, w)
+		return
+	}
 	bo := m.opt.Backoff
 	wait := func(d time.Duration) {
 		select {
@@ -75,7 +80,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 	dropWait := m.opt.Backoff
 	for ctx.Err() == nil {
 		gctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		run, err := m.lux.Get(gctx, w.RunID)
+		run, err := lux.Get(gctx, w.RunID)
 		cancel()
 		if ctx.Err() != nil {
 			return
@@ -87,7 +92,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				m.waitClosed(ctx, w)
 				return
 			}
-			m.setWaiting(w, "luxd unreachable: "+luxapi.Describe(err))
+			m.setWaiting(w, "endpoint unreachable ("+w.Endpoint.Label()+"): "+luxapi.Describe(err))
 			wait(bo)
 			grow()
 			continue
@@ -109,7 +114,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				continue
 			}
 			start := time.Now()
-			end, why := m.attachOnce(ctx, w, run)
+			end, why := m.attachOnce(ctx, lux, w, run)
 			refreshed := end == endDropped && m.takeRefreshing(w)
 			if !refreshed {
 				// Keys a refresh held wait for no stream now.
@@ -161,7 +166,7 @@ func (m *Mux) supervise(ctx context.Context, w *Window) {
 				}
 				continue
 			}
-			if err := m.resumeRun(ctx, w, run); err != nil {
+			if err := m.resumeRun(ctx, lux, w, run); err != nil {
 				m.markDead(w, "cannot resume: "+err.Error())
 				m.waitClosed(ctx, w)
 				return
@@ -288,7 +293,7 @@ func (m *Mux) waitClosed(ctx context.Context, w *Window) { <-ctx.Done() }
 
 // resumeRun resumes a stopped or lost Run with the secrets lux lists for
 // it, their values found as the window's profile says (lux keeps none).
-func (m *Mux) resumeRun(ctx context.Context, w *Window, run *api.Run) error {
+func (m *Mux) resumeRun(ctx context.Context, lux *luxapi.Client, w *Window, run *api.Run) error {
 	m.setWaiting(w, "resuming "+run.State+" Run")
 	names := make([]string, 0, len(run.Secrets))
 	for _, s := range run.Secrets {
@@ -304,7 +309,7 @@ func (m *Mux) resumeRun(ctx context.Context, w *Window, run *api.Run) error {
 	secrets := config.SecretValues(vals)
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	err = m.lux.Resume(rctx, run.ID, secrets)
+	err = lux.Resume(rctx, run.ID, secrets)
 	if err != nil && luxapi.IsStatus(err, http.StatusConflict) {
 		// Resuming already, or its state moved on: the loop reads it again.
 		return nil
@@ -317,12 +322,12 @@ func (m *Mux) resumeRun(ctx context.Context, w *Window, run *api.Run) error {
 
 // attachOnce attaches to w's running Run with restore and pumps its
 // output until the stream ends.
-func (m *Mux) attachOnce(ctx context.Context, w *Window, run *api.Run) (attachEnd, string) {
+func (m *Mux) attachOnce(ctx context.Context, lux *luxapi.Client, w *Window, run *api.Run) (attachEnd, string) {
 	m.mu.Lock()
 	rows, cols := m.rows, m.cols
 	m.mu.Unlock()
 	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, cut, err := m.lux.Attach(actx, run.ID, true, rows, cols)
+	conn, cut, err := lux.Attach(actx, run.ID, true, rows, cols)
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -850,176 +855,6 @@ func (m *Mux) shellExited(w *Window) {
 	idx := m.indexLocked(w)
 	m.mu.Unlock()
 	m.closeWindow(w, true, fmt.Sprintf("window %d exited", idx))
-}
-
-// followEvents follows the tenant's event feed and routes each event of
-// a window's Run to it: progress while it starts, a wake-up for its
-// supervisor whenever its state or stage changes.
-func (m *Mux) followEvents() {
-	defer m.wg.Done()
-	var after int64
-	bo := m.opt.Backoff
-	for m.ctx.Err() == nil {
-		start := time.Now()
-		_ = m.lux.Feed(m.ctx, after, func(e api.FeedEvent) {
-			after = e.ID
-			if e.RunID == nil {
-				return
-			}
-			// The feed is the tenant's and carries no labels: only a Run
-			// just submitted may be new-window's (discoverWindows finds
-			// those the feed missed). luxd announces a submit with an
-			// event of type submitted, never with a state event.
-			if e.Type == luxapi.EventSubmitted {
-				m.considerRun(*e.RunID)
-			}
-			m.event(*e.RunID, e.Event)
-		})
-		if m.ctx.Err() != nil {
-			return
-		}
-		if time.Since(start) > time.Minute {
-			bo = m.opt.Backoff
-		}
-		select {
-		case <-m.ctx.Done():
-		case <-time.After(bo):
-		}
-		bo = min(2*bo, m.opt.MaxBackoff)
-	}
-}
-
-// discoverWindows lists the session's Runs at the start and every
-// discoverEvery: the feed starts from when it connects, and is down
-// between reconnects, so a Run new-window made then is found here. The
-// listing carries each Run's labels, state and spec, so a Run is adopted
-// from it without reading it again.
-func (m *Mux) discoverWindows() {
-	defer m.wg.Done()
-	tick := time.NewTicker(m.opt.discoverEvery)
-	defer tick.Stop()
-	for {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		runs, err := m.lux.ListSession(ctx, m.label)
-		cancel()
-		if err == nil {
-			m.pruneConsidered(runs)
-			for _, r := range runs {
-				if state.Adoptable(r, m.label) && m.markConsidered(r.ID) {
-					m.adoptRun(r)
-				}
-			}
-		}
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-tick.C:
-		}
-	}
-}
-
-// pruneConsidered keeps only the considered ids the session's listing
-// still has: a Run lux no longer lists cannot be adopted, and an id from
-// the feed that is not this session's need not be remembered.
-func (m *Mux) pruneConsidered(runs []*api.Run) {
-	listed := make(map[string]bool, len(runs))
-	for _, r := range runs {
-		listed[r.ID] = true
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id := range m.considered {
-		if !listed[id] {
-			delete(m.considered, id)
-		}
-	}
-}
-
-// markConsidered marks a Run no window has as looked at; false when a
-// window has it or it was looked at already.
-func (m *Mux) markConsidered(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.byRun[id] != nil || m.considered[id] || m.ctx.Err() != nil {
-		return false
-	}
-	m.considered[id] = true
-	return true
-}
-
-// considerRun reads a Run the feed says was just submitted, once, and
-// adopts it when it is new-window's for this session. Labels never
-// change, so a Run found to be anything else is not read again; one whose
-// read fails is left to the listing.
-func (m *Mux) considerRun(id string) {
-	if !m.markConsidered(id) {
-		return
-	}
-	m.wg.Add(1)
-	m.goSafe(func() {
-		defer m.wg.Done()
-		ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
-		r, err := m.lux.Get(ctx, id)
-		cancel()
-		if err != nil {
-			m.mu.Lock()
-			delete(m.considered, id)
-			m.mu.Unlock()
-			return
-		}
-		if state.Adoptable(r, m.label) {
-			m.adoptRun(r)
-		}
-	})
-}
-
-// adoptRun appends a window for r, a Run new-window made for this
-// session, with a notice; the window shown does not change.
-func (m *Mux) adoptRun(r *api.Run) {
-	cfg := m.config()
-	sw := state.WindowFromRun(r, cfg.Profiles[r.Labels[config.LabelProfile]])
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.byRun[r.ID] != nil || m.ending || m.ctx.Err() != nil {
-		return
-	}
-	w := m.newWindow(sw.Name, sw.Profile, *sw.Spec)
-	w.RunID = r.ID
-	m.windows = append(m.windows, w)
-	m.byRun[r.ID] = w
-	m.startSupervisor(w)
-	m.saveLocked()
-	m.setNoticeLocked(fmt.Sprintf("window %d added: %s", len(m.windows)-1, w.Name))
-}
-
-func (m *Mux) event(runID string, e api.Event) {
-	if e.Type != "state" && e.Type != "stage" {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	w := m.byRun[runID]
-	if w == nil {
-		return
-	}
-	str := func(k string) string { s, _ := e.Data[k].(string); return s }
-	if w.phase == phaseStarting {
-		if e.Type == "stage" {
-			w.steps.note(stageOrState("", str("stage")))
-		} else {
-			w.steps.note(str("state"))
-			w.status = str("state")
-		}
-		if m.activeLocked() == w {
-			m.repaintLocked()
-		}
-	} else if w.phase == phaseReconnecting && e.Type == "stage" {
-		w.reason = stageOrState("", str("stage"))
-		if m.activeLocked() == w {
-			m.repaintLocked()
-		}
-	}
-	w.poke()
 }
 
 // Resize takes the terminal's new size: every emulator and every stream.

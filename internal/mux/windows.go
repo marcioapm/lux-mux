@@ -39,9 +39,11 @@ func (m *Mux) newWindowFrom(name string, p config.Profile, title string, _ bool)
 		title = name
 	}
 	m.mu.Lock()
-	w := m.newWindow(title, name, p)
+	ep := m.eps.Of(p)
+	w := m.newWindow(title, name, p, ep)
 	w.steps.note("submitting")
 	m.windows = append(m.windows, w)
+	m.followEndpointLocked(ep)
 	m.selectLocked(len(m.windows) - 1)
 	m.mu.Unlock()
 	m.wg.Add(1)
@@ -51,13 +53,14 @@ func (m *Mux) newWindowFrom(name string, p config.Profile, title string, _ bool)
 	})
 }
 
-// launch gets w a Run: a waiting spare of the same spec, else a new one.
+// launch gets w a Run on its endpoint: a waiting spare of the same spec,
+// else a new one.
 func (m *Mux) launch(w *Window) {
 	if id := m.claimSpare(w); id != "" {
 		m.mu.Lock()
 		if w.closed {
 			m.mu.Unlock()
-			m.terminate(id)
+			m.terminate(w.Endpoint, id)
 			return
 		}
 		w.RunID = id
@@ -67,6 +70,11 @@ func (m *Mux) launch(w *Window) {
 		m.startSupervisor(w)
 		m.mu.Unlock()
 		w.poke()
+		return
+	}
+	lux, err := m.clientOf(w.Endpoint)
+	if err != nil {
+		m.markDead(w, err.Error())
 		return
 	}
 	m.mu.Lock()
@@ -86,7 +94,7 @@ func (m *Mux) launch(w *Window) {
 	bo := m.opt.Backoff
 	for {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		run, err = m.lux.Submit(ctx, sp)
+		run, err = lux.Submit(ctx, sp)
 		cancel()
 		if err == nil || m.ctx.Err() != nil || luxapi.IsStatus(err, 400) || luxapi.IsStatus(err, 422) ||
 			luxapi.IsStatus(err, 401) || luxapi.IsStatus(err, 403) || luxapi.IsStatus(err, 409) {
@@ -108,7 +116,7 @@ func (m *Mux) launch(w *Window) {
 	m.mu.Lock()
 	if w.closed {
 		m.mu.Unlock()
-		m.terminate(run.ID)
+		m.terminate(w.Endpoint, run.ID)
 		return
 	}
 	w.RunID = run.ID
@@ -134,7 +142,7 @@ func (m *Mux) relaunch(w *Window) {
 		w.cancel = nil
 	}
 	delete(m.byRun, old)
-	m.considered[old] = true
+	m.considerLocked(w.Endpoint, old)
 	m.dropClaimedLocked(old)
 	w.RunID = ""
 	w.phase = phaseStarting
@@ -152,7 +160,7 @@ func (m *Mux) relaunch(w *Window) {
 	m.repaintLocked()
 	m.mu.Unlock()
 	if old != "" {
-		m.goSafe(func() { m.terminate(old) })
+		m.goSafe(func() { m.terminate(w.Endpoint, old) })
 	}
 	m.wg.Add(1)
 	m.goSafe(func() {
@@ -164,39 +172,44 @@ func (m *Mux) relaunch(w *Window) {
 // spareStates are the states a waiting spare may be claimed in.
 var spareStates = map[string]bool{"running": true, "submitted": true, "scheduled": true, "provisioning": true, "starting": true}
 
-// claimSpare takes the waiting spare of w's spec (config.SpecKey), if its
-// profile keeps one and it is running or on its way. The Run keeps its
-// spare label, so the claim is recorded in the session file. A spare
-// found gone, stopped or ended is terminated (unless it is) and replaced.
+// claimSpare takes the waiting spare of w's spec on w's endpoint (its
+// slot, config.SpareSlot), if its profile keeps one and it is running or
+// on its way. The Run keeps its spare label, so the claim is recorded in
+// the session file. A spare found gone, stopped or ended is terminated
+// (unless it is) and replaced.
 func (m *Mux) claimSpare(w *Window) string {
 	m.mu.Lock()
-	key := ""
+	slot := ""
 	if w.Spec.WarmSpare {
-		key = config.SpecKey(w.Spec)
+		slot = config.SpareSlot(config.SpecKey(w.Spec), w.Endpoint, m.eps.Default())
 	}
 	id := ""
-	if key != "" {
-		id = m.sess.Spares[key]
+	if slot != "" {
+		id = m.sess.Spares[slot]
 		if id != "" {
-			delete(m.sess.Spares, key)
+			m.dropSpareLocked(slot)
 			m.saveLocked()
 		}
 	}
 	m.mu.Unlock()
-	if key == "" {
+	if slot == "" {
 		return ""
 	}
 	// Whether or not this one is taken, the profile's slot is refilled.
-	defer m.replaceSpare(key)
+	defer m.replaceSpare(slot)
 	if id == "" {
 		return ""
 	}
+	lux, err := m.clientOf(w.Endpoint)
+	if err != nil {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
-	run, err := m.lux.Get(ctx, id)
+	run, err := lux.Get(ctx, id)
 	cancel()
 	if err != nil || !spareStates[run.State] {
 		if err != nil || state.Live(run.State) {
-			m.goSafe(func() { m.terminate(id) })
+			m.goSafe(func() { m.terminate(w.Endpoint, id) })
 		}
 		return ""
 	}
@@ -207,14 +220,33 @@ func (m *Mux) claimSpare(w *Window) string {
 	return id
 }
 
-// replaceSpare submits a new spare for spec key when a configured profile
+// spareSlotOf is the slot of profile p's spare: its spec on its endpoint.
+func (m *Mux) spareSlotOf(p config.Profile) string {
+	return config.SpareSlot(config.SpecKey(p), m.eps.Of(p), m.eps.Default())
+}
+
+// spareEndpointLocked is the endpoint slot's spare lives on.
+func (m *Mux) spareEndpointLocked(slot string) config.Endpoint {
+	if ep, ok := m.sess.SpareEndpoints[slot]; ok {
+		return ep
+	}
+	return m.eps.Default()
+}
+
+// dropSpareLocked forgets slot's spare.
+func (m *Mux) dropSpareLocked(slot string) {
+	delete(m.sess.Spares, slot)
+	delete(m.sess.SpareEndpoints, slot)
+}
+
+// replaceSpare submits a new spare for slot when a configured profile
 // with warm_spare has it: spares are kept for profiles only, not for a
 // dialog's unsaved spec. It is called from goroutines in m.wg, so the
 // session's shutdown waits for the submit too.
-func (m *Mux) replaceSpare(key string) {
+func (m *Mux) replaceSpare(slot string) {
 	cfg := m.config()
 	for _, n := range cfg.ProfileNames() {
-		if p := cfg.Profiles[n]; p.WarmSpare && config.SpecKey(p) == key {
+		if p := cfg.Profiles[n]; p.WarmSpare && m.spareSlotOf(p) == slot {
 			m.wg.Add(1)
 			m.goSafe(func() {
 				defer m.wg.Done()
@@ -231,7 +263,7 @@ func (m *Mux) dropClaimedLocked(id string) {
 }
 
 // keepSpares keeps one waiting spare of every configured profile with
-// warm_spare on.
+// warm_spare on, on the profile's endpoint.
 func (m *Mux) keepSpares() {
 	defer m.wg.Done()
 	cfg := m.config()
@@ -242,15 +274,16 @@ func (m *Mux) keepSpares() {
 	}
 }
 
-// ensureSpare submits a spare of profile name, keyed by its spec, unless
-// there is one. A submit in flight when the session detaches is waited
-// for (shutdown waits on m.wg) and its Run recorded; one in flight when
-// the session ends is terminated.
+// ensureSpare submits a spare of profile name on its endpoint, in the
+// slot of its spec there, unless there is one. A submit in flight when
+// the session detaches is waited for (shutdown waits on m.wg) and its Run
+// recorded; one in flight when the session ends is terminated.
 func (m *Mux) ensureSpare(name string, p config.Profile) {
-	key := config.SpecKey(p)
-	if key == "" {
+	slot := m.spareSlotOf(p)
+	if slot == "" {
 		return
 	}
+	ep := m.eps.Of(p)
 	m.mu.Lock()
 	if m.ending || m.ctx.Err() != nil {
 		m.mu.Unlock()
@@ -259,44 +292,54 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	if m.sess.Spares == nil {
 		m.sess.Spares = map[string]string{}
 	}
-	if _, ok := m.sess.Spares[key]; ok {
+	if _, ok := m.sess.Spares[slot]; ok {
 		m.mu.Unlock()
 		return
 	}
-	m.sess.Spares[key] = "" // reserved while submitting
+	m.sess.Spares[slot] = "" // reserved while submitting
+	if ep != m.eps.Default() {
+		if m.sess.SpareEndpoints == nil {
+			m.sess.SpareEndpoints = map[string]config.Endpoint{}
+		}
+		m.sess.SpareEndpoints[slot] = ep
+	}
 	m.mu.Unlock()
-	secrets, err := p.ResolveSecrets(m.opt.Lookup)
+	lux, err := m.clientOf(ep)
 	var run *api.Run
 	if err == nil {
-		var sp api.RunSpec
-		sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
+		var secrets map[string]string
+		secrets, err = p.ResolveSecrets(m.opt.Lookup)
 		if err == nil {
-			// Not cancelled by a detach: lux may make the Run anyway,
-			// and luxmux must learn its id to record it. A switch does
-			// cancel it (stopSpares): the next attach's listing records
-			// the Run lux made (sessions.Open).
-			ctx, cancel := context.WithTimeout(m.spareCtx, 30*time.Second)
-			run, err = m.lux.Submit(ctx, sp)
-			cancel()
+			var sp api.RunSpec
+			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
+			if err == nil {
+				// Not cancelled by a detach: lux may make the Run anyway,
+				// and luxmux must learn its id to record it. A switch does
+				// cancel it (stopSpares): the next attach's listing records
+				// the Run lux made (sessions.Open).
+				ctx, cancel := context.WithTimeout(m.spareCtx, 30*time.Second)
+				run, err = lux.Submit(ctx, sp)
+				cancel()
+			}
 		}
 	}
 	m.mu.Lock()
 	if m.ending {
 		m.mu.Unlock()
 		if err == nil {
-			m.terminate(run.ID)
+			m.terminate(ep, run.ID)
 		}
 		return
 	}
 	defer m.mu.Unlock()
 	if err != nil {
-		delete(m.sess.Spares, key)
+		m.dropSpareLocked(slot)
 		if m.ctx.Err() == nil {
 			m.setNoticeLocked(fmt.Sprintf("warm spare for %s: %s", name, luxapi.Describe(err)))
 		}
 		return
 	}
-	m.sess.Spares[key] = run.ID
+	m.sess.Spares[slot] = run.ID
 	m.saveLocked()
 }
 
@@ -400,13 +443,17 @@ func (m *Mux) Recent() (images, repos []string) {
 	return slices.Clone(m.sess.RecentImages), slices.Clone(m.sess.RecentRepos)
 }
 
-// Validate is lux's dry run of the spec a profile makes.
+// Validate is lux's dry run of the spec a profile makes, on its lux.
 func (m *Mux) Validate(ctx context.Context, name string, p config.Profile) (*api.SubmitAnswer, error) {
 	sp, err := config.RunSpec(p, config.Target{Session: m.label, Profile: name}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return m.lux.Validate(ctx, sp)
+	lux, err := m.clientOf(m.eps.Of(p))
+	if err != nil {
+		return nil, err
+	}
+	return lux.Validate(ctx, sp)
 }
 
 // SaveProfileFunc writes a profile into the configuration file; tests

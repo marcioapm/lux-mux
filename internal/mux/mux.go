@@ -51,10 +51,13 @@ type Options struct {
 	// when the session ends.
 	Console *Console
 	// Notice is shown once the session is on the terminal.
-	Notice   string
-	Config   *config.Config
-	Lux      *luxapi.Client
-	StateDir string
+	Notice string
+	Config *config.Config
+	// Endpoints makes the client of each window's lux. Nil: one made over
+	// Lux's configuration (the lux CLI's), Lux its default endpoint's.
+	Endpoints *luxapi.Endpoints
+	Lux       *luxapi.Client
+	StateDir  string
 	// In is the keyboard (raw mode is the caller's), Out the terminal.
 	In  io.Reader
 	Out io.Writer
@@ -102,6 +105,7 @@ type Options struct {
 // Mux is one attached session.
 type Mux struct {
 	opt  Options
+	eps  *luxapi.Endpoints
 	lux  *luxapi.Client
 	keys *keys.Machine
 	in   *input
@@ -146,7 +150,12 @@ type Mux struct {
 	// adoption (considerRun), and those of windows closed or relaunched,
 	// which are never adopted back.
 	considered map[string]bool
-	byRun      map[string]*Window
+	// consideredOn is the endpoint each considered id was seen on, so a
+	// listing of one endpoint prunes only its own.
+	consideredOn map[string]config.Endpoint
+	byRun        map[string]*Window
+	// feeds are the endpoints whose event stream is followed: one each.
+	feeds map[config.Endpoint]bool
 	// promptState is the open prompt.
 	promptState *prompt
 	// shown is the window whose screen the terminal shows, painted and
@@ -227,18 +236,31 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	if opt.Label == "" {
 		opt.Label = opt.Session
 	}
-	m := &Mux{opt: opt, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
+	eps := opt.Endpoints
+	if eps == nil {
+		var base api.Config
+		if opt.Lux != nil {
+			base = api.Config{URL: opt.Lux.C.Base, APIKey: opt.Lux.C.Key, Tenant: opt.Lux.C.Tenant}
+		}
+		eps = luxapi.NewEndpoints(base, opt.Lookup)
+	}
+	m := &Mux{opt: opt, eps: eps, lux: opt.Lux, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
-		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, done: make(chan string, 1)}
+		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
+		feeds: map[config.Endpoint]bool{}, done: make(chan string, 1)}
+	if m.lux == nil {
+		m.lux, _ = eps.Client(eps.Default())
+	}
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())
+	def := eps.Default()
 	for _, sw := range sess.Windows {
 		spec := opt.Config.Profiles[sw.Profile]
 		if sw.Spec != nil {
 			spec = *sw.Spec
 		}
-		w := m.newWindow(sw.Name, sw.Profile, spec)
+		w := m.newWindow(sw.Name, sw.Profile, spec, sw.EndpointOr(def))
 		w.RunID = sw.RunID
 		m.windows = append(m.windows, w)
 		m.byRun[w.RunID] = w
@@ -291,8 +313,23 @@ func (m *Mux) DefaultProfile() string {
 	return m.opt.Config.DefaultProfile
 }
 
-// Lux is the lux client.
-func (m *Mux) Lux() *luxapi.Client { return m.lux }
+// Endpoint is the lux a window of profile p is made on.
+func (m *Mux) Endpoint(p config.Profile) config.Endpoint { return m.eps.Of(p) }
+
+// DefaultEndpoint is the lux CLI configuration's lux.
+func (m *Mux) DefaultEndpoint() config.Endpoint { return m.eps.Default() }
+
+// Pools are the pools a window of profile p may use, on p's lux.
+func (m *Mux) Pools(ctx context.Context, p config.Profile) ([]api.Pool, error) {
+	c, err := m.eps.Client(m.eps.Of(p))
+	if err != nil {
+		return nil, err
+	}
+	return c.Pools(ctx)
+}
+
+// clientOf is ep's client.
+func (m *Mux) clientOf(ep config.Endpoint) (*luxapi.Client, error) { return m.eps.Client(ep) }
 
 // Terminal is where dialogs draw, in order with everything else written
 // to the terminal, and its size.
@@ -342,15 +379,26 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 			m.startSupervisor(w)
 		}
 	}
+	// Every lux the configured profiles name, the session's windows live
+	// on, or the rebuild could not list: one event stream and listing each.
+	eps := m.opt.Config.Endpoints(m.eps.Base())
+	for _, w := range m.windows {
+		eps = append(eps, w.Endpoint)
+	}
+	for _, ep := range m.sess.Unlisted {
+		eps = append(eps, ep)
+		m.setNoticeLocked("lux " + ep.Label() + ": endpoint unreachable; its windows are added when it answers")
+	}
+	for _, ep := range eps {
+		m.followEndpointLocked(ep)
+	}
 	m.repaintLocked()
 	m.saveLocked()
 	if m.opt.Notice != "" {
 		m.setNoticeLocked(m.opt.Notice)
 	}
 	m.mu.Unlock()
-	m.wg.Add(3)
-	m.goSafe(m.discoverWindows)
-	m.goSafe(m.followEvents)
+	m.wg.Add(1)
 	m.goSafe(m.keepSpares)
 	m.goSafe(func() {
 		defer close(m.inputDone)
@@ -710,7 +758,8 @@ func (m *Mux) saveLocked() {
 			continue
 		}
 		spec := w.Spec
-		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec})
+		ep := w.Endpoint
+		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep})
 	}
 	s.Active, s.Last = m.active, m.last
 	if m.opt.StateDir != "" {
@@ -723,9 +772,11 @@ func (m *Mux) Windows() []WindowInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]WindowInfo, 0, len(m.windows))
+	def := m.eps.Default()
 	for i, w := range m.windows {
 		out = append(out, WindowInfo{Index: i, Name: w.Name, RunID: w.RunID, State: m.stateWordLocked(w),
-			Image: w.Spec.Image, Size: sizeWord(w.Spec), Repo: repoWord(w.Spec), Created: w.created, Active: i == m.active})
+			Image: w.Spec.Image, Size: sizeWord(w.Spec), Repo: repoWord(w.Spec), Created: w.created, Active: i == m.active,
+			Endpoint: w.Endpoint.Label(), OtherEndpoint: w.Endpoint != def})
 	}
 	return out
 }
@@ -741,6 +792,10 @@ type WindowInfo struct {
 	Repo    string
 	Created time.Time
 	Active  bool
+	// Endpoint is the window's lux and tenant; OtherEndpoint: not the
+	// lux CLI configuration's.
+	Endpoint      string
+	OtherEndpoint bool
 }
 
 func sizeWord(p config.Profile) string {
@@ -869,7 +924,7 @@ func (m *Mux) Kill(i int) {
 // notice, when set, is shown afterwards.
 func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	if terminate && w.RunID != "" {
-		m.terminate(w.RunID)
+		m.terminate(w.Endpoint, w.RunID)
 	}
 	m.mu.Lock()
 	i := m.indexLocked(w)
@@ -885,7 +940,7 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)
-	m.considered[w.RunID] = true
+	m.considerLocked(w.Endpoint, w.RunID)
 	m.dropClaimedLocked(w.RunID)
 	m.closeFeedLocked(w)
 	if len(m.windows) == 0 {
@@ -927,17 +982,21 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) {
 func (m *Mux) endSession() {
 	m.mu.Lock()
 	m.ending = true
-	spares := make([]string, 0, len(m.sess.Spares))
-	for _, id := range m.sess.Spares {
+	type spare struct {
+		ep config.Endpoint
+		id string
+	}
+	spares := make([]spare, 0, len(m.sess.Spares))
+	for slot, id := range m.sess.Spares {
 		if id != "" {
-			spares = append(spares, id)
+			spares = append(spares, spare{m.spareEndpointLocked(slot), id})
 		}
 	}
-	m.sess.Spares = nil
+	m.sess.Spares, m.sess.SpareEndpoints = nil, nil
 	m.mu.Unlock()
-	sort.Strings(spares)
-	for _, id := range spares {
-		m.terminate(id)
+	sort.Slice(spares, func(i, j int) bool { return spares[i].id < spares[j].id })
+	for _, s := range spares {
+		m.terminate(s.ep, s.id)
 	}
 	if m.opt.StateDir != "" {
 		m.mu.Lock()
@@ -949,12 +1008,16 @@ func (m *Mux) endSession() {
 	m.finish("exited")
 }
 
-// terminate terminates a Run, retrying a few times on errors.
-func (m *Mux) terminate(id string) {
+// terminate terminates a Run on ep, retrying a few times on errors.
+func (m *Mux) terminate(ep config.Endpoint, id string) {
+	c, err := m.clientOf(ep)
+	if err != nil {
+		return
+	}
 	d := m.opt.Backoff
 	for range 5 {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err := m.lux.Terminate(ctx, id)
+		err := c.Terminate(ctx, id)
 		cancel()
 		if err == nil {
 			return
