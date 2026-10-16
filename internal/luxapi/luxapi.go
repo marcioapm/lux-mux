@@ -56,15 +56,23 @@ func (e *Endpoints) Of(p config.Profile) config.Endpoint { return p.Endpoint(e.b
 // and where its key was looked for, never a key.
 func (e *Endpoints) Client(ep config.Endpoint) (*Client, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if c := e.byEP[ep]; c != nil {
+	c := e.byEP[ep]
+	e.mu.Unlock()
+	if c != nil {
 		return c, nil
 	}
+	// The key is read without the lock: a key file that is slow to read
+	// holds up only its own endpoint's lookups.
 	cfg, err := ep.Config(e.base, e.lookup)
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{C: api.FromConfig(cfg)}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c := e.byEP[ep]; c != nil {
+		return c, nil
+	}
+	c = &Client{C: api.FromConfig(cfg)}
 	e.byEP[ep] = c
 	return c, nil
 }

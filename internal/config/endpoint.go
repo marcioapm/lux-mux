@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/marcioapm/lux/api"
 )
@@ -147,20 +149,38 @@ func (e Endpoint) Config(base api.Config, lookup func(string) (string, bool)) (a
 	return cfg, nil
 }
 
-// ReadKeyFile reads an API key file: its first line, trimmed. A file
-// group or others may read is refused, as ssh does a private key.
+// keyFileLimit bounds what is read of a key file.
+const keyFileLimit = 4096
+
+// currentUID is the user a key file must belong to.
+var currentUID = os.Getuid
+
+// ReadKeyFile reads an API key file: its first line, trimmed. The file is
+// opened once and checked through that descriptor, so what is checked is
+// what is read. It must be a regular file owned by this user that group
+// and others cannot read, as ssh requires of a private key. A symlink is
+// followed: its target is what is checked. O_NONBLOCK keeps the open of
+// a FIFO from waiting for a writer; the type check then refuses it.
 func ReadKeyFile(path string) (string, error) {
-	fi, err := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("api_key_file: %w", err)
 	}
-	if fi.IsDir() {
-		return "", fmt.Errorf("api_key_file %s: a directory", path)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("api_key_file: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("api_key_file %s: not a regular file (%s)", path, fi.Mode().Type())
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return "", fmt.Errorf("api_key_file %s: mode %#o lets group or others read it; chmod 600 %s", path, perm, path)
 	}
-	b, err := os.ReadFile(path)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != currentUID() {
+		return "", fmt.Errorf("api_key_file %s: owned by uid %d, not by this user (uid %d)", path, st.Uid, currentUID())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, keyFileLimit))
 	if err != nil {
 		return "", fmt.Errorf("api_key_file: %w", err)
 	}

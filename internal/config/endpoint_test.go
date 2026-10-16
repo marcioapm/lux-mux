@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/api"
 )
@@ -128,6 +130,65 @@ func TestKeyPrecedence(t *testing.T) {
 		case err != nil || cfg.APIKey != c.want || cfg.URL != base.URL:
 			t.Errorf("case %d: %v %q, want %q", i, err, cfg.APIKey, c.want)
 		}
+	}
+}
+
+// TestKeyFileKinds: a key file is read only when it is a regular file of
+// this user's: a FIFO is refused at once (no wait for a writer), and so
+// are a directory and a file of another uid. A symlink is followed and
+// its target checked.
+func TestKeyFileKinds(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo.key")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := ReadKeyFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("fifo: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO key file blocked")
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadKeyFile(sub); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory: %v", err)
+	}
+
+	private := filepath.Join(dir, "private.key")
+	writeFile(t, private, fakeKeyA+"\n")
+	link := filepath.Join(dir, "link.key")
+	if err := os.Symlink(private, link); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := ReadKeyFile(link); err != nil || k != fakeKeyA {
+		t.Fatalf("symlink to a 0600 file: %q %v", k, err)
+	}
+	shared := filepath.Join(dir, "shared.key")
+	writeFile(t, shared, fakeKeyA+"\n")
+	if err := os.Chmod(shared, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link2 := filepath.Join(dir, "link2.key")
+	if err := os.Symlink(shared, link2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadKeyFile(link2); err == nil || !strings.Contains(err.Error(), "chmod 600") || strings.Contains(err.Error(), fakeKeyA) {
+		t.Fatalf("symlink to a 0644 file: %v", err)
+	}
+
+	// The file is this process's; another user's uid is refused.
+	defer func(f func() int) { currentUID = f }(currentUID)
+	uid := os.Getuid()
+	currentUID = func() int { return uid + 1 }
+	if _, err := ReadKeyFile(private); err == nil || !strings.Contains(err.Error(), "not by this user") || strings.Contains(err.Error(), fakeKeyA) {
+		t.Fatalf("another user's file: %v", err)
 	}
 }
 
