@@ -352,10 +352,13 @@ on_resume = 'cd "$LUXMUX_REPO_DIR" && claude --continue'
   later placement: a move, a drain, a resume. Neither runs when luxmux
   attaches again to the same shell (a reconnect, a new luxmux process),
   because no process starts then.
-- Both run in the window's shell process, as `sh -c "$command"`, so their
-  output is on the screen and in its scrollback. They see the profile's
-  `env` and secrets, and every variable below. A command that exits
-  non-zero prints one line (`luxmux: on_start exited with status N;
+- Both run before the shell, as a child `sh -c "$command"` of the window's
+  start wrapper, on the window's terminal, so their output is on the screen
+  and in its scrollback. They are not run by the shell you get: a `cd`,
+  an `export` or a `set` in a hook does not carry over to the prompt.
+  They see the profile's `env` and secrets, and every variable below, and
+  start in the Run's working directory (`LUXMUX_WORKDIR`). A command that
+  exits non-zero prints one line (`luxmux: on_start exited with status N;
   starting the shell`), and the shell starts as usual.
 - The dialog has an `on start` and an `on resume` field, saved by "save as
   profile". `luxmux new` and `new-window` take `--on-start` and
@@ -367,7 +370,17 @@ the image has no bash). lux's `init.script` is not used: its output goes
 to the Run's log, not the window, and a failing init fails the Run. A
 profile without commands gets the wrapper too, for the variables. It prints
 nothing, and the shell starts as before. Start and resume are told apart
-by a marker on the state volume, `/workspace/.luxmux/started`.
+by a marker on the state volume, `/workspace/.luxmux/started`, written
+just **before** `on_start` runs. `on_start` is attempted at most once: if
+it fails, or the Run moves or stops while it runs, it is not run again;
+the next placement runs `on_resume`. Make `on_resume` tolerate a start
+that did not finish, or have `on_start` leave its own marker.
+
+`LUXMUX_DISK` and `LUXMUX_BRANCH_CHECKED_OUT` come from `df` (or `stat`)
+and `git`. Each is given 1 s through the image's `timeout` utility; one
+that does not answer in time leaves its variable empty. An image without a
+usable `timeout -k` leaves both empty rather than wait on them. Hooks are
+never timed out.
 
 With `warm_spare`, a spare's Run starts before any window takes it, so
 `on_start` runs in the spare (that is what makes it warm). Its output is in
@@ -381,7 +394,7 @@ spare is only taken by a window with the same commands.
 | `LUXMUX_PROFILE`, `LUXMUX_IMAGE`, `LUXMUX_POOL`, `LUXMUX_SIZE` | as asked (`LUXMUX_SIZE` only on a shaped pool) |
 | `LUXMUX_REPOSITORY`, `LUXMUX_BRANCH`, `LUXMUX_REPO_NAME`, `LUXMUX_REPO_DIR` | the first repository; `LUXMUX_BRANCH` as asked, empty for the remote's HEAD |
 | `LUXMUX_WORKDIR` | the shell's working directory |
-| `LUXMUX_REPOSITORIES` | one `name<TAB>url<TAB>branch<TAB>path` line per repository |
+| `LUXMUX_REPOSITORIES` | one `name<TAB>url<TAB>branch<TAB>path` line per repository; a profile whose list would exceed 120 KiB is refused (Linux limits one environment string to 128 KiB) |
 | `LUXMUX_CPU` | the cgroup's CPU quota (`2`, `0.5`); empty when unlimited or unknown |
 | `LUXMUX_MEMORY` | the cgroup's memory limit in bytes; empty when unlimited or unknown |
 | `LUXMUX_DISK` | the size of the `/workspace` volume in bytes |
@@ -399,8 +412,15 @@ until one takes it, and a window can be renamed (`C-b ,`), so a value in
 the spec, or in a running shell's environment, would be wrong. luxmux
 writes the name with lux's exec API when the window attaches and when it
 is renamed (best effort, 5 s each; one that fails is tried again at the
-next attach). Secrets are never in these variables or in the file, and a
-profile cannot name a secret or an `env` entry after one of them.
+next attach). Both writers (the wrapper on each placement, the name write
+over exec) take an exclusive `flock` on `/workspace/.luxmux/env.lock`, wait
+at most 2 s for it, and regenerate the whole file from the current facts
+(`facts.sh`) and name (`window.sh`); a crashed writer's lock is released by
+the kernel. An image without `flock(1)` gets no env file, the variables
+are still in the shell's environment. Secrets are never in these
+variables or in the file: a profile cannot name a secret or an `env` entry
+after one of them, nor a secret with lux's `LUX_` prefix (lux sets
+`LUX_RUN_ID` and others in every Run).
 
 ## Moves and reconnects
 
@@ -487,6 +507,18 @@ stopped or ended when claimed is terminated and replaced. **A spare is a running
 billed while it waits**: enable it only where instant windows are worth
 that. `kill-session` and `luxmux spares --rm` terminate spares; the
 session's last window closing does too.
+
+A spare recorded for a spec no configured warm-spare profile has any more
+(the profile was edited, or warm_spare turned off, on that lux) can never be
+taken. On attach luxmux terminates it. **Upgrading luxmux can change every
+profile's spec** (the window's start command is part of it), so the first
+attach after an upgrade replaces each session's spares. Each old spare is
+first recorded in the session file as a leftover, then terminated, and
+forgotten once lux confirms. One that cannot be terminated (its lux down,
+its key refused) shows a `cannot terminate` notice, stays recorded, and is
+tried again at the next attach. Spares of
+sessions you do not attach again are not touched: `luxmux spares --rm`
+removes them.
 
 ## Sessions and local state
 

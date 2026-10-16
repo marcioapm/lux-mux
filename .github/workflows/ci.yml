@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: install busybox
+        run: sudo apt-get update && sudo apt-get install -y busybox
       - name: gofmt
         run: |
           out="$(gofmt -l .)"
@@ -24,6 +26,12 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+      # TestStartWrapper only logs when busybox is missing: fail here
+      # unless its busybox subtest ran and passed.
+      - name: start wrapper under busybox sh
+        run: |
+          go test -count=1 -run 'TestStartWrapper/busybox' -v ./internal/config | tee "$RUNNER_TEMP/busybox.log"
+          grep -q -- '--- PASS: TestStartWrapper/busybox' "$RUNNER_TEMP/busybox.log"
   mux-norace:
     runs-on: ubuntu-latest
     steps:

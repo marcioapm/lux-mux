@@ -54,7 +54,8 @@ const (
 	// stName is the new-session dialog's session name.
 	stName
 	stOnStart
-	stOnResume // stRepos is where the repository rows' stops start: row i's URL is
+	stOnResume
+	// stRepos is where the repository rows' stops start: row i's URL is
 	// repoURL(i), its branch repoBranch(i).
 	stRepos stop = 1000
 	// stRepo and stBranch are the first row's.
