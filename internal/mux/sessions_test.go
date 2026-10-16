@@ -796,6 +796,55 @@ func TestSessionPreviewClosedOnMove(t *testing.T) {
 	h.detach()
 }
 
+// TestSessionPreviewDebounced: a highlight moved through sessions faster
+// than previewDelay attaches none of those it left; the one it stays on
+// is attached once.
+func TestSessionPreviewDebounced(t *testing.T) {
+	h := newMulti(t)
+	idB := h.make("b", "B-SCREEN")
+	idC := h.make("c", "C-SCREEN")
+	idD := h.make("d", "D-SCREEN")
+	h.attach("a")
+	h.on("a")
+	attaches := func(id string) int {
+		n := 0
+		for _, a := range h.lux.Attaches() {
+			if a.RunID == id {
+				n++
+			}
+		}
+		return n
+	}
+	before := map[string]int{idB: attaches(idB), idC: attaches(idC), idD: attaches(idD)}
+	res := make(chan string, 1)
+	h.ui.sessionOpen = func(m *Mux) {
+		for range 3 {
+			for _, n := range []string{"b", "c"} {
+				m.SessionPreview(n, 10, 80)
+				time.Sleep(previewDelay / 5)
+			}
+		}
+		if !fakelux.WaitFor(context.Background(), 5*time.Second, func() bool {
+			return strings.Contains(strings.Join(m.SessionPreview("d", 10, 80), "\n"), "D-SCREEN")
+		}) {
+			res <- "d's preview did not come"
+			return
+		}
+		time.Sleep(2 * previewDelay)
+		res <- ""
+	}
+	h.type_("\x02s")
+	if msg := <-res; msg != "" {
+		t.Fatal(msg)
+	}
+	for id, n := range map[string]int{idB: 0, idC: 0, idD: 1} {
+		if got := attaches(id) - before[id]; got != n {
+			t.Errorf("%s attached %d times for previews, want %d", id, got, n)
+		}
+	}
+	h.detach()
+}
+
 // TestSessionPreview: the preview of another session's shown window comes
 // from a restore attach that does not resize it; one attached elsewhere
 // is not attached at all; the preview's stream ends with the chooser.

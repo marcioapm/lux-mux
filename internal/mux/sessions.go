@@ -417,28 +417,32 @@ func (m *Mux) RenameSession(old, new string) error {
 		unlockOld()
 		return err
 	}
+	// Move's steps for the session attached here, the file I/O off m.mu:
+	// the rename entry, then (under m.mu, with the name) new's file from
+	// the state, then old's file goes.
+	dir := m.opt.StateDir
+	if err := state.SetRenamed(dir, old, new, label); err != nil {
+		unlockNew()
+		return err
+	}
 	m.mu.Lock()
 	if m.ctx.Err() != nil {
 		// Detaching or switching: its lock is being released.
 		m.mu.Unlock()
 		unlockNew()
+		_ = state.SetRenamed(dir, new, old, label)
 		return errors.New("the session is detaching")
-	}
-	m.saveLocked()
-	if err = sessions.Move(m.opt.StateDir, old, new, label); err != nil {
-		m.mu.Unlock()
-		unlockNew()
-		return err
 	}
 	m.name, m.sess.Name = new, new
 	unlockOld, m.unlock = m.unlock, unlockNew
 	m.saveLocked()
 	m.overlayGoneLocked()
 	m.mu.Unlock()
+	err = state.Remove(dir, old)
 	if unlockOld != nil {
 		unlockOld()
 	}
-	return nil
+	return err
 }
 
 // askRenameSessionLocked is C-b $: a prompt for the session's new name.
@@ -489,17 +493,30 @@ func (m *Mux) openSessionChooser() {
 // emulator of its own. It takes no lock: a session attached elsewhere is
 // not previewed at all.
 type sessionPreview struct {
-	mu     sync.Mutex
-	name   string
+	mu   sync.Mutex
+	name string
+	// want is the session the highlight is on, previewed once it stayed
+	// there previewDelay; gen counts stops, so a start due before the
+	// last stop does not happen.
+	want   string
+	gen    int
 	msg    string
 	emu    *vterm.Terminal
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
+// previewDelay is how long the highlight stays on a session before its
+// preview attaches: each attach costs the host a restore snapshot, and a
+// highlight moved through several sessions needs none of theirs.
+const previewDelay = 100 * time.Millisecond
+
+const previewWaiting = "reading its screen from lux…"
+
 // SessionPreview renders rows×cols of session name's shown window: this
 // session's from its emulator, another's from a restore attach to its
-// Run, kept open while name stays the one previewed.
+// Run, made once the highlight stayed on name for previewDelay and kept
+// open while it does. A move to another session closes the previous one.
 func (m *Mux) SessionPreview(name string, rows, cols int) []string {
 	if rows <= 0 || cols <= 0 {
 		return nil
@@ -516,37 +533,50 @@ func (m *Mux) SessionPreview(name string, rows, cols int) []string {
 	}
 	p := &m.preview
 	p.mu.Lock()
-	if p.name != name {
+	switch {
+	case p.name == name:
+		defer p.mu.Unlock()
+		if p.emu == nil {
+			return []string{"  " + p.msg}
+		}
+		return screen.Preview(p.emu, rows, cols)
+	case p.want == name:
 		p.mu.Unlock()
-		m.stopSessionPreview()
-		m.startSessionPreview(name)
-		p.mu.Lock()
+		return []string{"  " + previewWaiting}
 	}
-	defer p.mu.Unlock()
-	if p.emu == nil {
-		return []string{"  " + p.msg}
-	}
-	return screen.Preview(p.emu, rows, cols)
+	p.mu.Unlock()
+	m.stopSessionPreview()
+	p.mu.Lock()
+	p.want = name
+	gen := p.gen
+	p.mu.Unlock()
+	time.AfterFunc(previewDelay, func() {
+		defer m.recoverPanic()
+		m.startSessionPreview(name, gen)
+	})
+	return []string{"  " + previewWaiting}
 }
 
-// startSessionPreview attaches to session name's shown window; after the
-// session ended it only says so.
-func (m *Mux) startSessionPreview(name string) {
+// startSessionPreview attaches to session name's shown window unless the
+// preview was stopped since gen; after the session ended it only says so.
+func (m *Mux) startSessionPreview(name string, gen int) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	done := make(chan struct{})
 	p := &m.preview
 	p.mu.Lock()
-	p.name, p.msg, p.emu, p.cancel, p.done = name, "reading its screen from lux…", nil, cancel, done
-	p.mu.Unlock()
-	if ctx.Err() != nil {
-		close(done)
+	if p.gen != gen || ctx.Err() != nil {
+		p.mu.Unlock()
+		cancel()
 		return
 	}
+	p.name, p.msg, p.emu, p.cancel, p.done = name, previewWaiting, nil, cancel, done
+	p.mu.Unlock()
 	m.mu.Lock()
 	rows, cols := m.rows, m.cols
 	m.mu.Unlock()
 	// Not in m.wg: shutdown waits for it through stopSessionPreview,
-	// once the input loop that starts it returned.
+	// once the input loop that starts it returned; a start due after
+	// that stop finds gen changed.
 	m.goSafe(func() {
 		defer close(done)
 		msg := m.followPreview(ctx, name, rows, cols)
@@ -633,12 +663,14 @@ func (m *Mux) shownRun(ctx context.Context, name string) (string, error) {
 	return s.Windows[0].RunID, nil
 }
 
-// stopSessionPreview ends the preview's stream and waits for its reader.
+// stopSessionPreview ends the preview's stream and waits for its reader;
+// a start still due is called off.
 func (m *Mux) stopSessionPreview() {
 	p := &m.preview
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
-	p.name, p.msg, p.emu, p.cancel, p.done = "", "", nil, nil, nil
+	p.name, p.want, p.msg, p.emu, p.cancel, p.done = "", "", "", nil, nil, nil
+	p.gen++
 	p.mu.Unlock()
 	if cancel != nil {
 		cancel()
