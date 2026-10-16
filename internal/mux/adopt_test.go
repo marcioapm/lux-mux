@@ -30,7 +30,14 @@ repositories = [{ url = "https://example.com/api.git", branch = "main" }, { url 
 // session s and for adoption, named name.
 func submitExternal(t *testing.T, h *harness, profile, name string) string {
 	t.Helper()
-	sp, err := config.RunSpec(h.cfg.Profiles[profile], config.Target{Session: "s", Profile: profile}, nil)
+	return submitExternalAs(t, h, profile, name, h.cfg.Profiles[profile])
+}
+
+// submitExternalAs is submitExternal of p, profile with new-window's
+// overrides on it.
+func submitExternalAs(t *testing.T, h *harness, profile, name string, p config.Profile) string {
+	t.Helper()
+	sp, err := config.RunSpec(p, config.Target{Session: "s", Profile: profile}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +432,50 @@ func TestAdoptedWindowRelaunchClaimsSpare(t *testing.T) {
 	h.waitFor("relaunched", func() bool { id := h.window(1); return id != "" && id != ext })
 	if got := h.window(1); got != spare {
 		t.Fatalf("relaunch made %s, want the spare %s", got, spare)
+	}
+	h.detach()
+}
+
+// TestAdoptedOverrideRelaunchKeepsResources: an adopted window made by
+// new-window --cpus 4 on the unsized warm_spare profile, on an unshaped
+// pool where lux records no sizing.requested, keeps its 4 CPUs: r on it
+// once ended submits cpus 4 and leaves the profile's spare waiting.
+func TestAdoptedOverrideRelaunchKeepsResources(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	h.waitFor("spare submitted", func() bool { return spareOf(h) != "" })
+	spare := spareOf(h)
+	p := h.cfg.Profiles["dev"]
+	p.CPUs = 4
+	ext := submitExternalAs(t, h, "dev", "ext", p)
+	if r := h.lux.Run(ext); r.Sizing != nil {
+		t.Fatalf("an unshaped pool's Run has sizing %+v", r.Sizing)
+	}
+	h.waitFor("adopted", func() bool { return h.nwindows() == 2 && h.window(1) == ext })
+	h.live(1)
+	h.lux.End(ext, "failed", "timeout")
+	h.type_("\x021")
+	h.waitFor("window 1 ended", func() bool { return h.activeIndex() == 1 && h.phase(1) == phaseDead })
+	submits := len(h.lux.Submits())
+	h.type_("\x02r")
+	h.waitFor("relaunched", func() bool { id := h.window(1); return id != "" && id != ext })
+	if got := h.window(1); got == spare {
+		t.Fatalf("relaunch claimed the unsized profile's spare %s", got)
+	}
+	var relaunch *api.RunSpec
+	for _, sp := range h.lux.Submits()[submits:] {
+		if sp.Labels[config.LabelSpare] != "true" {
+			relaunch = &sp
+		}
+	}
+	if relaunch == nil {
+		t.Fatal("no window Run submitted for the relaunch")
+	}
+	if relaunch.Resources.CPUs != 4 {
+		t.Fatalf("relaunch submitted cpus %v, want 4", relaunch.Resources.CPUs)
+	}
+	if got := spareOf(h); got != spare {
+		t.Fatalf("the profile's spare is %q, want %s still waiting", got, spare)
 	}
 	h.detach()
 }

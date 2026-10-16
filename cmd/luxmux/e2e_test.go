@@ -362,6 +362,56 @@ repositories=[{url="https://example.com/api.git",path="/workspace/api"},{url="ht
 	p.exited()
 }
 
+// TestNewWindowCPUsSurviveRebuild: luxmux new-window -p dev --cpus 4 on
+// an unshaped pool while the session is detached; with the session's file
+// gone, attach rebuilds the window from lux, which stores its defaults
+// and no sizing: the window keeps cpus 4 and nothing else.
+func TestNewWindowCPUsSurviveRebuild(t *testing.T) {
+	lux, env := e2eEnv(t)
+	var cfgHome, stateDir string
+	for _, s := range env {
+		if dir, ok := strings.CutPrefix(s, "XDG_CONFIG_HOME="); ok {
+			cfgHome = dir
+		}
+		if dir, ok := strings.CutPrefix(s, "XDG_STATE_HOME="); ok {
+			stateDir = filepath.Join(dir, "luxmux")
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(cfgHome, "luxmux"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "default_profile=\"dev\"\n[profiles.dev]\nimage=\"alpine\"\n"
+	if err := os.WriteFile(filepath.Join(cfgHome, "luxmux", "config.toml"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := startLuxmux(t, env, "new -s sized")
+	p.wait("prompt", has("$"))
+	p.typ("\x02d")
+	p.exited()
+	q := startLuxmux(t, env, "new-window -t sized -n big -p dev --cpus 4")
+	q.exited()
+	big := lux.RunIDs()[1]
+	if r := lux.Run(big); r.Spec.Resources.CPUs != 4 || r.Spec.Resources.Memory == 0 || r.Sizing != nil {
+		t.Fatalf("lux stored resources %+v sizing %+v, want cpus 4 with luxd's defaults and no sizing", r.Spec.Resources, r.Sizing)
+	}
+	if err := state.Remove(stateDir, "sized"); err != nil {
+		t.Fatal(err)
+	}
+	p = startLuxmux(t, env, "attach -t sized")
+	p.wait("prompt", has("$"))
+	p.typ("\x021")
+	p.wait("rebuilt window", func(string) bool { return p.scr.title() == "luxmux:sized [1] big" })
+	p.typ("\x02d")
+	p.exited()
+	s, ok, err := state.Load(stateDir, "sized")
+	if err != nil || !ok || len(s.Windows) != 2 || s.Windows[1].RunID != big || s.Windows[1].Spec == nil {
+		t.Fatalf("state %+v %v", s, err)
+	}
+	if got := *s.Windows[1].Spec; got.CPUs != 4 || got.Memory != "" || got.Disk != "" || got.Size != "" {
+		t.Fatalf("rebuilt window's spec %+v, want cpus 4 only", got)
+	}
+}
+
 // TestNewMissingSecretRefused: luxmux new with a --secret whose value is
 // nowhere exits 1 in a terminal, with no Run and no session file.
 func TestNewMissingSecretRefused(t *testing.T) {
