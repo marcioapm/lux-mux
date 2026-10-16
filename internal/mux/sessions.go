@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -286,7 +287,7 @@ func (m *Mux) Sessions() ([]SessionInfo, error) {
 		for i < len(out) && out[i].Name < m.name {
 			i++
 		}
-		out = append(out[:i], append([]SessionInfo{cur}, out[i:]...)...)
+		out = slices.Insert(out, i, cur)
 	}
 	return out, nil
 }
@@ -379,7 +380,8 @@ func (m *Mux) RenameSession(old, new string) error {
 		return err
 	}
 	current := old == m.Session()
-	var unlockOld func()
+	// The session attached here already holds old's lock.
+	unlockOld := func() {}
 	if !current {
 		u, err := state.Lock(m.opt.StateDir, old)
 		if err != nil {
@@ -389,9 +391,7 @@ func (m *Mux) RenameSession(old, new string) error {
 	}
 	unlockNew, err := state.Lock(m.opt.StateDir, new)
 	if err != nil {
-		if unlockOld != nil {
-			unlockOld()
-		}
+		unlockOld()
 		return fmt.Errorf("session %s: %w", new, err)
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
@@ -405,9 +405,7 @@ func (m *Mux) RenameSession(old, new string) error {
 	}
 	if err != nil {
 		unlockNew()
-		if unlockOld != nil {
-			unlockOld()
-		}
+		unlockOld()
 		return err
 	}
 	if !current {
