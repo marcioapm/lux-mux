@@ -86,14 +86,20 @@ func Load(dir, session string) (s *Session, ok bool, err error) {
 
 // Save writes the session's file atomically.
 func Save(dir string, s *Session) error {
+	return writeJSON(dir, s.Name+".*.tmp", Path(dir, s.Name), s)
+}
+
+// writeJSON writes v to path atomically, through a temporary file in dir
+// named after pattern (os.CreateTemp).
+func writeJSON(dir, pattern, path string, v any) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(s, "", "  ")
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, s.Name+".*.tmp")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -106,7 +112,7 @@ func Save(dir string, s *Session) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), Path(dir, s.Name))
+	return os.Rename(tmp.Name(), path)
 }
 
 // ErrLocked is Lock's error when another process has the session.
@@ -126,8 +132,7 @@ func Lock(dir, session string) (unlock func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, session+".lock")
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(lockPath(dir, session), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -139,11 +144,10 @@ func Lock(dir, session string) (unlock func(), err error) {
 		time.Sleep(lockEvery)
 	}
 	if err != nil {
-		b := make([]byte, 32)
-		n, _ := f.ReadAt(b, 0)
+		pid := lockPid(f)
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			if pid := strings.TrimSpace(string(b[:n])); pid != "" {
+			if pid != "" {
 				return nil, fmt.Errorf("%w (pid %s)", ErrLocked, pid)
 			}
 			return nil, ErrLocked
@@ -159,6 +163,15 @@ func Lock(dir, session string) (unlock func(), err error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}), nil
+}
+
+func lockPath(dir, session string) string { return filepath.Join(dir, session+".lock") }
+
+// lockPid is the pid a lock file names ("": none).
+func lockPid(f *os.File) string {
+	b := make([]byte, 32)
+	n, _ := f.ReadAt(b, 0)
+	return strings.TrimSpace(string(b[:n]))
 }
 
 // Remove deletes a session's file; a missing one is fine.
@@ -196,15 +209,12 @@ func List(dir string) ([]string, error) {
 // at once; Lock retries past it. It only probes a lock file that names a
 // pid (Unlock empties it).
 func Held(dir, session string) (pid string, held bool) {
-	f, err := os.Open(filepath.Join(dir, session+".lock"))
+	f, err := os.Open(lockPath(dir, session))
 	if err != nil {
 		return "", false
 	}
 	defer f.Close()
-	b := make([]byte, 32)
-	n, _ := f.ReadAt(b, 0)
-	pid = strings.TrimSpace(string(b[:n]))
-	if pid == "" {
+	if pid = lockPid(f); pid == "" {
 		// Unlock empties the file, and Lock writes its pid once it holds it.
 		return "", false
 	}
@@ -264,27 +274,7 @@ func DropRenamed(dir, name string) error {
 }
 
 func writeRenames(dir string, m map[string]string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".renames.*.tmp")
-	if err != nil {
-		return err
-	}
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return os.Rename(tmp.Name(), filepath.Join(dir, renamesFile))
+	return writeJSON(dir, ".renames.*.tmp", filepath.Join(dir, renamesFile), m)
 }
 
 // Live reports whether a Run's state is one a window can follow: anything
