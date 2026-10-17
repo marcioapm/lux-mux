@@ -311,7 +311,8 @@ func TestInfoReadAndExecPools(t *testing.T) {
 		enter(&inExec, &peakExec)
 		defer in.Add(-1)
 		defer inExec.Add(-1)
-		time.Sleep(200 * time.Millisecond)
+		// Span multiple read batches so an unbounded exec pool overlaps them.
+		time.Sleep(600 * time.Millisecond)
 		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
 	})
 	a.SetGetHook(func(string) {
