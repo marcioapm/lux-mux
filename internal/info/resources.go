@@ -119,7 +119,9 @@ var ErrBusy = errors.New("a resources read is in flight")
 // Sampler reads resources, at most one exec in flight per window, and
 // keeps each window's last cpu.stat sample: CPU in use is a rate, the
 // usage between two readings over the time between them. It never waits
-// for a second reading: until there is one, CPU in use is unknown.
+// for a second reading: until there is one, CPU in use is unknown. It
+// keeps one sample per placement read, for its own life: a Mux's is only
+// fed by the windows the dialog was opened on.
 type Sampler struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
@@ -193,26 +195,6 @@ func (s *Sampler) resources(key string, r Reading, at time.Time) *Resources {
 		}
 	}
 	return out
-}
-
-// Forget drops every sample but those of keep's keys.
-func (s *Sampler) Forget(keep ...string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k := range s.last {
-		if !containsKey(keep, k) {
-			delete(s.last, k)
-		}
-	}
-}
-
-func containsKey(l []string, k string) bool {
-	for _, x := range l {
-		if x == k {
-			return true
-		}
-	}
-	return false
 }
 
 // Dial is the client of a window's lux: each window is read on its own

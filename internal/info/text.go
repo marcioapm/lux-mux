@@ -109,8 +109,6 @@ func Lines(w Window, now time.Time) []Line {
 		add("stage", st)
 		if t.PlacementSince != nil {
 			add("uptime", Duration(now.Sub(*t.PlacementSince))+" (this placement)")
-		} else if t.UptimeSeconds != nil {
-			add("uptime", Duration(seconds(*t.UptimeSeconds))+" (this placement)")
 		}
 		if t.RuntimeSeconds != nil {
 			add("runtime", Duration(seconds(*t.RuntimeSeconds))+" (all placements)")
