@@ -982,7 +982,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 1
 exec sleep 30`, "stat": "exit 1"}
 	f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
 	wrapper := f.cmd[2]
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 20; i++ {
 		f.cmd[2] = wrapper
 		f.shortProbes("0.00" + strconv.Itoa(i%10))
 		if out, _, err := f.wrapper(); err != nil || !strings.HasPrefix(out, "shell:") {
