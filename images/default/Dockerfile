@@ -25,7 +25,8 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       bash git curl ca-certificates openssh-client ripgrep fd-find jq less vim nano unzip zip xz-utils \
-      procps iproute2 build-essential pkgconf python3 python3-venv locales tzdata; \
+      procps iproute2 build-essential pkgconf python3 python3-venv locales tzdata \
+      ffmpeg fonts-dejavu-core espeak-ng; \
     # fd-find's own `fd` is in /usr/lib/cargo/bin, off PATH; only fdfind is in /usr/bin.
     ln -s /usr/bin/fdfind /usr/local/bin/fd; \
     printf '%s\n' 'C.UTF-8 UTF-8' 'en_US.UTF-8 UTF-8' > /etc/locale.gen; \
@@ -77,6 +78,14 @@ RUN set -eux; \
     userdel --remove ubuntu; \
     useradd --create-home --uid 1000 --user-group --shell /bin/bash agent
 
+# edge-tts, like the agents, lives outside the home: a venv under /opt/uv-tools on the
+# system Python, its entry point linked into /usr/local/bin. Wheels only (no compiler
+# toolchain for Python headers here), no cache left behind, no managed-Python download.
+ARG EDGE_TTS_VERSION=7.3.1
+RUN set -eux; \
+    UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_DOWNLOADS=never \
+      uv tool install --no-cache --no-build --python /usr/bin/python3 "edge-tts==${EDGE_TTS_VERSION}"
+
 # Update checks and telemetry off, by each vendor's documented switch; a Run's env can override them.
 ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
@@ -95,7 +104,7 @@ ENV XDG_CACHE_HOME=/tmp/agent-cache \
 # The release version only labels the image; declared last so it invalidates nothing.
 ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
-      org.opencontainers.image.description="luxmux default workload image: shell tools, Node 26, Python with uv, Claude Code, OpenCode and Codex" \
+      org.opencontainers.image.description="luxmux default workload image: shell tools, Node 26, Python with uv, ffmpeg, espeak-ng and edge-tts, Claude Code, OpenCode and Codex" \
       org.opencontainers.image.licenses="ELv2" \
       org.opencontainers.image.version="${VERSION}"
 
