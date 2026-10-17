@@ -304,7 +304,8 @@ func sshScheme(s string) bool {
 }
 
 // plainSCP keeps SSH logins and local paths, but fails closed on passwords.
-// host:team@b:c.git is ambiguous with user:pass@host:path and is cut.
+// host:team@b:c.git is ambiguous with user:pass@host:path and is cut, and a
+// login-less host:o/r@main is hidden: it reads as user:pass@host.
 func plainSCP(u string) string {
 	head, _, _ := strings.Cut(u, "/")
 	first := strings.Index(head, "@")
