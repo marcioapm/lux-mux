@@ -1001,39 +1001,37 @@ exec sleep 30`, "stat": "exit 1"}
 	}
 }
 
-// TestWrapperProbeDeadlineSweep: with the deadline moved across the moment
-// df is forked, whatever instant the kill lands, no df outlives the
-// prompt and the facts are all or nothing.
+// TestWrapperProbeDeadlineSweep: df forks a child that ignores SIGTERM.
+// When df then SIGKILLs its process group, a kill landing right after a
+// fork, no child and no disk fact remain. When df prints and exits, the
+// disk fact is exactly its value and the probe's closing group kill still
+// reaches the child nothing recorded.
 func TestWrapperProbeDeadlineSweep(t *testing.T) {
-	fakes := map[string]string{"df": `trap '' TERM
-printf '%s\n' "$$" >>"$LM_STATE/df.pids"
-printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 10 0%% workspace\n'
-exec sleep 30`, "stat": "exit 1"}
-	f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
-	wrapper := f.cmd[2]
-	for i := 0; i < 20; i++ {
-		f.cmd[2] = wrapper
-		f.shortProbes("0.00" + strconv.Itoa(i%10))
-		if out, _, err := f.wrapper(); err != nil || !strings.HasPrefix(out, "shell:") {
-			t.Fatalf("%q %v", out, err)
-		}
-		if got := f.source(); got[EnvDisk] != "" && got[EnvDisk] != "10240" {
-			t.Fatalf("partial disk %q", got[EnvDisk])
-		}
-	}
-	b, _ := os.ReadFile(filepath.Join(f.state, "df.pids"))
-	for _, s := range strings.Fields(string(b)) {
-		pid, err := strconv.Atoi(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for end := time.Now().Add(2 * time.Second); syscall.Kill(pid, 0) == nil && time.Now().Before(end); {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-			syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("df %d outlived its deadline: %v", pid, err)
-		}
+	fork := `( trap '' TERM; exec sleep 30 ) >/dev/null &
+printf '%s' "$!" >"$LM_STATE/child.pid"
+`
+	for label, df := range map[string]string{"killed": fork + "kill -KILL 0", "done": fork + dfFake} {
+		t.Run(label, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, map[string]string{"df": df, "stat": "exit 1"}), Profile{Image: "alpine"})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := commandIn(ctx, f, f.cmd[1:])
+			// A probe outside its own group would kill this group, not the test's.
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			start := time.Now()
+			out, err := cmd.CombinedOutput()
+			if d := time.Since(start); err != nil || string(out) != "shell:start" || d > 4*time.Second {
+				t.Fatalf("%q %v after %v", out, err, d)
+			}
+			waitGone(t, readPid(t, filepath.Join(f.state, "child.pid")))
+			want := "10240"
+			if label == "killed" {
+				want = ""
+			}
+			if got := f.source(); got[EnvDisk] != want {
+				t.Fatalf("disk %q, want %q", got[EnvDisk], want)
+			}
+		})
 	}
 }
 
