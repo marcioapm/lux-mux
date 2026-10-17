@@ -775,8 +775,9 @@ exec sleep 30`
 		if err != nil || out != "shell:start" {
 			t.Fatalf("%q %v", out, err)
 		}
-		// A single watchdog cuts off the probe group.
-		if d > 9*time.Second {
+		// One 1 s deadline for the group; 4 s leaves room for a loaded
+		// host, as in TestWrapperProbeProcesses.
+		if d > 4*time.Second {
 			t.Fatalf("prompt after %v", d)
 		}
 		if _, err := os.Stat(filepath.Join(f.state, "df.ran")); err != nil {
