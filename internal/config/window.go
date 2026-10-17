@@ -182,22 +182,19 @@ const externalFunc = `_lm_external() {
 const numFunc = `_lm_num() { case $1 in ""|*[!0-9]*) return 1 ;; esac; }
 `
 
-// probeScript runs under setsid(1), so its shell leads a new session and
-// process group, with $1 the workspace and $2 the repository directory. It
-// prints ok:DISK:BRANCH:end when every probe finished, then SIGKILLs its
-// whole group; a watchdog in the group does the same after probeSeconds.
+// probeScript runs under setsid(1) with $1 the workspace and $2 the
+// repository directory. It prints ok:DISK:BRANCH:end, one write, only when
+// every probe finished, so the facts are all or nothing; then it SIGKILLs
+// its group, as a watchdog does after probeSeconds.
 //
-// The kill names the group, not pids, so it reaches every process a probe
-// forked, and no process escapes between a fork and a shell recording $!:
-// Linux fails a fork that races with a group-wide signal, so a child exists
-// in the group before the kill or never exists.
+// $$ leads the new session setsid created, so -$$ never names the
+// wrapper's group. Naming the group reaches everything a probe forked:
+// Linux fails a fork that races with a group-wide signal.
 //
-// The wrapper reads this script's stdout to EOF and never waits for a
-// probe. That pipe is held only by this shell, which never touches the
-// workspace (the .git test runs in a child) and so always dies on SIGKILL;
-// each probe writes to its own substitution pipe, the watchdog to
-// /dev/null. A probe that cannot die (uninterruptible sleep on a dead
-// mount) stays an orphan of init, reaped if it ever exits; the facts are
+// The wrapper reads stdout to EOF and never waits for a probe. Only this
+// shell holds that pipe, and it never touches the workspace (the .git test
+// runs in a child), so it always dies on SIGKILL. A probe that cannot die
+// (uninterruptible sleep on a dead mount) is left to init; the facts are
 // empty and the prompt is not delayed past the deadline.
 //
 // It is embedded in single quotes, so it contains none.
@@ -350,8 +347,7 @@ fi
 LUXMUX_MEMORY='' _lm_v=''
 { read -r _lm_v <"$_lm_cg/memory.max"; } 2>/dev/null
 _lm_num "$_lm_v" && LUXMUX_MEMORY=$_lm_v
-# Optional probes run in their own process group (probeScript); without
-# setsid(1) both facts stay empty.
+# Without setsid(1) both facts stay empty.
 LUXMUX_DISK='' LUXMUX_BRANCH_CHECKED_OUT='' _lm_o=''
 if command -v setsid >/dev/null 2>&1; then
 	# shellcheck disable=SC2016
@@ -390,10 +386,9 @@ _lm_facts() {
 if _lm_lock; then
 	# Earlier wrappers kept probe results in .luxmux-probe.<pid>, left behind
 	# when killed mid-probe. Only this user's are removed (find -user), and
-	# only when that pid cannot be signalled: kill -0 fails for a dead pid,
-	# or for a reused one now another user's, whose creator is gone too. An
-	# unmatched glob is its own text and fails -d, so no match costs no fork.
-	# find without -H/-L tests a symlinked candidate itself, never its target.
+	# only when kill -0 fails: the pid is dead, or reused by another user and
+	# so not its creator. An unmatched glob fails -d without a fork. find
+	# without -H/-L tests a symlink itself, never its target.
 	_lm_sweep() {
 		set --
 		for _lm_x in "${TMPDIR:-/tmp}"/.luxmux-probe.* "$_lm_d"/.luxmux-probe.*; do
