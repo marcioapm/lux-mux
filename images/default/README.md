@@ -158,10 +158,12 @@ The smoke test runs as the image's `USER`, as lux does (so no `--user`),
 with an empty home, no network and no credentials. It first checks that the
 user is `agent` (uid 1000) and that `HOME` is a writable `/home/agent`, the
 path luxmux's home volume is mounted at, then that every agent and tool
-starts, that Node is 26.x, that ffmpeg has `libx264` and the `drawtext`,
-`subtitles`, `ass` and `overlay` filters, and that a one-second drawtext
-render to H.264 and an espeak-ng render to WAV both work offline and read
-back with ffprobe. Each failing check prints `smoke: FAIL:` and what failed.
+starts and prints a version, that the login shell's Node is 26.x, that ffmpeg
+has `libx264` and the `drawtext`, `subtitles`, `ass` and `overlay` filters,
+that a one-second drawtext render to H.264 decodes to 25 frames, and that an
+espeak-ng WAV is PCM with duration >= 0.5s, all offline. It also creates a
+Python venv and checks that the login shell's locale loads. Each failing
+check prints `smoke: FAIL:` and what failed.
 
 For `linux/arm64`
 on an amd64 machine, the same commands work with QEMU binfmt installed.

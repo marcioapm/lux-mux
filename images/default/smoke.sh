@@ -24,12 +24,14 @@ run() {
 }
 
 for tool in claude opencode codex git gh node uv rg fd espeak-ng edge-tts; do
-	run "$tool" --version
+	v=$("$tool" --version 2>/dev/null) || fail "'$tool --version' exited non-zero"
+	[ -n "$v" ] || fail "'$tool --version' printed nothing"
+	echo "ok: $tool --version"
 done
 run ffprobe -version
 run bash -lc true
 
-v=$(node --version 2>/dev/null) || fail "'node --version' exited non-zero"
+v=$(bash -lc 'node --version' 2>/dev/null) || fail "login 'node --version' exited non-zero"
 case "$v" in
 v26.*) echo "ok: node is $v" ;;
 *) fail "node is '$v', want v26.x" ;;
@@ -47,20 +49,39 @@ done
 
 # Renders, offline: drawtext needs a font from fontconfig, libx264 must encode.
 out=$(mktemp -d) || fail "mktemp -d failed"
-run ffmpeg -hide_banner -nostdin -f lavfi -i color=c=black:s=320x240:d=1 \
-	-vf drawtext=text=ok:fontcolor=white -c:v libx264 "$out/x.mp4"
+trap 'rm -rf "$out"' 0
+ffmpeg -hide_banner -nostdin -f lavfi -i color=c=black:s=320x240:r=25:d=1 \
+	-vf drawtext=text=ok:fontcolor=white -c:v libx264 "$out/x.mp4" >/dev/null 2>&1 ||
+	fail "drawtext/libx264 render exited non-zero"
+echo "ok: drawtext/libx264 render"
 probe=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height \
 	-of csv=p=0 "$out/x.mp4" 2>/dev/null) || fail "ffprobe cannot read the rendered mp4"
 [ "$probe" = h264,320,240 ] || fail "rendered mp4 stream is '$probe', want h264,320,240"
 echo "ok: rendered mp4 is $probe"
-run espeak-ng -w "$out/x.wav" "smoke test"
+ffmpeg -v error -xerror -nostdin -i "$out/x.mp4" -f framemd5 "$out/frames.md5" >/dev/null 2>&1 ||
+	fail "the rendered mp4 does not decode"
+frames=$(grep -c '^0,' "$out/frames.md5") || fail "the rendered mp4 has no decoded frames"
+[ "$frames" = 25 ] || fail "the rendered mp4 decodes to $frames frames, want 25"
+echo "ok: rendered mp4 decodes to $frames frames"
+espeak-ng -w "$out/x.wav" "smoke test" >/dev/null 2>&1 || fail "espeak-ng render exited non-zero"
+echo "ok: espeak-ng render"
 codec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
 	-of csv=p=0 "$out/x.wav" 2>/dev/null) || fail "ffprobe cannot read the espeak-ng wav"
 case "$codec" in
 pcm_*) echo "ok: espeak-ng wav is $codec" ;;
 *) fail "espeak-ng wav codec is '$codec', want pcm_*" ;;
 esac
-rm -rf "$out"
+dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out/x.wav" 2>/dev/null) ||
+	fail "ffprobe cannot read the espeak-ng wav duration"
+awk -v duration="$dur" 'BEGIN {
+	exit !(duration ~ /^[0-9]+([.][0-9]+)?$/ && duration + 0 >= 0.5)
+}' || fail "espeak-ng wav lasts '$dur' s, want >= 0.5 s"
+echo "ok: espeak-ng wav duration >= 0.5s"
+python3 -m venv "$out/venv" >/dev/null 2>&1 || fail "python3 -m venv failed"
+echo "ok: python3 -m venv"
+locale_errors=$(bash -lc locale 2>&1 >/dev/null) || fail "login locale exited non-zero"
+[ -z "$locale_errors" ] || fail "the login shell's locale is not available"
+echo "ok: login locale"
 
 # luxmux starts `bash -l`: the agents must stay on its PATH.
 for a in claude opencode codex ffmpeg edge-tts; do
