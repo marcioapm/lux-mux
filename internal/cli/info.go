@@ -59,7 +59,7 @@ func infoCmd(env Env, args []string) error {
 	// session with no file and every window's reads share it.
 	ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
 	defer cancel()
-	targets, err := infoTargets(ctx, env, x, session)
+	targets, unlisted, err := infoTargets(ctx, env, x, session)
 	if err != nil {
 		return err
 	}
@@ -104,6 +104,10 @@ func infoCmd(env Env, args []string) error {
 	if failed > 0 {
 		return fmt.Errorf("%d of %d window(s) could not be read", failed, len(out.Windows))
 	}
+	if unlisted > 0 {
+		// Its windows, if it has any, are not in the output at all.
+		return fmt.Errorf("%d lux(es) could not be listed: the session may have more windows", unlisted)
+	}
 	return nil
 }
 
@@ -135,16 +139,17 @@ func infoSession(env Env, name string) (string, error) {
 
 // infoTargets are session's windows in window order: its file's, else
 // rebuilt from its Runs on every lux within ctx, as new-window rebuilds
-// it.
-func infoTargets(ctx context.Context, env Env, x sessions.Luxes, session string) ([]info.Target, error) {
+// it, with the number of luxes that rebuild could not list.
+func infoTargets(ctx context.Context, env Env, x sessions.Luxes, session string) ([]info.Target, int, error) {
 	label, err := sessions.Label(env.StateDir, session)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sess, ok, err := state.Load(env.StateDir, session)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	unlisted := 0
 	if !ok {
 		// At most half the deadline, so a hung lux's listing leaves the
 		// listed windows time to be read.
@@ -152,12 +157,13 @@ func infoTargets(ctx context.Context, env Env, x sessions.Luxes, session string)
 		defer cancel()
 		ls := x.ListSession(lctx, label)
 		if err := ls.Report(env.Stderr); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		unlisted = len(ls.Unlisted())
 		sess = state.RebuildLabelledFrom(session, label, ls, x.Eps.Default(), x.Cfg.Profiles)
 	}
 	if len(sess.Windows) == 0 {
-		return nil, fmt.Errorf("no session %s", session)
+		return nil, 0, fmt.Errorf("no session %s", session)
 	}
 	def := x.Eps.Default()
 	out := make([]info.Target, len(sess.Windows))
@@ -165,7 +171,7 @@ func infoTargets(ctx context.Context, env Env, x sessions.Luxes, session string)
 		out[i] = info.Target{Index: i, Name: w.Name, Profile: w.Profile, Session: session, Label: label,
 			Endpoint: w.EndpointOr(def), RunID: w.RunID}
 	}
-	return out, nil
+	return out, unlisted, nil
 }
 
 // pickWindow is the window whose index is sel, else those named sel: a

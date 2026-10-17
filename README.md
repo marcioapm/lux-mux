@@ -487,8 +487,9 @@ finds a window named `7`). Without
 renamed session found by its Runs' label), else `main`. Each window is
 read from its own lux, all within 10 s; a lux that does not answer marks
 its windows `unreachable`, the others still print, and the exit status is
-1 when any window could not be read. The text is `key  value` lines in
-the sections above.
+1 when any window could not be read, or (for a session rebuilt from its
+Runs, with no session file) when a lux could not be listed. The text is
+`key  value` lines in the sections above.
 
 `--json` prints one object with `snake_case` keys. `index`, `name`,
 `session` and `endpoint` are always there; any other field is left out

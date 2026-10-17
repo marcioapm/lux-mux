@@ -281,6 +281,26 @@ func TestInfoNumberAsName(t *testing.T) {
 	}
 }
 
+// TestInfoListingLeavesReadTime: a lux that hangs the rebuild listing
+// leaves the listed windows of a healthy lux time to be read, and the
+// unanswered listing still makes the exit non-zero.
+func TestInfoListingLeavesReadTime(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = time.Second
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb := twoLuxEnv(t)
+	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
+	id := submitInfo(t, a, cliKeyA, "work", "a")
+	code := Main(env, []string{"info", "-t", "work", "--json"})
+	o := decodeInfo(t, out.Bytes())
+	if len(o.Windows) != 1 || o.Windows[0].RunID != id || o.Windows[0].Problem != "" {
+		t.Fatalf("code %d: healthy lux's window not read after a hung listing: %+v\n%s", code, o.Windows, errb.String())
+	}
+	if code == 0 {
+		t.Errorf("exit 0 with a lux that did not answer the listing\n%s", errb.String())
+	}
+}
+
 // TestInfoOneDeadlineWithListing: with no session file, a lux that hangs
 // the listing and Runs whose GET hangs cost info one infoTimeout in all,
 // not one for the listing and another for the reads.
