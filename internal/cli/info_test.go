@@ -88,6 +88,18 @@ func decodeInfo(t *testing.T, b []byte) info.Output {
 	return o
 }
 
+// Each window needs its own Run because the sampler serializes execs per Run.
+func infoRuns(t *testing.T, env Env, a *fakelux.Server, n int) {
+	t.Helper()
+	s := &state.Session{Name: "work"}
+	for range n {
+		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
+	}
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInfoAllWindowsText(t *testing.T) {
 	env, a, b, out, errb, ids := infoEnv(t)
 	if code := Main(env, []string{"info", "-t", "work"}); code != 0 {
@@ -282,24 +294,14 @@ func TestInfoNumberAsName(t *testing.T) {
 	}
 }
 
-// TestInfoReadAndExecPools: luxmux info reads Runs and runs resources
-// execs in pools of their own, infoParallel each: both are in flight at
-// once (one pool would cap them together at infoParallel), and execs
-// never pass infoParallel.
+// Both pools can be in flight together, but each keeps its own bound.
 func TestInfoReadAndExecPools(t *testing.T) {
 	old := infoTimeout
 	infoTimeout = 5 * time.Second
 	t.Cleanup(func() { infoTimeout = old })
 	env, a, _, out, errb, _ := infoEnv(t)
-	s, _, _ := state.Load(env.StateDir, "work")
 	const n = 3 * infoParallel
-	s.Windows = s.Windows[:0]
-	for len(s.Windows) < n {
-		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
-	}
-	if err := state.Save(env.StateDir, s); err != nil {
-		t.Fatal(err)
-	}
+	infoRuns(t, env, a, n)
 	var in, peakAll, inExec, peakExec atomic.Int32
 	enter := func(c, peak *atomic.Int32) {
 		v := c.Add(1)
@@ -417,34 +419,21 @@ func TestInfoFanOutBounded(t *testing.T) {
 	}
 }
 
-// TestInfoHungExecsLeaveReadTime: with 3×infoParallel windows whose first
-// infoParallel resources execs hang past the deadline, every window's Run
-// is still read: a hung exec holds an exec slot, never a read slot. With
-// one slot for a window's read and exec together, the hung execs would
-// hold every slot to the 1 s deadline and 16 windows go unread.
+// Hung execs hold no read slots: every Run is read before the shared deadline.
 func TestInfoHungExecsLeaveReadTime(t *testing.T) {
 	old := infoTimeout
 	infoTimeout = time.Second
 	t.Cleanup(func() { infoTimeout = old })
 	env, a, _, out, errb, _ := infoEnv(t)
-	s, _, _ := state.Load(env.StateDir, "work")
 	const n = 3 * infoParallel
-	// A Run each: the sampler runs one exec per Run at a time.
-	s.Windows = s.Windows[:0]
-	for len(s.Windows) < n {
-		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
-	}
-	if err := state.Save(env.StateDir, s); err != nil {
-		t.Fatal(err)
-	}
+	infoRuns(t, env, a, n)
 	var execs atomic.Int32
-	answer := func(string, []string) (fakelux.ExecAnswer, bool) {
+	a.SetExecResponder(func(string, []string) (fakelux.ExecAnswer, bool) {
 		if execs.Add(1) <= infoParallel {
 			return fakelux.ExecAnswer{Hang: true}, true
 		}
 		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
-	}
-	a.SetExecResponder(answer)
+	})
 	a.SetGetHook(func(string) { time.Sleep(50 * time.Millisecond) })
 	start := time.Now()
 	code := Main(env, []string{"info", "-t", "work", "--json"})

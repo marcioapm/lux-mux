@@ -286,14 +286,13 @@ func PlainURL(u string) string {
 		}
 		auth = auth[i+1:]
 	}
-	out := auth
 	if slash {
-		out += "/" + path
+		auth += "/" + path
 	}
-	if strings.Contains(scheme+out, "@") {
+	if strings.Contains(scheme+auth, "@") {
 		return UnparseableURL
 	}
-	return scheme + "://" + login + out
+	return scheme + "://" + login + auth
 }
 
 func sshScheme(s string) bool {
@@ -304,26 +303,23 @@ func sshScheme(s string) bool {
 	return false
 }
 
-// plainSCP is an scp-style [user@]host:path without a password. Its user
-// is an SSH login, kept; an SSH login never holds a ":", so a user part
-// with one (user:pass@host:path) is a credential and is cut through the
-// last "@" before the path's first "/". What is left without a ":" is no
-// host:path and is not shown. A local path (a "/" before any "@") is u.
-//
-// A path holding "user:x@" after a ":" (host:team@b:c.git) cannot be told
-// from a credential without a guess: it is cut, the safe side.
+// plainSCP keeps SSH logins and local paths, but fails closed on passwords.
+// host:team@b:c.git is ambiguous with user:pass@host:path and is cut.
 func plainSCP(u string) string {
 	head, _, _ := strings.Cut(u, "/")
 	first := strings.Index(head, "@")
-	if first < 0 || !strings.Contains(head[:first], ":") {
+	if first < 0 {
 		// A password with a "/" in it hides its "@" past the first "/".
 		// Only a colon before that slash can introduce a password;
 		// absolute, relative and drive-letter local paths stay intact.
 		colon := strings.Index(head, ":")
 		drive := len(head) == 2 && colon == 1 && ((head[0] >= 'A' && head[0] <= 'Z') || (head[0] >= 'a' && head[0] <= 'z'))
-		if first < 0 && colon >= 0 && !drive && strings.Contains(u, "@") {
+		if colon >= 0 && !drive && strings.Contains(u, "@") {
 			return UnparseableURL
 		}
+		return u
+	}
+	if !strings.Contains(head[:first], ":") {
 		return u
 	}
 	out := u[strings.LastIndex(head, "@")+1:]

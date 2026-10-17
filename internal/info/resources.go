@@ -31,6 +31,10 @@ _lm_ws=${` + config.EnvTestWorkspace + `:-/workspace}
 _lm_rd() {
 	_lm_v=
 	{ IFS= read -r _lm_v <"$_lm_cg/$1"; } 2>/dev/null
+	# Fall back per key: a nonempty v2 value always wins.
+	if [ -z "$_lm_v" ] && [ "$#" -eq 2 ]; then
+		_lm_rd "$2"
+	fi
 }
 _lm_rd cpu.max
 if [ -z "$_lm_v" ]; then
@@ -44,11 +48,9 @@ if [ -z "$_lm_v" ]; then
 	fi
 fi
 printf 'cpu.max %s\n' "$_lm_v"
-_lm_rd memory.max
-[ -n "$_lm_v" ] || _lm_rd memory/memory.limit_in_bytes
+_lm_rd memory.max memory/memory.limit_in_bytes
 printf 'memory.max %s\n' "$_lm_v"
-_lm_rd memory.current
-[ -n "$_lm_v" ] || _lm_rd memory/memory.usage_in_bytes
+_lm_rd memory.current memory/memory.usage_in_bytes
 printf 'memory.current %s\n' "$_lm_v"
 _lm_u=
 {

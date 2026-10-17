@@ -81,12 +81,10 @@ func infoCmd(env Env, args []string) error {
 		wg.Go(func() {
 			reads <- struct{}{}
 			c, err := dial(t.Endpoint)
-			if err != nil {
-				<-reads
-				out.Windows[i] = info.NoKey(t)
-				return
+			w := info.NoKey(t)
+			if err == nil {
+				w = info.Fetch(ctx, c, t, time.Now)
 			}
-			w := info.Fetch(ctx, c, t, time.Now)
 			<-reads
 			if info.Running(w) {
 				execs <- struct{}{}
