@@ -385,7 +385,8 @@ with `setsid`) under a shared 1 s deadline, enforced by a shell watchdog
 killed, including anything a probe forked, and both facts are empty; the
 prompt does not wait for the killed probes. A probe that cannot be killed
 (`df` stuck on a dead network mount) is left behind as an orphan and
-reaped by init if it ever exits. Without `setsid` both facts are empty.
+reaped by init if it ever exits. Without `setsid` both facts are empty;
+util-linux and BusyBox both provide it.
 Earlier versions kept probe results in `$TMPDIR/.luxmux-probe.<pid>`;
 a placement removes any of those left by a dead wrapper of the same user.
 Hooks are never timed out.
