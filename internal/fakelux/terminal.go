@@ -217,10 +217,19 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// ShellTerminal runs argv on a pseudo-terminal.
+// ShellTerminal runs argv on a pseudo-terminal in the test process's
+// working directory.
 func ShellTerminal(rows, cols int, argv []string, env []string) (*Terminal, error) {
+	return ShellTerminalIn(rows, cols, argv, env, "")
+}
+
+// ShellTerminalIn is ShellTerminal with working directory dir ("": the
+// test process's). Later entries of env replace earlier ones of the same
+// name, the test process's included.
+func ShellTerminalIn(rows, cols int, argv []string, env []string, dir string) (*Terminal, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), env...)
+	cmd.Dir = dir
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 	if err != nil {
 		return nil, err

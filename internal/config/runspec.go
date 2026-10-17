@@ -42,7 +42,10 @@ const (
 // SpecKey identifies the Run a profile makes, whatever the profile is
 // named and wherever it runs: a hash of its RunSpec without luxmux's
 // labels or secret values. A warm spare is claimed only by a window whose
-// profile has the same key. Empty for a profile that makes no RunSpec.
+// profile has the same key. It covers on_start and on_resume (arguments of
+// the window command) and every static LUXMUX_* value but the session's
+// and profile's (spares are scoped to a session and checked against their
+// profile on claim). Empty for a profile that makes no RunSpec.
 func SpecKey(p Profile) string {
 	sp, err := RunSpec(p, Target{}, nil)
 	if err != nil {
@@ -88,16 +91,13 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		Workload: api.Workload{
 			Adapter: "generic",
 			TTY:     true,
-			Command: DefaultShell,
+			Command: WindowCommand(p),
 			Workdir: p.Workdir,
 		},
 		Volumes: []api.Volume{{Name: "workspace", Path: Workspace, Kind: "state"}},
 	}
 	if p.HomeVolume() {
 		sp.Volumes = append(sp.Volumes, api.Volume{Name: "home", Path: Home, Kind: "state"})
-	}
-	if len(p.Shell) > 0 {
-		sp.Workload.Command = append([]string{}, p.Shell...)
 	}
 	for k, v := range p.Labels {
 		sp.Labels[k] = v
@@ -109,11 +109,9 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 		sp.Labels[LabelSpare] = "true"
 		sp.Labels[LabelSpec] = SpecKey(p)
 	}
-	if len(p.Env) > 0 {
-		sp.Env = map[string]string{}
-		for k, v := range p.Env {
-			sp.Env[k] = v
-		}
+	sp.Env = map[string]string{}
+	for k, v := range p.Env {
+		sp.Env[k] = v
 	}
 	creds := p.CredentialNames()
 	for _, n := range p.SecretNames() {
@@ -140,6 +138,10 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 	}
 	if sp.Workload.Workdir == "" {
 		sp.Workload.Workdir = Workspace
+	}
+	// Secrets never go here: Validate keeps their names off these.
+	for k, v := range windowEnv(p, t, sp.Workload.Workdir) {
+		sp.Env[k] = v
 	}
 	sp.Resources.Size = p.Size
 	sp.Resources.CPUs = p.CPUs

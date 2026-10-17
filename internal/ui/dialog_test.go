@@ -297,7 +297,7 @@ func TestDialogStartsFromDefaultProfile(t *testing.T) {
 
 func TestDialogNavigationWraps(t *testing.T) {
 	d := open(t, newHost(t), 30, 100)
-	want := []stop{stImage, stPool, stSize, stRepo, stBranch, stAddRepo, stSpare, stDefault, stSaveAs, stCreate, stCancel, stProfile}
+	want := []stop{stImage, stPool, stSize, stRepo, stBranch, stAddRepo, stOnStart, stOnResume, stSpare, stDefault, stSaveAs, stCreate, stCancel, stProfile}
 	for i, s := range want {
 		press(d, "tab")
 		if d.focus != s {
@@ -652,6 +652,18 @@ func TestDialogCtrlSSubmits(t *testing.T) {
 	}
 	if len(h.validated) != 1 || h.validated[0].Repository != r.Profile.Repository {
 		t.Fatal("not dry-run first")
+	}
+	// The hooks, pasted with a newline, are one line each and saved with
+	// the profile.
+	d = open(t, newHost(t), 30, 100)
+	to(t, d, stOnStart)
+	d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("make deps\nmake test"), Paste: true})
+	to(t, d, stOnResume)
+	press(d, "make warm")
+	to(t, d, stSaveAs)
+	press(d, "hooked", "ctrl+s")
+	if r := d.Request; r == nil || r.SaveAs != "hooked" || r.Profile.OnStart != "make deps make test" || r.Profile.OnResume != "make warm" {
+		t.Fatalf("hooks request %+v", d.Request)
 	}
 	// Enter on [Create] does the same.
 	d = open(t, newHost(t), 30, 100)

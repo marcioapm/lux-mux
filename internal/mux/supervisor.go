@@ -499,6 +499,7 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 	w.q.push(feedItem{rows: m.rows, cols: m.cols})
 	w.tail.Reset()
 	w.hasScreen = true
+	m.sendNameLocked(w)
 	active := m.showingLocked(w)
 	raw := restoring && firstHere && active
 	if raw {

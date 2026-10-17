@@ -23,9 +23,10 @@ type DialogValues struct {
 	Disk   string
 	// Repos are the repository rows, in order; a row without a URL is
 	// none.
-	Repos     []RepoRow
-	WarmSpare bool
-	SaveAs    string
+	Repos             []RepoRow
+	WarmSpare         bool
+	SaveAs            string
+	OnStart, OnResume string
 }
 
 // RepoRow is one repository row of the dialog.
@@ -35,7 +36,7 @@ type RepoRow struct{ URL, Branch string }
 // one empty row for a profile without any. The warm spare box starts
 // off whatever the profile says: a spare is billed while it waits.
 func ValuesFrom(name string, p config.Profile) DialogValues {
-	v := DialogValues{Base: name, Image: p.Image, Pool: p.Pool, Size: p.Size, Memory: p.Memory, Disk: p.Disk}
+	v := DialogValues{Base: name, Image: p.Image, Pool: p.Pool, Size: p.Size, Memory: p.Memory, Disk: p.Disk, OnStart: p.OnStart, OnResume: p.OnResume}
 	for _, r := range p.RepositoryList() {
 		v.Repos = append(v.Repos, RepoRow{URL: r.URL, Branch: r.RepoRef()})
 	}
@@ -166,6 +167,7 @@ func (v DialogValues) apply(base config.Profile, shaped bool) (config.Profile, [
 		p.GitCredential = ""
 	}
 	p.WarmSpare = v.WarmSpare
+	p.OnStart, p.OnResume = v.OnStart, v.OnResume
 	if v.SaveAs != "" && !config.NameRe.MatchString(v.SaveAs) {
 		errs = append(errs, &FieldError{FieldSaveAs, errors.New("save as: a profile name is letters, digits, '.', '_' and '-'")})
 	}

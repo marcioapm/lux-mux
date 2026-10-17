@@ -53,6 +53,8 @@ const (
 	stCancel
 	// stName is the new-session dialog's session name.
 	stName
+	stOnStart
+	stOnResume
 	// stRepos is where the repository rows' stops start: row i's URL is
 	// repoURL(i), its branch repoBranch(i).
 	stRepos stop = 1000
@@ -196,7 +198,7 @@ func NewDialogModel(ctx context.Context, h DialogHost, rows, cols int) *Dialog {
 	}
 	place := map[stop]string{stSaveAs: "don't save", stPool: "tenant default",
 		stCPUs: "auto", stMemory: "auto", stDisk: "auto"}
-	for _, s := range []stop{stImage, stPool, stCPUs, stMemory, stDisk, stSaveAs} {
+	for _, s := range []stop{stImage, stPool, stCPUs, stMemory, stDisk, stSaveAs, stOnStart, stOnResume} {
 		d.in[s] = newInput(place[s], sugg[s])
 	}
 	d.fill(ValuesFrom(d.profile.value, cfg.Profiles[d.profile.value]), true)
@@ -234,6 +236,8 @@ func (d *Dialog) fill(v DialogValues, all bool) {
 	set(stCPUs, v.CPUs)
 	set(stMemory, v.Memory)
 	set(stDisk, v.Disk)
+	set(stOnStart, v.OnStart)
+	set(stOnResume, v.OnResume)
 	if all || !d.edited[stRepos] {
 		d.setRepoRows(v.Repos)
 	}
@@ -347,7 +351,7 @@ func (d *Dialog) stops() []stop {
 		s = append(s, stCPUs, stMemory, stDisk)
 	}
 	s = append(s, d.repoStops()...)
-	return append(s, stAddRepo, stSpare, stDefault, stSaveAs, stCreate, stCancel)
+	return append(s, stAddRepo, stOnStart, stOnResume, stSpare, stDefault, stSaveAs, stCreate, stCancel)
 }
 
 // repoStops are the repository rows' stops: URL then branch, per row.
@@ -817,6 +821,7 @@ func (d *Dialog) values() DialogValues {
 		Base: d.profile.value, Image: d.in[stImage].Value(), Pool: d.poolValue(), Size: d.size.value,
 		CPUs: d.in[stCPUs].Value(), Memory: d.in[stMemory].Value(), Disk: d.in[stDisk].Value(),
 		Repos: d.repoRows(), WarmSpare: d.spare, SaveAs: d.in[stSaveAs].Value(),
+		OnStart: d.in[stOnStart].Value(), OnResume: d.in[stOnResume].Value(),
 	}
 }
 
@@ -828,7 +833,7 @@ func (d *Dialog) secretNames() []string {
 var stopLabel = map[stop]string{
 	stProfile: "Profile", stImage: "Image", stPool: "Pool", stSize: "Size",
 	stSpare: "Warm spare", stDefault: "Session default", stSaveAs: "Save as profile",
-	stName: "Session name",
+	stName: "Session name", stOnStart: "on start", stOnResume: "on resume",
 }
 
 // label is s's label: a repository row's URL is numbered from the second.
@@ -1055,6 +1060,8 @@ func (d *Dialog) fieldLines() ([]string, map[stop][2]int) {
 		textRow(s)
 	}
 	addRow()
+	textRow(stOnStart)
+	textRow(stOnResume)
 	secrets := "none"
 	if n := d.secretNames(); len(n) > 0 {
 		secrets = strings.Join(n, ", ")

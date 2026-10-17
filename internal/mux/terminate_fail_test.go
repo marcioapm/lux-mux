@@ -285,3 +285,99 @@ func TestClosedDuringSubmitTerminateFails(t *testing.T) {
 	x.waitFor("and forgotten", func() bool { return !recordedSpare(x.spares(), id) })
 	x.detach()
 }
+
+const obsoleteSpareKey = "76d9621a3223b5c5"
+
+// obsoleteSlotOnB records spare under an old spec slot on b.
+func obsoleteSlotOnB(t *testing.T, h *harness, spare string) {
+	t.Helper()
+	s, _, _ := state.Load(h.dir, "s")
+	cur := h.m.spareSlotOf(h.cfg.Profiles["there"])
+	ep := s.SpareEndpoint(cur, config.Endpoint{})
+	s.DropSpare(cur)
+	s.SetSpare(config.SpareSlot(obsoleteSpareKey, ep, config.DefaultEndpoint(h.lux.Config())), spare, ep)
+	if err := state.Save(h.dir, s); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestObsoleteSpareTerminateFailsRetried(t *testing.T) {
+	h, b, spare := spareOnB(t)
+	h.opts = func(o *Options) { o.NoticeFor = 5 * time.Second }
+	h.detach()
+	obsoleteSlotOnB(t, h, spare)
+	b.FailTerminates(http.StatusServiceUnavailable)
+	h.start(nil)
+	h.live(0)
+	h.waitScreen("cannot terminate notice", h.contains("cannot terminate on "))
+	h.waitFor("current spare", func() bool {
+		id := h.spares()[h.m.spareSlotOf(h.cfg.Profiles["there"])]
+		return id != "" && id != spare
+	})
+	h.detach()
+	s, _, _ := state.Load(h.dir, "s")
+	if s.Spares[state.LeftoverPrefix+spare] != spare || b.Run(spare).State != "running" {
+		t.Fatalf("failed migration not retained: spares %v state %s", s.Spares, b.Run(spare).State)
+	}
+	for slot, id := range s.Spares {
+		if id == spare && !state.IsLeftover(slot) {
+			t.Fatalf("obsolete spare still normal in %s", slot)
+		}
+	}
+	b.FailTerminates(0)
+	h.start(nil)
+	h.live(0)
+	h.waitFor("retry terminated", func() bool { return slices.Contains(b.Terminated(), spare) })
+	h.waitFor("forgotten", func() bool { return !recordedSpare(h.spares(), spare) })
+	h.detach()
+}
+
+func TestObsoleteSpareEndpointDownRetained(t *testing.T) {
+	h, b, spare := spareOnB(t)
+	h.detach()
+	obsoleteSlotOnB(t, h, spare)
+	b.SetDown(true)
+	h.start(nil)
+	h.live(0)
+	h.waitFor("durable leftover", func() bool {
+		s, _, _ := state.Load(h.dir, "s")
+		return s.Spares[state.LeftoverPrefix+spare] == spare
+	})
+	h.detach()
+	b.SetDown(false)
+	if len(b.Terminated()) != 0 || b.Run(spare).State != "running" {
+		t.Fatalf("down endpoint changed: %v", b.Terminated())
+	}
+	h.start(nil)
+	h.live(0)
+	h.waitFor("terminated after endpoint returned", func() bool { return slices.Contains(b.Terminated(), spare) })
+	h.waitFor("forgotten", func() bool { return !recordedSpare(h.spares(), spare) })
+	h.detach()
+}
+
+func TestLateListedObsoleteSpareMigrated(t *testing.T) {
+	h, b, current := spareOnB(t)
+	h.detach()
+	sp, err := config.RunSpec(h.cfg.Profiles["there"], config.Target{Session: "s", Profile: "there", Spare: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.Labels[config.LabelSpec] = obsoleteSpareKey
+	c, _ := luxapi.New(b.Config())
+	old, err := c.Submit(t.Context(), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetDown(true)
+	h.opts = func(o *Options) { o.discoverEvery = 20 * time.Millisecond }
+	h.start(nil)
+	h.live(0)
+	time.Sleep(100 * time.Millisecond)
+	b.SetDown(false)
+	h.waitFor("late-listed obsolete spare terminated", func() bool { return slices.Contains(b.Terminated(), old.ID) })
+	h.waitFor("forgotten", func() bool { return !recordedSpare(h.spares(), old.ID) })
+	if h.spares()[h.m.spareSlotOf(h.cfg.Profiles["there"])] != current || slices.Contains(b.Terminated(), current) {
+		t.Fatalf("current spare changed: %v terminated %v", h.spares(), b.Terminated())
+	}
+	h.detach()
+}

@@ -96,6 +96,11 @@ func TestWindowFlagsToRunSpec(t *testing.T) {
 				t.Fatalf("%+v", r)
 			}
 		}, &config.Profile{Image: "alpine", Repository: "https://example.com/app.git", Branch: "main"}},
+		{"hooks", []string{"--on-start", "make 'deps'", "--on-resume", ""}, func(t *testing.T, sp api.RunSpec) {
+			if _, s, r, ok := config.ParseWindowCommand(sp.Workload.Command); !ok || s != "make 'deps'" || r != "" {
+				t.Fatalf("hooks %q %q", s, r)
+			}
+		}, &config.Profile{Image: "alpine", OnResume: "make warm"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o, err := parseWindowFlags("new", c.args, io.Discard)

@@ -101,16 +101,31 @@ func TestSpecKeyFields(t *testing.T) {
 	}
 }
 
-// TestSpecKeyStableForCustomImages: a custom-image profile gets no home
-// volume, so its key is the one luxmux 0.1.0 computed and warm spares made
-// by that version are still claimed. The constants were printed by 79e22db.
-func TestSpecKeyStableForCustomImages(t *testing.T) {
+func TestSpecKeyCommands(t *testing.T) {
+	p := Profile{Image: "alpine"}
+	key := SpecKey(p)
+	for _, q := range []Profile{
+		{Image: "alpine", OnStart: "make deps"},
+		{Image: "alpine", OnResume: "make warm"},
+		{Image: "alpine", Env: map[string]string{"EDITOR": "vi"}},
+	} {
+		if got := SpecKey(q); got == key || got != SpecKey(q) {
+			t.Fatal("commands and env must change the deterministic spare key")
+		}
+	}
+}
+
+// TestSpecKeyGolden pins the keys of two profiles at this version: any
+// change to the wrapper text or the static env changes every key, and so
+// retires every waiting spare at the next attach. Update the values only
+// together with such a deliberate change.
+func TestSpecKeyGolden(t *testing.T) {
 	for want, p := range map[string]Profile{
-		"76d9621a3223b5c5": {Image: "alpine", CPUs: 1},
-		"6d2da9ae44885338": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/a.git", Egress: []string{"github.com"}},
+		"00bb6f63e43ab8b6": {Image: "alpine"},
+		"5244e9e1a496662b": {Image: "ghcr.io/example/dev:1", Repository: "https://example.com/app.git", Branch: "main", OnStart: "make deps", Shell: []string{"zsh", "-l"}},
 	} {
 		if got := SpecKey(p); got != want {
-			t.Errorf("SpecKey(%+v) = %s, want the 0.1.0 key %s", p, got, want)
+			t.Errorf("SpecKey(%+v) = %q, want %q", p, got, want)
 		}
 	}
 }

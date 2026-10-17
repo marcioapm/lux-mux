@@ -17,6 +17,7 @@ type windowFlags struct {
 	Session, Name, Profile string
 
 	Image, Pool, Size, Memory, Disk, Workdir string
+	OnStart, OnResume                        string
 	CPUs                                     float64
 	// Repos are --repo's URL[#BRANCH] values, in order.
 	Repos       []string
@@ -55,6 +56,8 @@ func parseWindowFlags(command string, args []string, output io.Writer) (windowFl
 		o.Secrets = append(o.Secrets, s)
 		return nil
 	})
+	fs.StringVar(&o.OnStart, "on-start", "", "command on the Run's first start")
+	fs.StringVar(&o.OnResume, "on-resume", "", "command on each later placement")
 	fs.StringVar(&o.Workdir, "workdir", "", "the shell's working `directory`")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -106,6 +109,12 @@ func (o windowFlags) apply(p config.Profile) (config.Profile, error) {
 		if o.set["disk"] {
 			p.Disk = o.Disk
 		}
+	}
+	if o.set["on-start"] {
+		p.OnStart = o.OnStart
+	}
+	if o.set["on-resume"] {
+		p.OnResume = o.OnResume
 	}
 	if o.set["workdir"] {
 		p.Workdir = o.Workdir

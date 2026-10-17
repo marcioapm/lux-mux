@@ -673,6 +673,13 @@ func TestRenameSessionAndRebuild(t *testing.T) {
 	h.type_("\x15alpha\r")
 	h.waitFor("renamed", func() bool { return h.con.Current().Session() == "alpha" })
 	h.waitFor("title", func() bool { return h.term.title() == "luxmux:alpha [0] default" })
+	// RenameSession removes a.json and releases a's lock after the name
+	// changes: wait for the whole rename.
+	h.waitFor("old name released", func() bool {
+		_, held := state.Held(h.dir, "a")
+		_, ok, _ := state.Load(h.dir, "a")
+		return !held && !ok
+	})
 	if _, ok, _ := state.Load(h.dir, "a"); ok {
 		t.Fatal("a.json is left")
 	}

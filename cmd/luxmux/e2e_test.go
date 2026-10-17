@@ -1085,3 +1085,19 @@ func TestEndUnterminatedSpareNamed(t *testing.T) {
 		t.Fatalf("file kept %v, spare %s", ok, b.Run(spare).State)
 	}
 }
+
+// TestOnStartVisible: luxmux new --on-start (no spaces: the test passes
+// arguments split on them), with Runs that start their spec's command in
+// a real sh: the hook's output is on the screen before
+// the prompt, and the shell starts after a failing hook.
+func TestOnStartVisible(t *testing.T) {
+	lux, env := e2eEnv(t)
+	lux.RunShells(filepath.Join(t.TempDir(), "runs"), "PS1=$ ", "ENV=", "TERM=xterm")
+	p := startLuxmux(t, env, "new -s hooks --on-start echo${IFS}HOOK-$LUXMUX_SESSION;false")
+	p.wait("hook then prompt", func(s string) bool {
+		i, j := strings.Index(s, "on_start exited with status 1"), strings.LastIndex(s, "$")
+		return strings.HasPrefix(s, "HOOK-hooks\n") && i >= 0 && j > i
+	})
+	p.typ("\x02d")
+	p.exited()
+}

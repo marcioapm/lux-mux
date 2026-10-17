@@ -58,6 +58,11 @@ type Profile struct {
 	SecretsFrom   string            `toml:"secrets_from,omitempty" json:"secretsFrom,omitempty"`
 	Workdir       string            `toml:"workdir,omitempty" json:"workdir,omitempty"`
 	WarmSpare     bool              `toml:"warm_spare,omitempty" json:"warmSpare,omitempty"`
+	// OnStart runs as a child sh -c of the window's start wrapper, before
+	// it execs the shell, on the Run's first start; OnResume on each later
+	// placement (see StartWrapper).
+	OnStart  string `toml:"on_start,omitempty" json:"onStart,omitempty"`
+	OnResume string `toml:"on_resume,omitempty" json:"onResume,omitempty"`
 	// lux denies egress by default: Egress lists the hosts (or CIDRs) the
 	// shell may reach, UnrestrictedNetwork lifts the filter.
 	Egress              []string `toml:"egress,omitempty" json:"egress,omitempty"`
@@ -144,9 +149,6 @@ func imageForVersion(version string) string {
 }
 
 var releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-
-// DefaultShell starts bash as a login shell where the image has it, sh otherwise.
-var DefaultShell = []string{"sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"}
 
 // Dir is luxmux's configuration directory.
 func Dir() (string, error) {
@@ -373,6 +375,13 @@ func (p Profile) Validate() error {
 	for k := range p.Env {
 		if !envNameRe.MatchString(k) || strings.HasPrefix(k, "LUX_") {
 			fail("env: invalid name %q", k)
+		} else if reservedEnv(k) {
+			fail("env: %q is set by luxmux", k)
+		}
+	}
+	for name, v := range map[string]string{"on_start": p.OnStart, "on_resume": p.OnResume} {
+		if strings.ContainsRune(v, 0) {
+			fail("%s: a command cannot contain a NUL byte", name)
 		}
 	}
 	for k, v := range p.Labels {
@@ -388,9 +397,17 @@ func (p Profile) Validate() error {
 		named = append(named, r.GitCredential)
 	}
 	for _, s := range named {
-		if s != "" && !envNameRe.MatchString(s) {
+		switch {
+		case s != "" && !envNameRe.MatchString(s):
 			fail("secrets: invalid name %q", s)
+		case reservedEnv(s):
+			fail("secrets: %q is set by luxmux", s)
+		case luxSecretRefused(s):
+			fail("secrets: %q is set by lux in every Run (LUX_RUN_ID, LUX_EPOCH, LUX_INPUTS, LUX_SERVICE_*): a secret of that name would replace its value", s)
 		}
+	}
+	if n := envStringSize(EnvRepositories, windowEnv(p, Target{}, Workspace)[EnvRepositories]); n > MaxEnvString {
+		fail("repositories: %s would be %d bytes, over the %d a Run's environment variable may hold: use fewer repositories or shorter urls, branches and paths", EnvRepositories, n, MaxEnvString)
 	}
 	return errors.Join(errs...)
 }
