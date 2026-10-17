@@ -450,7 +450,7 @@ reports as `complete` or `final` is shown even when it is zero
 | Timing | stage | `stage`, `stageReason`, `stageSince` |
 | | uptime, runtime | from `runtimeSince` (this placement), `runtimeSeconds` (all placements) |
 | | waiting, starting | `placementWaitSeconds` (for a host), `placementStartSeconds` (on it) |
-| Workload | repositories, workdir | `spec.git.repositories` (URLs without credentials), `spec.workload.workdir` |
+| Workload | repositories, workdir | `spec.git.repositories` (URLs without passwords or tokens; an SSH login such as `git@` is kept), `spec.workload.workdir` |
 | Access | egress, secrets | `spec.network` (unrestricted, an allow list, or none); the names in `secrets`, never a value |
 | Cost | so far | `GET /v1/runs/{id}/cost`: its status and per-currency totals; left out while lux has none (`pending`, or a zero not yet `complete`/`final`) |
 | Resume | resumable, snapshot, blockers | `resumable` and `resume` (lux sends it for a stopped, lost, failed or succeeded Run) |

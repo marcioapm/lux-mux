@@ -517,9 +517,32 @@ func TestPlainURLFailsClosed(t *testing.T) {
 		"https://user:tok@example.com:x/r.git":  "https://example.com:x/r.git",
 		"https://u:t@k@example.com:x":           "https://example.com:x",
 		"https://u:to/k@example.com:x/r.git":    UnparseableURL,
-		// scp-style: the user is an SSH login, kept.
+		"http://user@example.com/r.git":         "http://example.com/r.git",
+		// ssh: a login without a password is kept; a password never is.
+		"ssh://git@example.com/o/r.git":         "ssh://git@example.com/o/r.git",
+		"SSH://git@example.com/o/r.git":         "ssh://git@example.com/o/r.git",
+		"git+ssh://git@example.com/o/r.git":     "git+ssh://git@example.com/o/r.git",
+		"ssh+git://deploy@example.com:22/r.git": "ssh+git://deploy@example.com:22/r.git",
+		"ssh://git:tok@example.com/o/r.git":     "ssh://git@example.com/o/r.git",
+		"ssh://:tok@example.com/o/r.git":        "ssh://example.com/o/r.git",
+		"ssh://example.com/o/r.git":             "ssh://example.com/o/r.git",
+		"ssh://git@example.com:x/r.git":         "ssh://git@example.com:x/r.git",
+		"ssh://git:tok@example.com:x/r.git":     "ssh://git@example.com:x/r.git",
+		"ssh://git:t@k@example.com:x/r.git":     "ssh://git@example.com:x/r.git",
+		"ssh://u:to/k@example.com:x/r.git":      UnparseableURL,
+		// scp-style: the user is an SSH login, kept; a user with a ":"
+		// in it is a credential, cut.
 		"git@github.com:o/r.git":               "git@github.com:o/r.git",
 		"deploy@git.example.com:team/repo.git": "deploy@git.example.com:team/repo.git",
+		"git@example.com:o/r@v2.git":           "git@example.com:o/r@v2.git",
+		"git@example.com:r@v2":                 "git@example.com:r@v2",
+		"user:tok@example.com:o/r.git":         "example.com:o/r.git",
+		"my_user:tok@example.com:o/r.git":      "example.com:o/r.git",
+		"user:t@k@example.com:o/r.git":         "example.com:o/r.git",
+		"user:tok@example.com:r@v2":            UnparseableURL,
+		"user:tok@example.com":                 UnparseableURL,
+		"example.com:o/r.git":                  "example.com:o/r.git",
+		"/srv/git/u:p@r.git":                   "/srv/git/u:p@r.git",
 	} {
 		if got := PlainURL(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
