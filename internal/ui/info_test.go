@@ -15,8 +15,6 @@ import (
 	"github.com/marcioapm/lux-mux/internal/info"
 )
 
-const infoSecret = "example-secret-value-ui-93"
-
 // fakeInfoHost shows target; each FetchInfo records its context and
 // answers what the test sends on answer (or its context's end).
 type fakeInfoHost struct {
@@ -88,6 +86,8 @@ type infoRig struct {
 	host *fakeInfoHost
 	now  time.Time
 	msgs chan tea.Msg
+	// detach cancels the dialog's parent context, as a detach does.
+	detach context.CancelFunc
 	// ticks are the ticks scheduled and not yet fired.
 	ticks []scheduled
 }
@@ -96,6 +96,7 @@ func newInfoRig(t *testing.T, rows, cols int) *infoRig {
 	r := &infoRig{t: t, host: newInfoHost(), now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), msgs: make(chan tea.Msg, 64)}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	r.detach = cancel
 	r.d = NewInfoDialog(ctx, r.host, "ctrl+b", func(int, int) []string { return []string{"$ shell behind"} }, rows, cols)
 	r.d.now = func() time.Time { return r.now }
 	r.d.after = func(d time.Duration, msg tea.Msg) tea.Cmd {
@@ -202,7 +203,13 @@ func (r *infoRig) goodWindow(host string) info.Window {
 func TestInfoFirstFrame(t *testing.T) {
 	r := newInfoRig(t, 30, 100)
 	v := r.view()
-	for _, want := range []string{"Window 2 · api", "2 api", "dev", "work", "run_1", "lux.example.com · tenant example", "reading from lux…", "shell behind"} {
+	for k, want := range map[string]string{"window": "2 api", "profile": "dev", "session": "work", "run": "run_1",
+		"lux": "lux.example.com · tenant example"} {
+		if got := lineOf(v, k); got != want {
+			t.Errorf("first frame's %s: %q, want %q:\n%s", k, got, want, v)
+		}
+	}
+	for _, want := range []string{"Window 2 · api", "reading from lux…", "shell behind"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("first frame lacks %q:\n%s", want, v)
 		}
@@ -220,7 +227,13 @@ func TestInfoFieldsShownAndOmitted(t *testing.T) {
 	r.waitCalls(1)
 	r.answer(r.goodWindow("host-7"))
 	v := r.view()
-	for _, want := range []string{"Placement", "host-7", "2 (1 move since the first)", "ghcr.io/example/dev:latest", "EXAMPLE_TOKEN", "read 0s ago"} {
+	for k, want := range map[string]string{"host": "host-7", "epoch": "2 (1 move since the first)", "ref": "ghcr.io/example/dev:latest",
+		"secrets": "EXAMPLE_TOKEN", "pool": "m"} {
+		if got := lineOf(v, k); got != want {
+			t.Errorf("%s: %q, want %q:\n%s", k, got, want, v)
+		}
+	}
+	for _, want := range []string{"Placement", "read 0s ago"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("lacks %q:\n%s", want, v)
 		}
@@ -234,11 +247,8 @@ func TestInfoFieldsShownAndOmitted(t *testing.T) {
 	w.Placement.Host = ""
 	r.advance(InfoEvery)
 	r.answer(w)
-	if v := r.view(); strings.Contains(v, "host-7") || strings.Contains(v, "  host ") {
+	if v := r.view(); strings.Contains(v, "host-7") || lineOf(v, "host") != "" {
 		t.Fatalf("a host lux no longer reports is still shown:\n%s", v)
-	}
-	if strings.Contains(r.view(), infoSecret) {
-		t.Fatal("secret value")
 	}
 }
 
@@ -296,8 +306,12 @@ func TestInfoCloseCancelsAndDropsLate(t *testing.T) {
 	// The late answer (the cancelled read's, or one lux sent anyway).
 	r.d.Update(infoResultMsg{gen: r.d.gen, w: r.goodWindow("late")})
 	r.settle()
-	if strings.Contains(plain(r.d.cur.Placement.Host), "late") {
-		t.Fatal("a late answer was applied after the close")
+	// A closed dialog renders nothing; reopen its view to see its state.
+	r.d.Done = false
+	v := r.view()
+	r.d.Done = true
+	if lineOf(v, "host") != "before-close" {
+		t.Fatalf("a late answer was applied after the close:\n%s", v)
 	}
 	before := r.host.nCalls()
 	r.advance(InfoEvery)
@@ -332,16 +346,16 @@ func TestInfoWindowSwitchDropsLate(t *testing.T) {
 		t.Fatalf("read %+v", tg)
 	}
 	v := r.view()
-	if strings.Contains(v, "old-host") || !strings.Contains(v, "0 web") || !strings.Contains(v, "run_9") {
+	if strings.Contains(v, "old-host") || lineOf(v, "window") != "0 web" || lineOf(v, "run") != "run_9" || lineOf(v, "host") != "" {
 		t.Fatalf("after the switch:\n%s", v)
 	}
 	r.d.Update(infoResultMsg{gen: oldGen, w: r.goodWindow("old-late")})
-	if v := r.view(); strings.Contains(v, "old-late") {
+	if v := r.view(); strings.Contains(v, "old-late") || lineOf(v, "host") != "" {
 		t.Fatalf("the previous window's late answer applied:\n%s", v)
 	}
 	w := r.goodWindow("new-host")
 	r.answer(w)
-	if v := r.view(); !strings.Contains(v, "new-host") {
+	if v := r.view(); lineOf(v, "host") != "new-host" {
 		t.Fatalf("the new window's answer:\n%s", v)
 	}
 }
@@ -382,6 +396,26 @@ func lineOf(view, k string) string {
 	return ""
 }
 
+// TestInfoDetachCancelsRead: the session ending (the dialog's parent
+// context cancelled) cancels the read in flight, and no tick starts
+// another.
+func TestInfoDetachCancelsRead(t *testing.T) {
+	r := newInfoRig(t, 30, 100)
+	r.waitCalls(1)
+	r.detach()
+	select {
+	case <-r.host.ctx(0).Done():
+	case <-time.After(time.Second):
+		t.Fatal("the read in flight outlived the session")
+	}
+	r.settle()
+	r.advance(InfoEvery)
+	r.advance(InfoEvery)
+	if n := r.host.nCalls(); n != 1 {
+		t.Fatalf("%d reads after the session ended", n)
+	}
+}
+
 // TestInfoErrorKeepsLastValues: a failed read says why in one line and
 // keeps the last good values, with their age.
 func TestInfoErrorKeepsLastValues(t *testing.T) {
@@ -394,20 +428,20 @@ func TestInfoErrorKeepsLastValues(t *testing.T) {
 	bad.Problem, bad.Error = info.ProblemUnreachable, "lux unreachable (lux.example.com · tenant example)"
 	r.answer(bad)
 	v := r.view()
-	if !strings.Contains(v, "kept-host") || !strings.Contains(v, "lux unreachable (lux.example.com · tenant example)") || !strings.Contains(v, "shown as read 3s ago") {
+	if lineOf(v, "host") != "kept-host" || !strings.Contains(v, "lux unreachable (lux.example.com · tenant example)") || !strings.Contains(v, "shown as read 3s ago") {
 		t.Fatalf("after a failed read:\n%s", v)
 	}
 	r.advance(InfoEvery)
 	r.waitCalls(3)
 	bad.Problem, bad.Error = info.ProblemRefused, "lux refused the key (lux.example.com · tenant example)"
 	r.answer(bad)
-	if v := r.view(); !strings.Contains(v, "refused the key") || strings.Contains(v, "unreachable") || !strings.Contains(v, "6s ago") {
+	if v := r.view(); !strings.Contains(v, "refused the key") || strings.Contains(v, "unreachable") || lineOf(v, "host") != "kept-host" || !strings.Contains(v, "6s ago") {
 		t.Fatalf("refused:\n%s", v)
 	}
 	r.advance(InfoEvery)
 	r.waitCalls(4)
 	r.answer(r.goodWindow("fresh-host"))
-	if v := r.view(); strings.Contains(v, "refused") || !strings.Contains(v, "fresh-host") {
+	if v := r.view(); strings.Contains(v, "refused") || lineOf(v, "host") != "fresh-host" {
 		t.Fatalf("recovered:\n%s", v)
 	}
 	if strings.Contains(v, "EXAMPLE_LUX_KEY") {
