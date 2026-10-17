@@ -952,6 +952,45 @@ exec sleep 30`, "stat": "exit 1"}
 	}
 }
 
+// TestWrapperProbeDeadlineSweep: with the deadline moved across the moment
+// df is forked, whatever instant the kill lands, no df outlives the
+// prompt and the facts are all or nothing.
+func TestWrapperProbeDeadlineSweep(t *testing.T) {
+	fakes := map[string]string{"df": `trap '' TERM
+printf '%s\n' "$$" >>"$LM_STATE/df.pids"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 10 0%% workspace\n'
+exec sleep 30`, "stat": "exit 1"}
+	f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
+	deadline := "sleep " + probeSeconds + ";"
+	if !strings.Contains(f.cmd[2], deadline) {
+		t.Fatal("the probe deadline is not in the wrapper")
+	}
+	wrapper := f.cmd[2]
+	for i := 0; i < 40; i++ {
+		f.cmd[2] = strings.Replace(wrapper, deadline, "sleep 0.00"+strconv.Itoa(i%10)+";", 1)
+		if out, _, err := f.wrapper(); err != nil || !strings.HasPrefix(out, "shell:") {
+			t.Fatalf("%q %v", out, err)
+		}
+		if got := f.source(); got[EnvDisk] != "" && got[EnvDisk] != "10240" {
+			t.Fatalf("partial disk %q", got[EnvDisk])
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(f.state, "df.pids"))
+	for _, s := range strings.Fields(string(b)) {
+		pid, err := strconv.Atoi(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for end := time.Now().Add(2 * time.Second); syscall.Kill(pid, 0) == nil && time.Now().Before(end); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("df %d outlived its deadline: %v", pid, err)
+		}
+	}
+}
+
 // TestWrapperRealFacts: LUXMUX_DISK from the real df matches statfs of the
 // workspace, and LUXMUX_BRANCH_CHECKED_OUT from the real git is the branch,
 // then the short sha once detached.
