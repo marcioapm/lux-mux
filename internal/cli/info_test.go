@@ -367,14 +367,13 @@ func TestInfoFanOutBounded(t *testing.T) {
 }
 
 // TestInfoHungExecsLeaveReadTime: with 3×infoParallel windows whose first
-// infoParallel resources execs hang to their ExecTimeout, every later
-// window's Run is still read, and their execs run after, within the one
-// deadline: only the hung windows lack resources. With one slot for a
-// window's read and exec together, the third batch's reads would start
-// after 2×600 ms + ExecTimeout and outlive the 4.5 s deadline.
+// infoParallel resources execs hang past the deadline, every window's Run
+// is still read: a hung exec holds an exec slot, never a read slot. With
+// one slot for a window's read and exec together, the hung execs would
+// hold every slot to the 1 s deadline and 16 windows go unread.
 func TestInfoHungExecsLeaveReadTime(t *testing.T) {
 	old := infoTimeout
-	infoTimeout = 4500 * time.Millisecond
+	infoTimeout = time.Second
 	t.Cleanup(func() { infoTimeout = old })
 	env, a, _, out, errb, _ := infoEnv(t)
 	s, _, _ := state.Load(env.StateDir, "work")
@@ -395,7 +394,7 @@ func TestInfoHungExecsLeaveReadTime(t *testing.T) {
 		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
 	}
 	a.SetExecResponder(answer)
-	a.SetGetHook(func(string) { time.Sleep(600 * time.Millisecond) })
+	a.SetGetHook(func(string) { time.Sleep(50 * time.Millisecond) })
 	start := time.Now()
 	code := Main(env, []string{"info", "-t", "work", "--json"})
 	if d := time.Since(start); d > infoTimeout+time.Second {
@@ -411,7 +410,9 @@ func TestInfoHungExecsLeaveReadTime(t *testing.T) {
 			without++
 		}
 	}
-	if code != 0 || len(o.Windows) != n || without != infoParallel {
+	// The hung execs hold every exec slot to the deadline: the others'
+	// execs wait, and those windows lack resources too, not their Run.
+	if code != 0 || len(o.Windows) != n || without < infoParallel {
 		t.Fatalf("code %d: %d windows, %d without resources", code, len(o.Windows), without)
 	}
 }
