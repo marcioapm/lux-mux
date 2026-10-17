@@ -905,7 +905,7 @@ func TestWrapperProbeProcesses(t *testing.T) {
 	for label, shell := range testShells(t) {
 		for _, hung := range []string{"", "df", "git"} {
 			t.Run(label+"/"+hung, func(t *testing.T) {
-				fakes := map[string]string{"df": "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nvolume 10 0 10 0%% workspace\\n'", "git": "printf 'main\\n'"}
+				fakes := map[string]string{"df": dfFake, "git": "printf 'main\\n'"}
 				if hung != "" {
 					fakes[hung] = `printf '%s' "$$" >"$LM_STATE/probe.pid"
 trap '' TERM
@@ -943,14 +943,7 @@ exec sleep 30`
 					t.Fatalf("processes at shell exec: %v", pids)
 				}
 				if hung != "" {
-					b, err := os.ReadFile(filepath.Join(f.state, "probe.pid"))
-					if err != nil {
-						t.Fatal(err)
-					}
-					pid, err := strconv.Atoi(string(b))
-					if err != nil {
-						t.Fatal(err)
-					}
+					pid := readPid(t, filepath.Join(f.state, "probe.pid"))
 					if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 						t.Fatalf("probe %d remains: %v", pid, err)
 					}
@@ -980,23 +973,7 @@ exec sleep 30`, "stat": "exit 1"}
 			if err != nil || out != "shell:start" || d > 4*time.Second {
 				t.Fatalf("%q %v after %v", out, err, d)
 			}
-			b, err := os.ReadFile(filepath.Join(f.state, "grandchild.pid"))
-			if err != nil {
-				t.Fatalf("the probe never forked: %v", err)
-			}
-			pid, err := strconv.Atoi(string(b))
-			if err != nil {
-				t.Fatal(err)
-			}
-			// SIGKILL is delivered at once, but the exit may lag a moment.
-			deadline := time.Now().Add(2 * time.Second)
-			for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
-				time.Sleep(10 * time.Millisecond)
-			}
-			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-				syscall.Kill(pid, syscall.SIGKILL)
-				t.Fatalf("grandchild %d remains: %v", pid, err)
-			}
+			waitGone(t, readPid(t, filepath.Join(f.state, "grandchild.pid")))
 		})
 	}
 }

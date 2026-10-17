@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"testing"
 	"time"
 
@@ -101,13 +100,11 @@ exec sleep 30`
 				b, _ := cmd.CombinedOutput()
 				outc <- b
 			}()
+			file := filepath.Join(f.state, "df.pid")
 			for pid == 0 && time.Since(start) < 5*time.Second {
-				if b, err := os.ReadFile(filepath.Join(f.state, "df.pid")); err == nil {
-					p, err := strconv.Atoi(string(b))
-					if err != nil {
-						t.Fatal(err)
-					}
-					err = tr.seize(p)
+				if _, err := os.Stat(file); err == nil {
+					p := readPid(t, file)
+					err := tr.seize(p)
 					switch {
 					case errors.Is(err, unix.EPERM):
 						t.Skipf("ptrace not permitted here: %v", err)
