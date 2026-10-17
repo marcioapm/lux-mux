@@ -53,7 +53,7 @@ const usage = `luxmux: a terminal multiplexer whose windows are shells on lux Ru
   luxmux attach [-t NAME]         attach a session (rebuilt from lux if its file is gone)
   luxmux ls                       list sessions
   luxmux info [-t NAME] [WINDOW] [--json]
-                                  a session's windows (WINDOW: an index or a name) as
+                                  a session's windows (WINDOW: an index, else a name) as
                                   their Runs are: image, placement, times, cost, use;
                                   -t defaults to the session it runs in, else main
   luxmux kill-session -t NAME [-y]  terminate a session's Runs and forget it

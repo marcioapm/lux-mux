@@ -476,7 +476,9 @@ the last values, with their age. It scrolls (↑↓, PgUp/PgDn) on a small
 terminal; Esc, `q` or `C-b i` closes it.
 
 **`luxmux info [-t NAME] [WINDOW] [--json]`** prints every window of the
-session in window order, or one: `WINDOW` is an index or a name. Without
+session in window order, or one: `WINDOW` is an index or a name (a
+number that is no window's index is taken as a name: `luxmux info 7`
+finds a window named `7`). Without
 `-t` it is the session of the window it runs in (`$LUXMUX_SESSION`, a
 renamed session found by its Runs' label), else `main`. Each window is
 read from its own lux, all within 10 s; a lux that does not answer marks

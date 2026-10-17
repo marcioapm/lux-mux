@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,5 +254,92 @@ func TestInfoNoSession(t *testing.T) {
 	errb.Reset()
 	if code := Main(env, []string{"info", "-t", "work", "1", "2"}); code == 0 || !strings.Contains(errb.String(), "usage") {
 		t.Fatalf("two windows: %d %q", code, errb.String())
+	}
+}
+
+// TestInfoNumberAsName: a number that is no window's index selects the
+// windows named so; an index in range is still an index.
+func TestInfoNumberAsName(t *testing.T) {
+	env, _, _, out, errb, ids := infoEnv(t)
+	s, _, _ := state.Load(env.StateDir, "work")
+	s.Windows[0].Name, s.Windows[1].Name = "0", "7"
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	for sel, id := range map[string]string{"7": ids[1], "0": ids[0], "1": ids[1]} {
+		out.Reset()
+		if code := Main(env, []string{"info", "-t", "work", sel, "--json"}); code != 0 {
+			t.Fatalf("%s: %s", sel, errb.String())
+		}
+		if o := decodeInfo(t, out.Bytes()); len(o.Windows) != 1 || o.Windows[0].RunID != id {
+			t.Fatalf("%s: %+v", sel, o.Windows)
+		}
+	}
+	errb.Reset()
+	if code := Main(env, []string{"info", "-t", "work", "8"}); code == 0 || !strings.Contains(errb.String(), "no window 8 (it has 2)") {
+		t.Fatalf("8: %d %q", code, errb.String())
+	}
+}
+
+// TestInfoOneDeadlineWithListing: with no session file, a lux that hangs
+// the listing and Runs whose GET hangs cost info one infoTimeout in all,
+// not one for the listing and another for the reads.
+func TestInfoOneDeadlineWithListing(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = 2 * time.Second
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb := twoLuxEnv(t)
+	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
+	id := submitInfo(t, a, cliKeyA, "work", "a")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	a.SetGetHook(func(string) { <-release })
+	start := time.Now()
+	code := Main(env, []string{"info", "-t", "work", "--json"})
+	if d := time.Since(start); d > 3*time.Second || code == 0 {
+		t.Fatalf("%d after %v: %s", code, d, errb.String())
+	}
+	if o := decodeInfo(t, out.Bytes()); len(o.Windows) != 1 || o.Windows[0].RunID != id || o.Windows[0].Problem != info.ProblemUnreachable {
+		t.Fatalf("%+v", o.Windows)
+	}
+}
+
+// TestInfoFanOutBounded: luxmux info reads at most infoParallel windows
+// at once, and reads every window.
+func TestInfoFanOutBounded(t *testing.T) {
+	env, a, _, out, errb, _ := infoEnv(t)
+	s, _, _ := state.Load(env.StateDir, "work")
+	const n = 3 * infoParallel
+	for len(s.Windows) < n {
+		s.Windows = append(s.Windows, state.Window{RunID: s.Windows[0].RunID, Name: "more", Profile: "a"})
+	}
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	cur, peak := 0, 0
+	a.SetGetHook(func(string) {
+		mu.Lock()
+		cur++
+		peak = max(peak, cur)
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		cur--
+		mu.Unlock()
+	})
+	if code := Main(env, []string{"info", "-t", "work", "--json"}); code != 0 {
+		t.Fatalf("%d: %s", code, errb.String())
+	}
+	o := decodeInfo(t, out.Bytes())
+	for i, w := range o.Windows {
+		if w.Problem != "" {
+			t.Fatalf("window %d: %+v", i, w)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(o.Windows) != n || peak > infoParallel || peak < 2 {
+		t.Fatalf("%d windows, %d GETs at once", len(o.Windows), peak)
 	}
 }

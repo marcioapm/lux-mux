@@ -20,6 +20,10 @@ import (
 // variable: tests shorten it.
 var infoTimeout = 10 * time.Second
 
+// infoParallel bounds how many windows luxmux info reads at once (each a
+// GET, a cost and, while running, an exec).
+const infoParallel = 8
+
 // infoCmd is luxmux info [-t SESSION] [WINDOW] [--json]: each window's
 // info, read from its own lux. Flags may follow WINDOW.
 func infoCmd(env Env, args []string) error {
@@ -51,7 +55,11 @@ func infoCmd(env Env, args []string) error {
 	}
 	eps := endpoints(env)
 	x := luxes(env, eps, cfg)
-	targets, err := infoTargets(env, x, session)
+	// One deadline for the whole command: the listing that rebuilds a
+	// session with no file and every window's reads share it.
+	ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
+	defer cancel()
+	targets, err := infoTargets(ctx, env, x, session)
 	if err != nil {
 		return err
 	}
@@ -60,14 +68,17 @@ func infoCmd(env Env, args []string) error {
 			return fmt.Errorf("session %s: %w", session, err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
-	defer cancel()
 	dial := info.Endpoints(eps)
 	sampler := info.NewSampler()
 	out := info.Output{SchemaVersion: info.SchemaVersion, Session: session, Windows: make([]info.Window, len(targets))}
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, infoParallel)
 	for i, t := range targets {
-		wg.Go(func() { out.Windows[i] = info.Gather(ctx, dial, sampler, t, time.Now) })
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out.Windows[i] = info.Gather(ctx, dial, sampler, t, time.Now)
+		})
 	}
 	wg.Wait()
 	if *asJSON {
@@ -123,8 +134,9 @@ func infoSession(env Env, name string) (string, error) {
 }
 
 // infoTargets are session's windows in window order: its file's, else
-// rebuilt from its Runs on every lux, as new-window rebuilds it.
-func infoTargets(env Env, x sessions.Luxes, session string) ([]info.Target, error) {
+// rebuilt from its Runs on every lux within ctx, as new-window rebuilds
+// it.
+func infoTargets(ctx context.Context, env Env, x sessions.Luxes, session string) ([]info.Target, error) {
 	label, err := sessions.Label(env.StateDir, session)
 	if err != nil {
 		return nil, err
@@ -134,9 +146,11 @@ func infoTargets(env Env, x sessions.Luxes, session string) ([]info.Target, erro
 		return nil, err
 	}
 	if !ok {
-		ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
+		// At most half the deadline, so a hung lux's listing leaves the
+		// listed windows time to be read.
+		lctx, cancel := context.WithTimeout(ctx, infoTimeout/2)
 		defer cancel()
-		ls := x.ListSession(ctx, label)
+		ls := x.ListSession(lctx, label)
 		if err := ls.Report(env.Stderr); err != nil {
 			return nil, err
 		}
@@ -154,12 +168,11 @@ func infoTargets(env Env, x sessions.Luxes, session string) ([]info.Target, erro
 	return out, nil
 }
 
-// pickWindow is the window whose index is sel, else those named sel.
+// pickWindow is the window whose index is sel, else those named sel: a
+// number out of range as an index is taken as a name.
 func pickWindow(ts []info.Target, sel string) ([]info.Target, error) {
-	if i, err := strconv.Atoi(sel); err == nil {
-		if i < 0 || i >= len(ts) {
-			return nil, fmt.Errorf("no window %d (it has %d)", i, len(ts))
-		}
+	i, err := strconv.Atoi(sel)
+	if err == nil && i >= 0 && i < len(ts) {
 		return ts[i : i+1], nil
 	}
 	var out []info.Target
@@ -168,8 +181,11 @@ func pickWindow(ts []info.Target, sel string) ([]info.Target, error) {
 			out = append(out, t)
 		}
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no window named %q", sel)
+	switch {
+	case len(out) > 0:
+		return out, nil
+	case err == nil:
+		return nil, fmt.Errorf("no window %d (it has %d)", i, len(ts))
 	}
-	return out, nil
+	return nil, fmt.Errorf("no window named %q", sel)
 }
