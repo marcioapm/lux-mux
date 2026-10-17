@@ -1,19 +1,12 @@
-//go:build !linux
+//go:build !linux && !darwin && !freebsd
 
 package config
 
-import (
-	"syscall"
-	"testing"
-)
+import "testing"
 
-// statfsBytes is the size of the filesystem holding dir; Bsize is the
-// fundamental block size on the BSDs and darwin, which have no Frsize.
-func statfsBytes(t *testing.T, dir string) int64 {
-	t.Helper()
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		t.Fatal(err)
-	}
-	return int64(st.Blocks) * int64(st.Bsize)
+// statfsBytes skips: syscall.Statfs_t has no Blocks/Bsize here (OpenBSD
+// names them F_blocks/F_bsize; NetBSD has no syscall.Statfs).
+func statfsBytes(t *testing.T, _ string) int64 {
+	t.Skipf("no portable statfs in syscall")
+	return 0
 }
