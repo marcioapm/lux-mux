@@ -113,6 +113,26 @@ func (dialogs) Help(m *mux.Mux) error {
 	return err
 }
 
+// Info shows the shown window's info until it is closed, read again every
+// InfoEvery; its reads end with it.
+func (dialogs) Info(m *mux.Mux) error {
+	_, rows, cols := m.Terminal()
+	d := NewInfoDialog(m.Context(), m, prefixKeyName(m.Config().Prefix), muxHost{m}.Background, rows, cols)
+	defer d.Close()
+	_, err := run(m, d)
+	return err
+}
+
+// prefixKeyName is the prefix key as bubbletea names it (ctrl+b), ""
+// when it cannot be read.
+func prefixKeyName(prefix string) string {
+	b, err := config.ParsePrefix(prefix)
+	if err != nil {
+		return ""
+	}
+	return tea.Key{Type: tea.KeyType(b)}.String()
+}
+
 // muxHost is the multiplexer as the dialogs see it.
 type muxHost struct{ m *mux.Mux }
 

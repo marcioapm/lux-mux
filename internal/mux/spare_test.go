@@ -13,6 +13,7 @@ import (
 	"github.com/marcioapm/lux/api"
 
 	"github.com/marcioapm/lux-mux/internal/config"
+	"github.com/marcioapm/lux-mux/internal/info"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
 
@@ -281,6 +282,10 @@ type fakeUI struct {
 	helpMu   sync.Mutex
 	helpOpen bool
 	helpGot  []byte
+	// infoTargets are the windows Info was opened on; infoGot, when set,
+	// receives each FetchInfo's answer.
+	infoTargets []info.Target
+	infoGot     chan info.Window
 
 	// session answers ChooseSession; sessionOpen, when set, is called
 	// with the Mux while the session chooser is open.
@@ -347,6 +352,30 @@ func (f *fakeUI) Help(m *Mux) error {
 			return nil
 		}
 	}
+}
+
+// Info draws a marker and, as the dialog does, reads the shown window off
+// the input path: InfoTarget, then FetchInfo in a goroutine of its own
+// whose answer goes to infoGot. It returns at once, the read still in
+// flight: what the multiplexer does next must not wait on it.
+func (f *fakeUI) Info(m *Mux) error {
+	out, _, _ := m.Terminal()
+	_, _ = out.Write([]byte("\x1b[2J\x1b[HINFO-OPEN"))
+	t, ok := m.InfoTarget()
+	if !ok {
+		return nil
+	}
+	f.helpMu.Lock()
+	f.infoTargets = append(f.infoTargets, t)
+	ch := f.infoGot
+	f.helpMu.Unlock()
+	go func() {
+		w := m.FetchInfo(m.Context(), t)
+		if ch != nil {
+			ch <- w
+		}
+	}()
+	return nil
 }
 
 func (f *fakeUI) helpState() (open bool, got []byte) {
