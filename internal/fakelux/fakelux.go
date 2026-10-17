@@ -521,7 +521,7 @@ func (s *Server) Start(id string) {
 	if !s.beginProcs() {
 		return
 	}
-	defer s.endProcs()
+	defer s.inflight.Done()
 	s.mu.Lock()
 	r := s.runs[id]
 	if r == nil || r.run.State == "terminated" {

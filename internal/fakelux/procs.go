@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// procWait bounds how long Close waits for the processes the fake started
-// to be gone.
+// procWait bounds how long Close waits for the processes it started.
 var procWait = 5 * time.Second
 
 // group is a process group the fake started, as a container holds every
@@ -45,8 +44,8 @@ func (g *group) kill() {
 	}
 }
 
-// beginProcs reserves the start of a Run shell or an exec command; false
-// once Close began. endProcs releases it.
+// beginProcs reserves a Run shell or exec start until inflight.Done;
+// no new starts are admitted once Close begins.
 func (s *Server) beginProcs() bool {
 	s.procMu.Lock()
 	defer s.procMu.Unlock()
@@ -56,8 +55,6 @@ func (s *Server) beginProcs() bool {
 	s.inflight.Add(1)
 	return true
 }
-
-func (s *Server) endProcs() { s.inflight.Done() }
 
 // track records g for Close; a group started while Close runs is killed
 // at once.

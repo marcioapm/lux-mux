@@ -219,44 +219,41 @@ func (s *Server) runExec(ctx context.Context, id string, run *api.Run, envOf fun
 	cmd.WaitDelay = time.Second
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	err := errors.New("the fake is closed")
-	if s.beginProcs() {
-		var g *group
-		err = cmd.Start()
-		if err == nil {
-			g = &group{pgid: cmd.Process.Pid}
-			s.track(g)
-			s.mu.Lock()
-			var t *Terminal
-			if r := s.runs[id]; r != nil {
-				t = r.term
-			}
-			s.mu.Unlock()
-			if t != nil {
-				t.addExec(g)
-			}
+	if !s.beginProcs() {
+		return out.Bytes(), 1
+	}
+	err := cmd.Start()
+	var g *group
+	if err == nil {
+		g = &group{pgid: cmd.Process.Pid}
+		s.track(g)
+		s.mu.Lock()
+		var t *Terminal
+		if r := s.runs[id]; r != nil {
+			t = r.term
 		}
-		s.endProcs()
-		if err == nil {
-			err = cmd.Wait()
-			// A child left holding the output only cuts the copy short
-			// (WaitDelay): lux too reports the command's own exit code.
-			if errors.Is(err, exec.ErrWaitDelay) {
-				err = nil
-				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
-					err = errors.New("exit")
-				}
-			}
-			// Marks a group left empty gone before its number can be reused.
-			g.alive()
+		s.mu.Unlock()
+		if t != nil {
+			t.addExec(g)
 		}
 	}
-	code := 0
+	s.inflight.Done()
 	if err != nil {
-		code = 1
-		if cmd.ProcessState != nil {
-			code = max(cmd.ProcessState.ExitCode(), 1)
-		}
+		return out.Bytes(), 1
 	}
-	return out.Bytes(), code
+	err = cmd.Wait()
+	// Marks a group left empty gone before its number can be reused.
+	g.alive()
+	// WaitDelay only cuts the output copy short; report the command's
+	// own exit code, as lux does.
+	if errors.Is(err, exec.ErrWaitDelay) && (cmd.ProcessState == nil || cmd.ProcessState.Success()) {
+		err = nil
+	}
+	if err == nil {
+		return out.Bytes(), 0
+	}
+	if cmd.ProcessState != nil {
+		return out.Bytes(), max(cmd.ProcessState.ExitCode(), 1)
+	}
+	return out.Bytes(), 1
 }

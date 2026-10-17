@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/api"
-
-	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
 // writerLoop is an sh script that records its pid in $W/<$1>.pid, then
@@ -224,10 +222,7 @@ func execReturned(t *testing.T, done <-chan error) {
 // races a submit (a spare made at teardown) finds it.
 func gatedStart(t *testing.T) (*Server, string, string, func()) {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "runs")
-	s := New()
-	t.Cleanup(s.Close)
-	s.RunShells(dir, "PS1=$ ", "ENV=")
+	s, c, dir := shellServer(t)
 	inner := s.NewTerminal
 	gate := make(chan struct{})
 	var once sync.Once
@@ -241,10 +236,6 @@ func gatedStart(t *testing.T) (*Server, string, string, func()) {
 		spawned <- struct{}{}
 		<-gate
 		return tm
-	}
-	c, err := luxapi.New(s.Config())
-	if err != nil {
-		t.Fatal(err)
 	}
 	go func() { _, _ = c.Submit(context.Background(), waitSpec(forkWriter("shell"))) }()
 	select {
