@@ -109,6 +109,14 @@ type Server struct {
 	resumability map[string]*api.Resumability
 	costs        map[string]*luxapi.RunCost
 
+	// groups are the process groups of every Run shell and exec started;
+	// inflight counts starts under way. Both are under procMu, and none
+	// is started once procsClosed.
+	procMu      sync.Mutex
+	procsClosed bool
+	groups      []*group
+	inflight    sync.WaitGroup
+
 	// failing: every attach to the Run is ended with this error as its
 	// first frame (FailAttaches).
 	failing map[string]string
@@ -320,7 +328,9 @@ func (s *Server) FeedOpens() int {
 	return s.feedOpens
 }
 
-// Close stops the server and every terminal.
+// Close stops the server and every terminal, and returns once every
+// process of every Run shell and exec it started is gone (procWait at
+// most), so nothing writes in a Run's directories any more.
 func (s *Server) Close() {
 	s.mu.Lock()
 	for _, r := range s.runs {
@@ -333,6 +343,7 @@ func (s *Server) Close() {
 	}
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	s.stopProcs()
 	s.Server.CloseClientConnections()
 	s.Server.Close()
 }
@@ -507,6 +518,10 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 // Start takes a Run through its start stages to running, on a new
 // placement with a new terminal.
 func (s *Server) Start(id string) {
+	if !s.beginProcs() {
+		return
+	}
+	defer s.inflight.Done()
 	s.mu.Lock()
 	r := s.runs[id]
 	if r == nil || r.run.State == "terminated" {
@@ -521,6 +536,7 @@ func (s *Server) Start(id string) {
 	run := *r.run
 	s.mu.Unlock()
 	t := s.NewTerminal(&run)
+	s.track(t.procs)
 	s.mu.Lock()
 	// A terminate while the terminal was made has already ended the Run.
 	if r.run.State == "terminated" {

@@ -24,6 +24,11 @@ type Terminal struct {
 	closer  func()
 	resizes [][2]int
 	code    int
+	// procs is the process group of a ShellTerminal (nil for others);
+	// execs are the groups of the exec commands run on this placement.
+	// Exit kills both, as a container stop does.
+	procs *group
+	execs []*group
 }
 
 func newTerminal(rows, cols int) *Terminal {
@@ -179,14 +184,34 @@ func (t *Terminal) ExitCode() int {
 }
 
 // Exit ends the terminal as if its process exited (with code 0, unless
-// ExitWith set another).
+// ExitWith set another). Every process of the placement is killed: the
+// shell's group and every exec's.
 func (t *Terminal) Exit() {
 	t.once.Do(func() {
 		close(t.gone)
 		if t.closer != nil {
 			t.closer()
 		}
+		t.mu.Lock()
+		gs := t.execs
+		t.mu.Unlock()
+		for _, g := range gs {
+			g.kill()
+		}
 	})
+}
+
+// addExec makes Exit kill g; when the terminal has exited already, g is
+// killed now.
+func (t *Terminal) addExec(g *group) {
+	t.mu.Lock()
+	t.execs = append(t.execs, g)
+	t.mu.Unlock()
+	select {
+	case <-t.gone:
+		g.kill()
+	default:
+	}
 }
 
 // Screen runs fn with the emulator, under the terminal's lock.
@@ -225,7 +250,9 @@ func ShellTerminal(rows, cols int, argv []string, env []string) (*Terminal, erro
 
 // ShellTerminalIn is ShellTerminal with working directory dir ("": the
 // test process's). Later entries of env replace earlier ones of the same
-// name, the test process's included.
+// name, the test process's included. The process leads a new session and
+// so its own process group, which Exit kills whole: background children
+// die with the shell.
 func ShellTerminalIn(rows, cols int, argv []string, env []string, dir string) (*Terminal, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), env...)
@@ -235,12 +262,11 @@ func ShellTerminalIn(rows, cols int, argv []string, env []string, dir string) (*
 		return nil, err
 	}
 	t := newTerminal(rows, cols)
+	t.procs = &group{pgid: cmd.Process.Pid}
 	t.in = f
 	t.resize = func(r, c int) { _ = pty.Setsize(f, &pty.Winsize{Rows: uint16(r), Cols: uint16(c)}) }
 	t.closer = func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		t.procs.kill()
 		_ = f.Close()
 	}
 	go func() {
@@ -255,6 +281,8 @@ func ShellTerminalIn(rows, cols int, argv []string, env []string, dir string) (*
 			}
 		}
 		_ = cmd.Wait()
+		// The workload's exit ends its container: what it left running dies.
+		t.procs.kill()
 		if cmd.ProcessState != nil {
 			t.ExitWith(max(cmd.ProcessState.ExitCode(), 0))
 		} else {

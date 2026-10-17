@@ -17,14 +17,7 @@ import (
 // run.
 func shellRun(t *testing.T, sp api.RunSpec) (*Server, *luxapi.Client, string, string) {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "runs")
-	s := New()
-	t.Cleanup(s.Close)
-	s.RunShells(dir, "PS1=$ ", "ENV=")
-	c, err := luxapi.New(s.Config())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, c, dir := shellServer(t)
 	r, err := c.Submit(context.Background(), sp)
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +26,19 @@ func shellRun(t *testing.T, sp api.RunSpec) (*Server, *luxapi.Client, string, st
 		t.Fatalf("run %s is %s", r.ID, s.Run(r.ID).State)
 	}
 	return s, c, dir, r.ID
+}
+
+func shellServer(t *testing.T) (*Server, *luxapi.Client, string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "runs")
+	s := New()
+	t.Cleanup(s.Close)
+	s.RunShells(dir, "PS1=$ ", "ENV=")
+	c, err := luxapi.New(s.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, c, dir
 }
 
 // probeSpec is a spec whose workload writes its cwd, HOME and USER into
