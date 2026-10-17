@@ -279,7 +279,7 @@ func TestWrapperText(t *testing.T) {
 
 // baseTools are the external commands the wrapper and WindowNameScript
 // use; fixtures give them a PATH holding these and nothing else.
-var baseTools = []string{"sh", "cat", "mv", "chmod", "rm", "mkdir", "sleep", "flock", "timeout", "setsid"}
+var baseTools = []string{"sh", "cat", "mv", "chmod", "rm", "mkdir", "sleep", "flock", "timeout", "setsid", "id", "find"}
 
 // realTool resolves a command, preferring the system's own binary over a
 // PATH wrapper that a restricted PATH could not run.
@@ -988,6 +988,68 @@ exec sleep 30`, "stat": "exit 1"}
 			syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("df %d outlived its deadline: %v", pid, err)
 		}
+	}
+}
+
+// TestWrapperSweepsProbeDirs: a placement removes the .luxmux-probe.<pid>
+// directories an earlier wrapper killed mid-probe left in TMPDIR or on the
+// state volume, and keeps one whose pid is alive, another user's, and any
+// other name.
+func TestWrapperSweepsProbeDirs(t *testing.T) {
+	gone := exec.Command("true")
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	dead, live := strconv.Itoa(gone.Process.Pid), strconv.Itoa(os.Getpid())
+	for label, shell := range testShells(t) {
+		t.Run(label, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, nil), Profile{Image: "alpine"})
+			f.shell = shell
+			tmp, state := filepath.Join(f.dir, "tmp"), filepath.Join(f.dir, ".luxmux")
+			mk := func(dir, name string) string {
+				p := filepath.Join(dir, name)
+				if err := os.MkdirAll(p, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(p, "df"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}
+			stale := []string{mk(tmp, ".luxmux-probe."+dead), mk(state, ".luxmux-probe."+dead)}
+			kept := []string{mk(tmp, ".luxmux-probe."+live), mk(state, ".luxmux-probe."+live), mk(tmp, ".luxmux-probe.x1"), mk(tmp, "luxmux-probe."+dead)}
+			file := filepath.Join(state, ".luxmux-probe.1"+dead)
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.mustWrapper()
+			for _, p := range stale {
+				if _, err := os.Stat(p); !os.IsNotExist(err) {
+					t.Errorf("stale %s remains: %v", p, err)
+				}
+			}
+			for _, p := range kept {
+				if _, err := os.Stat(filepath.Join(p, "df")); err != nil {
+					t.Errorf("%s removed: %v", p, err)
+				}
+			}
+			if _, err := os.Stat(file); err != nil {
+				t.Errorf("a file named like a probe directory was removed: %v", err)
+			}
+			// Directories that are not this user's stay: with id reporting
+			// another uid, the dead pid's directories are not this user's.
+			// BusyBox sh runs id as an applet, past a PATH fake.
+			if label != "sh" {
+				return
+			}
+			g := newFixture(t, toolDir(t, baseTools, map[string]string{"id": "echo " + strconv.Itoa(os.Getuid()+1)}), Profile{Image: "alpine"})
+			g.shell = shell
+			other := mk(filepath.Join(g.dir, "tmp"), ".luxmux-probe."+dead)
+			g.mustWrapper()
+			if _, err := os.Stat(filepath.Join(other, "df")); err != nil {
+				t.Errorf("another user's %s removed: %v", other, err)
+			}
+		})
 	}
 }
 
