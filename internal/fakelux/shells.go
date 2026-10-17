@@ -239,6 +239,14 @@ func (s *Server) runExec(ctx context.Context, id string, run *api.Run, envOf fun
 		s.endProcs()
 		if err == nil {
 			err = cmd.Wait()
+			// A child left holding the output only cuts the copy short
+			// (WaitDelay): lux too reports the command's own exit code.
+			if errors.Is(err, exec.ErrWaitDelay) {
+				err = nil
+				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
+					err = errors.New("exit")
+				}
+			}
 			// Marks a group left empty gone before its number can be reused.
 			g.alive()
 		}

@@ -9,7 +9,7 @@ import (
 
 // procWait bounds how long Close waits for the processes the fake started
 // to be gone.
-const procWait = 5 * time.Second
+var procWait = 5 * time.Second
 
 // group is a process group the fake started, as a container holds every
 // process of a Run: a Run's shell (its pty session) or one exec command.

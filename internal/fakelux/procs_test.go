@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/api"
+
+	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
 // writerLoop is an sh script that records its pid in $W/<$1>.pid, then
@@ -159,10 +161,11 @@ func TestExecClientGoneKillsGroup(t *testing.T) {
 		_, err := c.Exec(ctx, id, []string{"sh", "-c", forkWriter("exec") + "\nexec sleep 60"})
 		done <- err
 	}()
+	defer cancel()
 	pids := pidsOf(t, dir, id, "exec")
 	writing(t, dir, id, "exec")
 	cancel()
-	<-done
+	execReturned(t, done)
 	if !WaitFor(context.Background(), 2*time.Second, func() bool { return len(running(pids)) == 0 }) {
 		t.Fatalf("processes %v still exist 2 s after the exec's client went away", running(pids))
 	}
@@ -180,6 +183,7 @@ func TestCloseAfterExecClientLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		_, err := c.Exec(ctx, id, []string{"sh", "-c", `echo $$ >"$1/started"; sleep 0.3; mkdir -p "$1"; echo late >"$1/window"`, "sh", sub})
@@ -192,7 +196,7 @@ func TestCloseAfterExecClientLeft(t *testing.T) {
 		t.Fatal("the exec never started")
 	}
 	cancel()
-	<-done
+	execReturned(t, done)
 	s.Close()
 	if err := os.RemoveAll(sub); err != nil {
 		t.Fatal(err)
@@ -200,5 +204,105 @@ func TestCloseAfterExecClientLeft(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if _, err := os.Stat(sub); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("%s was recreated after Close returned: %v", sub, err)
+	}
+}
+
+// execReturned fails the test when an exec whose client went away does
+// not return within 5 s, instead of hanging the package.
+func execReturned(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exec did not return after its client went away")
+	}
+}
+
+// gatedStart submits a Run whose shell has spawned (and forked a writer)
+// while Start is held before it hands the terminal back, as a Close that
+// races a submit (a spare made at teardown) finds it.
+func gatedStart(t *testing.T) (*Server, string, string, chan struct{}) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "runs")
+	s := New()
+	t.Cleanup(s.Close)
+	s.RunShells(dir, "PS1=$ ", "ENV=")
+	inner := s.NewTerminal
+	gate := make(chan struct{})
+	spawned := make(chan struct{}, 1)
+	s.NewTerminal = func(run *api.Run) *Terminal {
+		tm := inner(run)
+		spawned <- struct{}{}
+		<-gate
+		return tm
+	}
+	c, err := luxapi.New(s.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = c.Submit(context.Background(), waitSpec(forkWriter("shell"))) }()
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		close(gate)
+		t.Fatal("the Run's shell never spawned")
+	}
+	s.mu.Lock()
+	id := s.order[0]
+	s.mu.Unlock()
+	return s, dir, id, gate
+}
+
+// TestCloseWaitsInflightStart: Close during a Start under way does not
+// return while that Start's processes run.
+func TestCloseWaitsInflightStart(t *testing.T) {
+	s, dir, id, gate := gatedStart(t)
+	pids := pidsOf(t, dir, id, "shell")
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	select {
+	case <-closed:
+		if left := running(pids); len(left) > 0 {
+			close(gate)
+			t.Fatalf("Close returned while %v of an in-flight Start still exist", left)
+		}
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(gate)
+	<-closed
+	assertStopped(t, dir, id, "shell", pids)
+}
+
+// TestLateStartKilled: a Start that finishes after Close stopped waiting
+// for it (procWait) has its processes killed as it registers them.
+func TestLateStartKilled(t *testing.T) {
+	old := procWait
+	procWait = 300 * time.Millisecond
+	t.Cleanup(func() { procWait = old })
+	s, dir, id, gate := gatedStart(t)
+	pids := pidsOf(t, dir, id, "shell")
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	time.Sleep(procWait + 300*time.Millisecond)
+	close(gate)
+	<-closed
+	if !WaitFor(context.Background(), 2*time.Second, func() bool { return len(running(pids)) == 0 }) {
+		t.Fatalf("processes %v of a Start finished after Close still exist", running(pids))
+	}
+}
+
+// TestExecLeavingChildReportsItsCode: an exec whose command exits while a
+// child it left holds the output reports the command's exit code, as lux
+// does, not a failure.
+func TestExecLeavingChildReportsItsCode(t *testing.T) {
+	_, c, _, id := shellRun(t, waitSpec(""))
+	for want, script := range map[int]string{0: "echo hi; sleep 3 & exit 0", 3: "echo hi; sleep 3 & exit 3"} {
+		_, code, err := c.ExecOutput(context.Background(), id, []string{"sh", "-c", script}, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != want {
+			t.Errorf("%q: exit %d, want %d", script, code, want)
+		}
 	}
 }
