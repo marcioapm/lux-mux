@@ -24,6 +24,16 @@ func submitted(t *testing.T, s *Server) (*luxapi.Client, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Submit answers before Start runs: wait for it, or Start would
+	// overwrite what the test sets next.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if got, err := c.Get(context.Background(), r.ID); err == nil && got.State == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never ran", r.ID)
+		}
+	}
 	return c, r.ID
 }
 

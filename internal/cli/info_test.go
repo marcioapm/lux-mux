@@ -62,6 +62,16 @@ func submitInfo(t *testing.T, l *fakelux.Server, key, session, profile string) s
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Submit answers before fakelux starts the Run: wait for running, or
+	// Start overwrites the Host and Epoch infoEnv sets next.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if got, err := c.Get(context.Background(), r.ID); err == nil && got.State == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never ran", r.ID)
+		}
+	}
 	return r.ID
 }
 
@@ -118,6 +128,10 @@ func TestInfoJSONRoundTrip(t *testing.T) {
 		t.Fatalf("%+v", o)
 	}
 	w := o.Windows[1]
+	if w.Placement == nil || w.Placement.Moves == nil || w.Timing == nil || w.Timing.RuntimeSeconds == nil || w.Timing.StageSince == nil ||
+		w.Cost == nil || len(w.Cost.Totals) == 0 || w.Egress == nil || w.Resources == nil || w.Resources.MemoryBytes == nil {
+		t.Fatalf("window 1 lacks a section: %+v", w)
+	}
 	if w.Index != 1 || w.Name != "web" || w.RunID != ids[1] || w.Placement.Host != "host-b" || *w.Placement.Moves != 1 ||
 		*w.Timing.RuntimeSeconds != 4000 || w.Cost.Totals[0].Amount != "0.75" || w.Egress.Policy != info.EgressAllowlist ||
 		*w.Resources.MemoryBytes != 512<<20 || w.Timing.StageSince.Format(time.RFC3339) != "2026-01-02T03:00:00Z" {
@@ -172,7 +186,7 @@ func TestInfoSelectWindow(t *testing.T) {
 	if code := Main(env, []string{"info", "0", "--json"}); code != 0 {
 		t.Fatal(errb.String())
 	}
-	if o := decodeInfo(t, out.Bytes()); o.Session != "work" || o.Windows[0].RunID != ids[0] {
+	if o := decodeInfo(t, out.Bytes()); o.Session != "work" || len(o.Windows) != 1 || o.Windows[0].RunID != ids[0] {
 		t.Fatalf("$LUXMUX_SESSION: %+v", o)
 	}
 	// A renamed session is found from its Runs' label.
@@ -193,8 +207,8 @@ func TestInfoOneLuxDown(t *testing.T) {
 		t.Fatalf("%d: %s", code, errb.String())
 	}
 	o := decodeInfo(t, out.Bytes())
-	if o.Windows[0].Problem != "" || o.Windows[0].Placement.Host != "host-a" {
-		t.Fatalf("the healthy lux's window: %+v", o.Windows[0])
+	if len(o.Windows) != 2 || o.Windows[0].Problem != "" || o.Windows[0].Placement == nil || o.Windows[0].Placement.Host != "host-a" {
+		t.Fatalf("the healthy lux's window: %+v", o.Windows)
 	}
 	if w := o.Windows[1]; w.Problem != info.ProblemUnreachable || w.RunID != ids[1] || w.Placement != nil ||
 		!strings.Contains(w.Error, "lux unreachable") || !strings.Contains(w.Error, "tenant example") {
@@ -226,7 +240,7 @@ func TestInfoHungLuxBounded(t *testing.T) {
 		t.Fatalf("%d after %v: %s", code, d, errb.String())
 	}
 	o := decodeInfo(t, out.Bytes())
-	if o.Windows[0].Problem != "" || o.Windows[1].Problem != info.ProblemUnreachable {
+	if len(o.Windows) != 2 || o.Windows[0].Problem != "" || o.Windows[1].Problem != info.ProblemUnreachable {
 		t.Fatalf("%+v", o.Windows)
 	}
 }
