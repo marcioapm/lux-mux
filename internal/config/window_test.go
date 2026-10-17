@@ -418,6 +418,20 @@ func (f *fixture) mustName(name string, extra ...string) {
 
 func (f *fixture) path(name string) string { return filepath.Join(f.dir, ".luxmux", name) }
 
+// probeDeadline is the watchdog's sleep in the wrapper text.
+const probeDeadline = "sleep " + probeSeconds + ";"
+
+// shortProbes gives f's wrapper a probe deadline of d seconds, so tests of
+// what happens at the deadline do not each wait the production second;
+// TestWrapperProbesBounded/hung keeps the production value.
+func (f *fixture) shortProbes(d string) {
+	f.t.Helper()
+	if !strings.Contains(f.cmd[2], probeDeadline) {
+		f.t.Fatal("the probe deadline is not in the wrapper")
+	}
+	f.cmd[2] = strings.Replace(f.cmd[2], probeDeadline, "sleep "+d+";", 1)
+}
+
 // source runs ". env" in a shell with an empty environment and returns
 // every LUXMUX_* value it defines.
 func (f *fixture) source() map[string]string {
@@ -801,6 +815,7 @@ exec REAL_timeout "$@"`},
 				tools = toolsWithout("timeout")
 			}
 			f := newFixture(t, toolDir(t, tools, fakes), Profile{Image: "alpine"})
+			f.shortProbes("0.3")
 			out, d, err := f.wrapper(repo(f))
 			if err != nil || out != "shell:start" || d > 3*time.Second {
 				t.Fatalf("%q %v after %v", out, err, d)
@@ -870,6 +885,7 @@ exec sleep 30`
 				ps := realTool(t, "ps")
 				f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine", Shell: []string{ps, "-e", "-o", "pid=,pgid="}})
 				f.shell = shell
+				f.shortProbes("0.3")
 				repo := filepath.Join(f.dir, "repo")
 				if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
 					t.Fatal(err)
@@ -930,6 +946,7 @@ while [ ! -s "$LM_STATE/grandchild.pid" ]; do sleep 0.01; done
 exec sleep 30`, "stat": "exit 1"}
 			f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
 			f.shell = shell
+			f.shortProbes("0.3")
 			out, d, err := f.wrapper()
 			if err != nil || out != "shell:start" || d > 4*time.Second {
 				t.Fatalf("%q %v after %v", out, err, d)
@@ -964,13 +981,10 @@ printf '%s\n' "$$" >>"$LM_STATE/df.pids"
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 10 0%% workspace\n'
 exec sleep 30`, "stat": "exit 1"}
 	f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
-	deadline := "sleep " + probeSeconds + ";"
-	if !strings.Contains(f.cmd[2], deadline) {
-		t.Fatal("the probe deadline is not in the wrapper")
-	}
 	wrapper := f.cmd[2]
 	for i := 0; i < 40; i++ {
-		f.cmd[2] = strings.Replace(wrapper, deadline, "sleep 0.00"+strconv.Itoa(i%10)+";", 1)
+		f.cmd[2] = wrapper
+		f.shortProbes("0.00" + strconv.Itoa(i%10))
 		if out, _, err := f.wrapper(); err != nil || !strings.HasPrefix(out, "shell:") {
 			t.Fatalf("%q %v", out, err)
 		}

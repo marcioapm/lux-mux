@@ -80,6 +80,7 @@ while [ ! -e "$LM_STATE/seized" ]; do sleep 0.01; done
 exec sleep 30`
 			f := newFixture(t, toolDir(t, baseTools, map[string]string{"df": stuck, "stat": "exit 1"}), Profile{Image: "alpine"})
 			f.shell = shell
+			f.shortProbes("0.5")
 			tr := newStuckTracer()
 			pid := 0
 			defer func() {
