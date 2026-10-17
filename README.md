@@ -458,9 +458,11 @@ reports as `complete` or `final` is shown even when it is zero
 
 lux v0.1.30 has no usage endpoint, so resources in use are read inside
 the Run with lux's exec API: one fixed POSIX `sh` script reads the
-**cgroup v2** files `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
-`memory.current` (a cgroup v1 host has none of them: CPU is `— cpus`,
-memory is left out, and only disk is read),
+cgroup v2 files `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
+`memory.current`, or on a cgroup v1 host, for each one missing, the v1
+file instead: `cpu.cfs_quota_us`/`cpu.cfs_period_us` (`-1` is no limit),
+`cpuacct.usage`, `memory.limit_in_bytes` (its huge default is no limit)
+and `memory.usage_in_bytes`;
 and `df -Pk /workspace`. It needs nothing but `sh` and
 `df` (BusyBox's do), uses no `timeout(1)`, and luxmux ends it after 3 s.
 CPU in use is a rate: the usage between two readings over the time

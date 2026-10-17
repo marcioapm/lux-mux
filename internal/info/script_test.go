@@ -34,7 +34,11 @@ func runScript(t *testing.T, shell []string, cg map[string]string, df string) st
 			t.Fatal(err)
 		}
 		for name, body := range cg {
-			if err := os.WriteFile(filepath.Join(cgDir, name), []byte(body), 0o644); err != nil {
+			p := filepath.Join(cgDir, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -107,6 +111,49 @@ func TestResourcesScript(t *testing.T) {
 			}
 			if !applet && !strings.Contains(out, "df  \n") {
 				t.Fatalf("failing df: %q", out)
+			}
+		})
+	}
+}
+
+// TestResourcesScriptCgroupV1: on a cgroup v1 layout (no v2 file) the
+// script reads the v1 controllers' files into the same lines: a quota
+// over a period, -1 and the page-rounded 2^63-1 as no limit, and
+// cpuacct.usage's nanoseconds as usec. A v2 file present wins over v1.
+func TestResourcesScriptCgroupV1(t *testing.T) {
+	limited := map[string]string{"cpu/cpu.cfs_quota_us": "150000\n", "cpu/cpu.cfs_period_us": "100000\n",
+		"memory/memory.limit_in_bytes": "2147483648\n", "memory/memory.usage_in_bytes": "1048576\n",
+		"cpuacct/cpuacct.usage": "123456789012\n", "cpu/cpu.stat": "nr_periods 3\nnr_throttled 0\n"}
+	unlimited := map[string]string{"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n",
+		"memory/memory.limit_in_bytes": "9223372036854771712\n", "memory/memory.usage_in_bytes": "4096\n",
+		"cpuacct/cpuacct.usage": "999\n"}
+	both := map[string]string{"cpu.max": "200000 100000\n", "memory.max": "8589934592\n", "memory.current": "1073741824\n",
+		"cpu.stat": "usage_usec 77\n"}
+	for k, v := range limited {
+		both[k] = v
+	}
+	for name, shell := range scriptShells(t) {
+		t.Run(name, func(t *testing.T) {
+			out := runScript(t, shell, limited, "-")
+			r := ParseReading([]byte(out))
+			if r.CPULimit == nil || *r.CPULimit != 1.5 || r.MemoryLimit == nil || *r.MemoryLimit != 2<<30 ||
+				r.Memory == nil || *r.Memory != 1<<20 || r.UsageUsec == nil || *r.UsageUsec != 123456789 {
+				t.Fatalf("v1 limited: %q → %+v", out, r)
+			}
+			out = runScript(t, shell, unlimited, "-")
+			r = ParseReading([]byte(out))
+			if r.CPULimit != nil || r.MemoryLimit != nil || r.Memory == nil || *r.Memory != 4096 || r.UsageUsec == nil || *r.UsageUsec != 0 {
+				t.Fatalf("v1 unlimited: %q → %+v", out, r)
+			}
+			out = runScript(t, shell, both, "-")
+			r = ParseReading([]byte(out))
+			if r.CPULimit == nil || *r.CPULimit != 2 || *r.MemoryLimit != 8<<30 || *r.Memory != 1<<30 || *r.UsageUsec != 77 {
+				t.Fatalf("v2 beside v1: %q → %+v", out, r)
+			}
+			// A v1 quota without its period is no reading, not half a line.
+			out = runScript(t, shell, map[string]string{"cpu/cpu.cfs_quota_us": "50000\n"}, "-")
+			if !strings.Contains(out, "cpu.max \n") {
+				t.Fatalf("quota alone: %q", out)
 			}
 		})
 	}

@@ -15,19 +15,41 @@ import (
 // ResourcesScript is the one command luxmux execs in a running Run to
 // read what it uses (lux v0.1.30 has no usage endpoint): the cgroup v2
 // files cpu.max, cpu.stat's usage_usec, memory.max and memory.current,
-// and df -Pk of the state volume. It prints one "key value…" line each,
-// a missing file as an empty value; an image without df prints no df
-// line. POSIX sh, BusyBox's included; no timeout(1): the caller's
-// ExecTimeout ends the exec, and lux's shim kills the command's process
-// group when the exec's client goes away. The test-only variables point
-// it at fixtures, as the start wrapper's do.
+// and df -Pk of the state volume. A v2 file that is missing falls back
+// to its cgroup v1 file under the controller's directory: cpu.cfs_quota_us
+// and cpu.cfs_period_us (printed as cpu.max, a quota of -1 for none),
+// memory.limit_in_bytes, memory.usage_in_bytes, and cpuacct.usage in ns
+// (printed in usec, its last three digits cut). It prints one "key
+// value…" line each, a missing file as an empty value; an image without
+// df prints no df line. POSIX sh, BusyBox's included, builtins only but
+// df; no timeout(1): the caller's ExecTimeout ends the exec, and lux's
+// shim kills the command's process group when the exec's client goes
+// away. The test-only variables point it at fixtures, as the start
+// wrapper's do.
 var ResourcesScript = `_lm_cg=${` + config.EnvTestCgroup + `:-/sys/fs/cgroup}
 _lm_ws=${` + config.EnvTestWorkspace + `:-/workspace}
-for _lm_f in cpu.max memory.max memory.current; do
+_lm_rd() {
 	_lm_v=
-	{ IFS= read -r _lm_v <"$_lm_cg/$_lm_f"; } 2>/dev/null
-	printf '%s %s\n' "$_lm_f" "$_lm_v"
-done
+	{ IFS= read -r _lm_v <"$_lm_cg/$1"; } 2>/dev/null
+}
+_lm_rd cpu.max
+if [ -z "$_lm_v" ]; then
+	_lm_rd cpu/cpu.cfs_quota_us
+	_lm_q=$_lm_v
+	_lm_rd cpu/cpu.cfs_period_us
+	if [ -z "$_lm_q" ]; then
+		_lm_v=
+	elif [ -n "$_lm_v" ]; then
+		_lm_v="$_lm_q $_lm_v"
+	fi
+fi
+printf 'cpu.max %s\n' "$_lm_v"
+_lm_rd memory.max
+[ -n "$_lm_v" ] || _lm_rd memory/memory.limit_in_bytes
+printf 'memory.max %s\n' "$_lm_v"
+_lm_rd memory.current
+[ -n "$_lm_v" ] || _lm_rd memory/memory.usage_in_bytes
+printf 'memory.current %s\n' "$_lm_v"
 _lm_u=
 {
 	while read -r _lm_k _lm_x; do
@@ -37,6 +59,14 @@ _lm_u=
 		fi
 	done <"$_lm_cg/cpu.stat"
 } 2>/dev/null
+if [ -z "$_lm_u" ]; then
+	_lm_rd cpuacct/cpuacct.usage
+	case $_lm_v in
+	'' | *[!0-9]*) ;;
+	????*) _lm_u=${_lm_v%???} ;;
+	*) _lm_u=0 ;;
+	esac
+fi
 printf 'cpu.usage_usec %s\n' "$_lm_u"
 if command -v df >/dev/null 2>&1; then
 	df -Pk "$_lm_ws" 2>/dev/null | {
@@ -70,6 +100,7 @@ func ParseReading(out []byte) Reading {
 		f := strings.Fields(v)
 		switch k {
 		case "cpu.max":
+			// v2's "max PERIOD" and v1's "-1 PERIOD" are no limit.
 			if len(f) == 2 {
 				q, e1 := strconv.ParseInt(f[0], 10, 64)
 				p, e2 := strconv.ParseInt(f[1], 10, 64)
@@ -79,7 +110,10 @@ func ParseReading(out []byte) Reading {
 				}
 			}
 		case "memory.max":
-			r.MemoryLimit = count(f)
+			// v1 has no "max": its no limit is a page-rounded 2^63-1.
+			if n := count(f); n != nil && *n < memoryUnlimited {
+				r.MemoryLimit = n
+			}
 		case "memory.current":
 			r.Memory = count(f)
 		case "cpu.usage_usec":
@@ -97,6 +131,9 @@ func ParseReading(out []byte) Reading {
 	}
 	return r
 }
+
+// memoryUnlimited: a memory limit from it up (4 EiB) is no limit.
+const memoryUnlimited = 1 << 62
 
 func count(f []string) *int64 {
 	if len(f) != 1 {
