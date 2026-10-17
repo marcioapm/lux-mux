@@ -136,6 +136,7 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	r := s.runs[id]
 	envOf := s.ExecEnv
+	responder := s.execResponder
 	var run api.Run
 	if r != nil {
 		run = *r.run
@@ -145,7 +146,7 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 	case r == nil:
 		writeErr(w, 404, "not_found", "no such run")
 		return
-	case run.State != "running" || envOf == nil:
+	case run.State != "running" || (envOf == nil && responder == nil):
 		writeErr(w, 409, "not_running", "run is "+run.State+": interactive access needs it running")
 		return
 	}
@@ -164,6 +165,16 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	s.execs = append(s.execs, slices.Clone(open.Command))
 	s.mu.Unlock()
+	if a, ok := s.execResponse(id, open.Command); ok {
+		// A hang lasts until the client goes away, not the 10 s above.
+		respondExec(req.Context(), ws, a)
+		return
+	}
+	if envOf == nil {
+		// The responder declined this one and no command runs here.
+		_ = wsjson.Write(ctx, ws, api.StreamData{Error: "the workload has not started yet"})
+		return
+	}
 	cmd := exec.CommandContext(ctx, open.Command[0], open.Command[1:]...)
 	env := envOf(&run)
 	cmd.Env = append(os.Environ(), env...)
