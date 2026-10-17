@@ -517,6 +517,9 @@ func TestPlainURLFailsClosed(t *testing.T) {
 		"https://user:tok@example.com:x/r.git":  "https://example.com:x/r.git",
 		"https://u:t@k@example.com:x":           "https://example.com:x",
 		"https://u:to/k@example.com:x/r.git":    UnparseableURL,
+		// scp-style: the user is an SSH login, kept.
+		"git@github.com:o/r.git":               "git@github.com:o/r.git",
+		"deploy@git.example.com:team/repo.git": "deploy@git.example.com:team/repo.git",
 	} {
 		if got := PlainURL(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)

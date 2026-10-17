@@ -257,6 +257,8 @@ func workloadOf(r *api.Run) *Workload {
 // PlainURL is u without credentials in it. A u url.Parse refuses loses
 // everything of its authority up to the last "@"; one that still holds
 // an "@" after that (a credential with a "/" in it) is not shown at all.
+// An scp-style user@host:path, which url.Parse refuses too, is kept as
+// it is: its user is an SSH login, not a secret, and it has no password.
 func PlainURL(u string) string {
 	p, err := url.Parse(u)
 	if err == nil {
@@ -268,10 +270,9 @@ func PlainURL(u string) string {
 	}
 	scheme, rest, ok := strings.Cut(u, "://")
 	if !ok {
-		scheme, rest = "", u
-	} else {
-		scheme += "://"
+		return u
 	}
+	scheme += "://"
 	auth, path, slash := strings.Cut(rest, "/")
 	if i := strings.LastIndex(auth, "@"); i >= 0 {
 		auth = auth[i+1:]
