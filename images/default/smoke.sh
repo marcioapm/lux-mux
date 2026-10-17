@@ -9,7 +9,17 @@ fail() {
 	exit 1
 }
 
-# The workload user and home luxmux's home volume is mounted for.
+run() {
+	"$@" >/dev/null 2>&1 || fail "'$*' exited non-zero"
+	echo "ok: $*"
+}
+
+# One ffprobe field list as a CSV line, without the section prefix.
+ffprobe_csv() {
+	ffprobe -v error -of csv=p=0 "$@" 2>/dev/null
+}
+
+# The workload user and the home luxmux's home volume is mounted at.
 [ "$(id -un)" = agent ] || fail "workload user is $(id -un), want agent"
 [ "$(id -u)" = 1000 ] || fail "workload uid is $(id -u), want 1000"
 [ "${HOME:-}" = /home/agent ] || fail "HOME is '${HOME:-}', want /home/agent"
@@ -17,11 +27,6 @@ probe="$HOME/.smoke-write.$$"
 # A subshell: a failed redirection on a special builtin would exit this shell.
 (: >"$probe") 2>/dev/null || fail "HOME $HOME is not writable by $(id -un)"
 rm -f "$probe"
-
-run() {
-	"$@" >/dev/null 2>&1 || fail "'$*' exited non-zero"
-	echo "ok: $*"
-}
 
 for tool in claude opencode codex git gh node uv rg fd espeak-ng edge-tts; do
 	v=$("$tool" --version 2>/dev/null) || fail "'$tool --version' exited non-zero"
@@ -37,7 +42,6 @@ v26.*) echo "ok: node is $v" ;;
 *) fail "node is '$v', want v26.x" ;;
 esac
 
-# ffmpeg must have the encoder and filters video work relies on.
 encoders=$(ffmpeg -hide_banner -encoders 2>/dev/null) || fail "'ffmpeg -encoders' exited non-zero"
 echo "$encoders" | grep -qw libx264 || fail "ffmpeg has no libx264 encoder"
 echo "ok: ffmpeg encoder libx264"
@@ -54,29 +58,31 @@ ffmpeg -hide_banner -nostdin -f lavfi -i color=c=black:s=320x240:r=25:d=1 \
 	-vf drawtext=text=ok:fontcolor=white -c:v libx264 "$out/x.mp4" >/dev/null 2>&1 ||
 	fail "drawtext/libx264 render exited non-zero"
 echo "ok: drawtext/libx264 render"
-probe=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height \
-	-of csv=p=0 "$out/x.mp4" 2>/dev/null) || fail "ffprobe cannot read the rendered mp4"
-[ "$probe" = h264,320,240 ] || fail "rendered mp4 stream is '$probe', want h264,320,240"
-echo "ok: rendered mp4 is $probe"
+stream=$(ffprobe_csv -select_streams v:0 -show_entries stream=codec_name,width,height "$out/x.mp4") ||
+	fail "ffprobe cannot read the rendered mp4"
+[ "$stream" = h264,320,240 ] || fail "rendered mp4 stream is '$stream', want h264,320,240"
+echo "ok: rendered mp4 is $stream"
 ffmpeg -v error -xerror -nostdin -i "$out/x.mp4" -f framemd5 "$out/frames.md5" >/dev/null 2>&1 ||
 	fail "the rendered mp4 does not decode"
 frames=$(grep -c '^0,' "$out/frames.md5") || fail "the rendered mp4 has no decoded frames"
 [ "$frames" = 25 ] || fail "the rendered mp4 decodes to $frames frames, want 25"
 echo "ok: rendered mp4 decodes to $frames frames"
+
 espeak-ng -w "$out/x.wav" "smoke test" >/dev/null 2>&1 || fail "espeak-ng render exited non-zero"
 echo "ok: espeak-ng render"
-codec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
-	-of csv=p=0 "$out/x.wav" 2>/dev/null) || fail "ffprobe cannot read the espeak-ng wav"
+codec=$(ffprobe_csv -select_streams a:0 -show_entries stream=codec_name "$out/x.wav") ||
+	fail "ffprobe cannot read the espeak-ng wav"
 case "$codec" in
 pcm_*) echo "ok: espeak-ng wav is $codec" ;;
 *) fail "espeak-ng wav codec is '$codec', want pcm_*" ;;
 esac
-dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out/x.wav" 2>/dev/null) ||
+dur=$(ffprobe_csv -show_entries format=duration "$out/x.wav") ||
 	fail "ffprobe cannot read the espeak-ng wav duration"
 awk -v duration="$dur" 'BEGIN {
 	exit !(duration ~ /^[0-9]+([.][0-9]+)?$/ && duration + 0 >= 0.5)
 }' || fail "espeak-ng wav lasts '$dur' s, want >= 0.5 s"
 echo "ok: espeak-ng wav duration >= 0.5s"
+
 python3 -m venv "$out/venv" >/dev/null 2>&1 || fail "python3 -m venv failed"
 echo "ok: python3 -m venv"
 locale_errors=$(bash -lc locale 2>&1 >/dev/null) || fail "login locale exited non-zero"

@@ -38,9 +38,9 @@ espeak-ng is the offline fallback.
   workload user.
 - **The CLIs are outside the home.** `/opt/npm` and `/opt/uv-tools` belong
   to the image, so an empty or restored home never loses or shadows them.
-  They are root-owned and
-  `agent` has no `sudo`, so a plain `npm install -g` fails with `EACCES`;
-  install global packages into the home instead with
+  They are root-owned and `agent` has no `sudo`, so a plain
+  `npm install -g` fails with `EACCES`; install global packages into the
+  home instead with
   `npm install -g --prefix ~/.local <package>`. Ubuntu's `~/.profile` puts
   `~/.local/bin` on the login shell's `PATH` once it exists (open a new
   window, or `exec bash -l`), and it lives on the home volume.
@@ -155,17 +155,18 @@ docker run --rm --network none \
 ```
 
 The smoke test runs as the image's `USER`, as lux does (so no `--user`),
-with an empty home, no network and no credentials. It first checks that the
-user is `agent` (uid 1000) and that `HOME` is a writable `/home/agent`, the
-path luxmux's home volume is mounted at, then that every agent and tool
-starts and prints a version, that the login shell's Node is 26.x, that ffmpeg
-has `libx264` and the `drawtext`, `subtitles`, `ass` and `overlay` filters,
-that a one-second drawtext render to H.264 decodes to 25 frames, and that an
-espeak-ng WAV is PCM with duration >= 0.5s, all offline. It also creates a
-Python venv and checks that the login shell's locale loads. Each failing
-check prints `smoke: FAIL:` and what failed.
+with an empty home, no network and no credentials. It checks that:
 
-For `linux/arm64`
+- the user is `agent` (uid 1000) and `HOME` is a writable `/home/agent`, the
+  path luxmux's home volume is mounted at;
+- every agent and tool starts and prints a version, and the login shell's
+  Node is 26.x;
+- ffmpeg has `libx264` and the `drawtext`, `subtitles`, `ass` and `overlay`
+  filters, and a one-second drawtext render to H.264 decodes to 25 frames;
+- an espeak-ng WAV is PCM and lasts at least 0.5 s;
+- a Python venv can be created and the login shell's locale loads.
+
+Each failing check prints `smoke: FAIL:` and what failed. For `linux/arm64`
 on an amd64 machine, the same commands work with QEMU binfmt installed.
 
 Size at the versions above, measured as gzip of `docker save` (close to the
