@@ -79,6 +79,24 @@ func TestInfoFields(t *testing.T) {
 	}
 }
 
+// TestExecOutputDropsStderr: ExecOutput keeps the stdout channel only: a
+// command's stderr (here a resources line too) is never in what is
+// parsed, nor does it use up the limit.
+func TestExecOutputDropsStderr(t *testing.T) {
+	s := New()
+	defer s.Close()
+	c, id := submitted(t, s)
+	want := ResourcesOutput("max 100000", "max", "", "7", -1, 0)
+	noise := append([]byte("memory.current 999\n"), make([]byte, 4096)...)
+	s.SetExecResponder(func(string, []string) (ExecAnswer, bool) {
+		return ExecAnswer{Stderr: noise, Output: want}, true
+	})
+	out, code, err := c.ExecOutput(context.Background(), id, []string{"sh"}, len(want))
+	if err != nil || code != 0 || string(out) != string(want) {
+		t.Fatalf("%q %d %v, want %q", out, code, err, want)
+	}
+}
+
 // TestExecResponder: canned output, a failure, and a hang that ends with
 // the client's context.
 func TestExecResponder(t *testing.T) {

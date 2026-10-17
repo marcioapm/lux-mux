@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,18 @@ func decodeInfo(t *testing.T, b []byte) info.Output {
 		t.Fatalf("%v:\n%s", err, b)
 	}
 	return o
+}
+
+// Each window needs its own Run because the sampler serializes execs per Run.
+func infoRuns(t *testing.T, env Env, a *fakelux.Server, n int) {
+	t.Helper()
+	s := &state.Session{Name: "work"}
+	for range n {
+		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
+	}
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestInfoAllWindowsText(t *testing.T) {
@@ -281,6 +294,47 @@ func TestInfoNumberAsName(t *testing.T) {
 	}
 }
 
+// Both pools can be in flight together, but each keeps its own bound.
+func TestInfoReadAndExecPools(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = 5 * time.Second
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb, _ := infoEnv(t)
+	const n = 3 * infoParallel
+	infoRuns(t, env, a, n)
+	var in, peakAll, inExec, peakExec atomic.Int32
+	enter := func(c, peak *atomic.Int32) {
+		v := c.Add(1)
+		for o := peak.Load(); v > o && !peak.CompareAndSwap(o, v); o = peak.Load() {
+		}
+	}
+	a.SetExecResponder(func(string, []string) (fakelux.ExecAnswer, bool) {
+		enter(&in, &peakAll)
+		enter(&inExec, &peakExec)
+		defer in.Add(-1)
+		defer inExec.Add(-1)
+		// Span multiple read batches so an unbounded exec pool overlaps them.
+		time.Sleep(600 * time.Millisecond)
+		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
+	})
+	a.SetGetHook(func(string) {
+		enter(&in, &peakAll)
+		defer in.Add(-1)
+		time.Sleep(200 * time.Millisecond)
+	})
+	if code := Main(env, []string{"info", "-t", "work", "--json"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, w := range decodeInfo(t, out.Bytes()).Windows {
+		if w.Problem != "" || w.Resources == nil {
+			t.Fatalf("window not fully read: %+v", w)
+		}
+	}
+	if peakAll.Load() <= infoParallel || peakExec.Load() > infoParallel {
+		t.Fatalf("peak in flight %d (want more than %d), peak execs %d (want at most %d)", peakAll.Load(), infoParallel, peakExec.Load(), infoParallel)
+	}
+}
+
 // TestInfoListingLeavesReadTime: a lux that hangs the rebuild listing
 // leaves the listed windows of a healthy lux time to be read, and the
 // unanswered listing still makes the exit non-zero.
@@ -362,5 +416,43 @@ func TestInfoFanOutBounded(t *testing.T) {
 	defer mu.Unlock()
 	if len(o.Windows) != n || peak > infoParallel || peak < 2 {
 		t.Fatalf("%d windows, %d GETs at once", len(o.Windows), peak)
+	}
+}
+
+// Hung execs hold no read slots: every Run is read before the shared deadline.
+func TestInfoHungExecsLeaveReadTime(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = time.Second
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb, _ := infoEnv(t)
+	const n = 3 * infoParallel
+	infoRuns(t, env, a, n)
+	var execs atomic.Int32
+	a.SetExecResponder(func(string, []string) (fakelux.ExecAnswer, bool) {
+		if execs.Add(1) <= infoParallel {
+			return fakelux.ExecAnswer{Hang: true}, true
+		}
+		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
+	})
+	a.SetGetHook(func(string) { time.Sleep(50 * time.Millisecond) })
+	start := time.Now()
+	code := Main(env, []string{"info", "-t", "work", "--json"})
+	if d := time.Since(start); d > infoTimeout+time.Second {
+		t.Fatalf("took %v", d)
+	}
+	o := decodeInfo(t, out.Bytes())
+	without := 0
+	for i, w := range o.Windows {
+		if w.Problem != "" {
+			t.Fatalf("code %d: window %d not read behind hung execs: %+v\n%s", code, i, w, errb.String())
+		}
+		if w.Resources == nil {
+			without++
+		}
+	}
+	// The hung execs hold every exec slot to the deadline: the others'
+	// execs wait, and those windows lack resources too, not their Run.
+	if code != 0 || len(o.Windows) != n || without < infoParallel {
+		t.Fatalf("code %d: %d windows, %d without resources", code, len(o.Windows), without)
 	}
 }

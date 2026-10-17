@@ -254,34 +254,77 @@ func workloadOf(r *api.Run) *Workload {
 	return out
 }
 
-// PlainURL is u without credentials in it. A u url.Parse refuses loses
-// everything of its authority up to the last "@"; one that still holds
-// an "@" after that (a credential with a "/" in it) is not shown at all.
-// An scp-style user@host:path, which url.Parse refuses too, is kept as
-// it is: its user is an SSH login, not a secret, and it has no password.
+// PlainURL is u without credentials in it. A password never stays; an
+// SSH URL (ssh://, git+ssh://, ssh+git://) keeps its login, which is not
+// a secret. A u url.Parse refuses loses everything of its authority up to
+// the last "@"; one that still holds an "@" after that (a credential with
+// a "/" in it) is not shown at all. A u without "://" is scp-style: see
+// plainSCP.
 func PlainURL(u string) string {
+	scheme, rest, ok := strings.Cut(u, "://")
+	if !ok {
+		return plainSCP(u)
+	}
+	ssh := sshScheme(scheme)
 	p, err := url.Parse(u)
 	if err == nil {
 		if p.User == nil {
 			return u
 		}
-		p.User = nil
+		if name := p.User.Username(); ssh && name != "" && !strings.Contains(name, ":") {
+			p.User = url.User(name)
+		} else {
+			p.User = nil
+		}
 		return p.String()
 	}
-	scheme, rest, ok := strings.Cut(u, "://")
-	if !ok {
-		return u
-	}
-	scheme += "://"
 	auth, path, slash := strings.Cut(rest, "/")
+	login := ""
 	if i := strings.LastIndex(auth, "@"); i >= 0 {
+		if name, _, _ := strings.Cut(auth[:i], ":"); ssh && name != "" && !strings.Contains(name, "@") {
+			login = name + "@"
+		}
 		auth = auth[i+1:]
 	}
-	out := scheme + auth
 	if slash {
-		out += "/" + path
+		auth += "/" + path
 	}
-	if strings.Contains(out, "@") {
+	if strings.Contains(scheme+auth, "@") {
+		return UnparseableURL
+	}
+	return scheme + "://" + login + auth
+}
+
+func sshScheme(s string) bool {
+	switch strings.ToLower(s) {
+	case "ssh", "git+ssh", "ssh+git":
+		return true
+	}
+	return false
+}
+
+// plainSCP keeps SSH logins and local paths, but fails closed on passwords.
+// host:team@b:c.git is ambiguous with user:pass@host:path and is cut, and a
+// login-less host:o/r@main is hidden: it reads as user:pass@host.
+func plainSCP(u string) string {
+	head, _, _ := strings.Cut(u, "/")
+	first := strings.Index(head, "@")
+	if first < 0 {
+		// A password with a "/" in it hides its "@" past the first "/".
+		// Only a colon before that slash can introduce a password;
+		// absolute, relative and drive-letter local paths stay intact.
+		colon := strings.Index(head, ":")
+		drive := len(head) == 2 && colon == 1 && ((head[0] >= 'A' && head[0] <= 'Z') || (head[0] >= 'a' && head[0] <= 'z'))
+		if colon >= 0 && !drive && strings.Contains(u, "@") {
+			return UnparseableURL
+		}
+		return u
+	}
+	if !strings.Contains(head[:first], ":") {
+		return u
+	}
+	out := u[strings.LastIndex(head, "@")+1:]
+	if !strings.Contains(out, ":") || strings.Contains(out, "@") {
 		return UnparseableURL
 	}
 	return out

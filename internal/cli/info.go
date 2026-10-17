@@ -20,8 +20,8 @@ import (
 // variable: tests shorten it.
 var infoTimeout = 10 * time.Second
 
-// infoParallel bounds how many windows luxmux info reads at once (each a
-// GET, a cost and, while running, an exec).
+// infoParallel bounds how many windows luxmux info reads at once (a GET
+// and a cost each), and how many resources execs it runs at once.
 const infoParallel = 8
 
 // infoCmd is luxmux info [-t SESSION] [WINDOW] [--json]: each window's
@@ -72,12 +72,26 @@ func infoCmd(env Env, args []string) error {
 	sampler := info.NewSampler()
 	out := info.Output{SchemaVersion: info.SchemaVersion, Session: session, Windows: make([]info.Window, len(targets))}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, infoParallel)
+	// Run reads and resources execs take slots of their own: an exec
+	// that hangs to its ExecTimeout holds no slot a later window's Run
+	// read waits for. Each read keeps its own FetchTimeout and ExecTimeout
+	// from when it starts, within the one deadline.
+	reads, execs := make(chan struct{}, infoParallel), make(chan struct{}, infoParallel)
 	for i, t := range targets {
 		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			out.Windows[i] = info.Gather(ctx, dial, sampler, t, time.Now)
+			reads <- struct{}{}
+			c, err := dial(t.Endpoint)
+			w := info.NoKey(t)
+			if err == nil {
+				w = info.Fetch(ctx, c, t, time.Now)
+			}
+			<-reads
+			if info.Running(w) {
+				execs <- struct{}{}
+				w = info.AddResources(ctx, c, sampler, w, time.Now)
+				<-execs
+			}
+			out.Windows[i] = w
 		})
 	}
 	wg.Wait()

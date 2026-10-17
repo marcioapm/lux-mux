@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -130,20 +131,30 @@ func TestFromRunAllFields(t *testing.T) {
 		t.Fatal(w.Error)
 	}
 	text := Text(w, now)
-	for _, want := range []string{
-		"window", "1 api", "profile", "dev", "session", "work", "lux.example.com · tenant example", "run_1",
-		"luxmux-work", "running", "key ci · dev@example.com", "team=example",
-		"ghcr.io/example/dev:latest", "sha256:abc123",
-		"pool", "m", "size", "m-2-arm64", "2 cpus, 8Gi memory, 40Gi disk", "host-3", "3 (2 moves since the first)",
-		"stage", "running, since 2026-01-02 01:34:05Z", "1h 30m (this placement)", "2h 0m (all placements)",
-		"12s (for a host)", "8s (on a host)",
-		"https://example.com/api.git @ main", "https://example.com/web.git → /workspace/web", "/workspace/repos/api",
-		"only example.com, 192.0.2.0/24", "EXAMPLE_TOKEN",
-		"1.25 USD (final 1, estimated 0.25)", "incomplete",
-		"— of 2 cpus", "1Gi of 8Gi (12%)", "10Gi of 40Gi (25%)",
+	for k, want := range map[string]string{
+		"window": "1 api", "profile": "dev", "session": "work", "lux": "lux.example.com · tenant example", "run": "run_1",
+		"name": "luxmux-work", "state": "running", "submitted by": "key ci · dev@example.com", "labels": "team=example",
+		"ref": "ghcr.io/example/dev:latest", "resolved": "sha256:abc123",
+		"pool": "m", "size": "m-2-arm64", "asked": "size m-2-arm64", "effective": "2 cpus, 8Gi memory, 40Gi disk",
+		"host": "host-3", "epoch": "3 (2 moves since the first)",
+		"stage": "running, since 2026-01-02 01:34:05Z (1h 30m ago)", "uptime": "1h 30m (this placement)",
+		"runtime": "2h 0m (all placements)", "waiting": "12s (for a host)", "starting": "8s (on a host)",
+		"repository 1": "https://example.com/api.git @ main", "repository 2": "https://example.com/web.git → /workspace/web",
+		"workdir": "/workspace/repos/api", "egress": "only example.com, 192.0.2.0/24", "secrets": "EXAMPLE_TOKEN",
+		"so far": "1.25 USD (final 1, estimated 0.25)", "status": "incomplete",
+		"resumable": "no", "snapshot": "snap_1",
+		"cpu": "— of 2 cpus", "memory": "1Gi of 8Gi (12%)", "disk": "10Gi of 40Gi (25%)",
 	} {
+		if got := lineValue(w, now, k); got != want {
+			t.Errorf("%s: %q, want %q", k, got, want)
+		}
+	}
+	// Text renders those same lines, its cost section included.
+	width := LineWidth(Lines(w, now))
+	for _, k := range []string{"pool", "effective", "so far", "memory"} {
+		want := fmt.Sprintf("  %-*s  %s\n", width, k, lineValue(w, now, k))
 		if !strings.Contains(text, want) {
-			t.Errorf("text lacks %q", want)
+			t.Errorf("Text lacks %q:\n%s", want, text)
 		}
 	}
 	if strings.Contains(text, "luxmux-session") || strings.Contains(text, "app=luxmux") || strings.Contains(text, "tok@") {
@@ -517,12 +528,71 @@ func TestPlainURLFailsClosed(t *testing.T) {
 		"https://user:tok@example.com:x/r.git":  "https://example.com:x/r.git",
 		"https://u:t@k@example.com:x":           "https://example.com:x",
 		"https://u:to/k@example.com:x/r.git":    UnparseableURL,
-		// scp-style: the user is an SSH login, kept.
+		"http://user@example.com/r.git":         "http://example.com/r.git",
+		// ssh: a login without a password is kept; a password never is.
+		"ssh://git@example.com/o/r.git":         "ssh://git@example.com/o/r.git",
+		"SSH://git@example.com/o/r.git":         "ssh://git@example.com/o/r.git",
+		"git+ssh://git@example.com/o/r.git":     "git+ssh://git@example.com/o/r.git",
+		"ssh+git://deploy@example.com:22/r.git": "ssh+git://deploy@example.com:22/r.git",
+		"ssh://git:tok@example.com/o/r.git":     "ssh://git@example.com/o/r.git",
+		"ssh://:tok@example.com/o/r.git":        "ssh://example.com/o/r.git",
+		"ssh://example.com/o/r.git":             "ssh://example.com/o/r.git",
+		"ssh://git@example.com:x/r.git":         "ssh://git@example.com:x/r.git",
+		"ssh://git:tok@example.com:x/r.git":     "ssh://git@example.com:x/r.git",
+		"ssh://git:t@k@example.com:x/r.git":     "ssh://git@example.com:x/r.git",
+		"ssh://u:to/k@example.com:x/r.git":      UnparseableURL,
+		// scp-style: the user is an SSH login, kept; a user with a ":"
+		// in it is a credential, cut.
 		"git@github.com:o/r.git":               "git@github.com:o/r.git",
 		"deploy@git.example.com:team/repo.git": "deploy@git.example.com:team/repo.git",
+		"git@example.com:o/r@v2.git":           "git@example.com:o/r@v2.git",
+		"git@example.com:r@v2":                 "git@example.com:r@v2",
+		"user:tok@example.com:o/r.git":         "example.com:o/r.git",
+		"my_user:tok@example.com:o/r.git":      "example.com:o/r.git",
+		"user:t@k@example.com:o/r.git":         "example.com:o/r.git",
+		"user:tok@example.com:r@v2":            UnparseableURL,
+		"user:tok@example.com":                 UnparseableURL,
+		"example.com:o/r.git":                  "example.com:o/r.git",
+		"/srv/git/u:p@r.git":                   "/srv/git/u:p@r.git",
+		"user:ab/cd@example.com:o/r.git":       UnparseableURL,
+		"user:tok@[::1]:o/r.git":               "[::1]:o/r.git",
+		"user:tok@example.com:22/o/r.git":      "example.com:22/o/r.git",
+		"git@example.com:o/user:pass@r.git":    "git@example.com:o/user:pass@r.git",
+		// ssh, more shapes: IPv6, an encoded "/" or ":" in the userinfo,
+		// "user:pass@" inside the path, both scheme spellings.
+		"ssh://git:p@[::1]:22/o/r.git":              "ssh://git@[::1]:22/o/r.git",
+		"ssh://git:p%2Fx@example.com/r.git":         "ssh://git@example.com/r.git",
+		"ssh://alice%3As3cret@example.com/o/r.git":  "ssh://example.com/o/r.git",
+		"ssh://example.com/o/user:pass@x.git":       "ssh://example.com/o/user:pass@x.git",
+		"ssh+git://deploy:tok@example.com:22/r.git": "ssh+git://deploy@example.com:22/r.git",
+		"git+ssh://git:t@k@example.com:x/r.git":     "git+ssh://git@example.com:x/r.git",
 	} {
 		if got := PlainURL(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestPlainURLSlashBoundary: a "/" in a password, a local path and a
+// drive letter, at the edge of the scp-style rule.
+func TestPlainURLSlashBoundary(t *testing.T) {
+	for in, want := range map[string]string{
+		"user:ab@cd:ef/gh@example.com:r.git": UnparseableURL,
+		"user:ab/cd@example.com:o/r.git":     UnparseableURL,
+		"user:ab/cd@example.com":             UnparseableURL,
+		"user:ab/cd@x@example.com":           UnparseableURL,
+		"git@host:o/x:y@z.git":               "git@host:o/x:y@z.git",
+		"host:path@x:y":                      "x:y",
+		"./u:p@r":                            "./u:p@r",
+		"/srv/git/u:p@r.git":                 "/srv/git/u:p@r.git",
+		"/srv/git/u:p@r:x.git":               "/srv/git/u:p@r:x.git",
+		"C:/repo@x:y":                        "C:/repo@x:y",
+		"c:/repo/u:p@r.git":                  "c:/repo/u:p@r.git",
+		"git@host:path":                      "git@host:path",
+		"git@host":                           "git@host",
+	} {
+		if got := PlainURL(in); got != want {
+			t.Errorf("PlainURL(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -581,6 +651,13 @@ func TestParseReading(t *testing.T) {
 	r = ParseReading([]byte("cpu.max 50000 100000\ngarbage\ndf  \n"))
 	if *r.CPULimit != 0.5 || r.DiskSize != nil {
 		t.Fatalf("%+v", r)
+	}
+	// From 2^62 up a memory limit is no limit (v1's page-rounded 2^63-1).
+	if r := ParseReading([]byte("memory.max 4611686018427387904\n")); r.MemoryLimit != nil {
+		t.Fatalf("2^62: limit %d, want none", *r.MemoryLimit)
+	}
+	if r := ParseReading([]byte("memory.max 4611686018427387903\n")); r.MemoryLimit == nil || *r.MemoryLimit != 1<<62-1 {
+		t.Fatalf("2^62-1: %+v, want that limit", r.MemoryLimit)
 	}
 }
 

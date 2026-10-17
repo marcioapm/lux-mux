@@ -385,6 +385,37 @@ func TestInfoSwitchSeenByResultKeepsRefreshing(t *testing.T) {
 	}
 }
 
+// TestInfoEndpointChangeIsASwitch: the shown window keeping its index and
+// Run id but on another lux (a Run id is only unique on its lux) is
+// another window: the read in flight is cancelled, its answer dropped,
+// and the next read asks the new lux.
+func TestInfoEndpointChangeIsASwitch(t *testing.T) {
+	r := newInfoRig(t, 30, 100)
+	r.waitCalls(1)
+	r.answer(r.goodWindow("old-lux-host"))
+	r.advance(InfoEvery)
+	r.waitCalls(2)
+	ctx := r.host.ctx(1)
+	oldGen := r.d.gen
+	next := r.host.target
+	next.Endpoint.URL = "https://other.example.com"
+	r.host.setTarget(next)
+	r.advance(InfoEvery)
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("the read on the previous lux was not cancelled")
+	}
+	r.waitCalls(3)
+	if tg := r.host.targets[2]; tg.Endpoint.URL != "https://other.example.com" {
+		t.Fatalf("read %+v", tg)
+	}
+	r.d.Update(infoResultMsg{gen: oldGen, w: r.goodWindow("old-late")})
+	if v := r.view(); lineOf(v, "host") != "" || lineOf(v, "lux") != "other.example.com · tenant example" {
+		t.Fatalf("after the lux changed:\n%s", v)
+	}
+}
+
 // lineOf is the value of the view's body line keyed k ("" if none).
 func lineOf(view, k string) string {
 	for _, l := range strings.Split(view, "\n") {

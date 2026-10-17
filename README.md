@@ -450,7 +450,7 @@ reports as `complete` or `final` is shown even when it is zero
 | Timing | stage | `stage`, `stageReason`, `stageSince` |
 | | uptime, runtime | from `runtimeSince` (this placement), `runtimeSeconds` (all placements) |
 | | waiting, starting | `placementWaitSeconds` (for a host), `placementStartSeconds` (on it) |
-| Workload | repositories, workdir | `spec.git.repositories` (URLs without credentials), `spec.workload.workdir` |
+| Workload | repositories, workdir | `spec.git.repositories` (URLs without passwords or tokens; an SSH login such as `git@` is kept), `spec.workload.workdir` |
 | Access | egress, secrets | `spec.network` (unrestricted, an allow list, or none); the names in `secrets`, never a value |
 | Cost | so far | `GET /v1/runs/{id}/cost`: its status and per-currency totals; left out while lux has none (`pending`, or a zero not yet `complete`/`final`) |
 | Resume | resumable, snapshot, blockers | `resumable` and `resume` (lux sends it for a stopped, lost, failed or succeeded Run) |
@@ -458,9 +458,11 @@ reports as `complete` or `final` is shown even when it is zero
 
 lux v0.1.30 has no usage endpoint, so resources in use are read inside
 the Run with lux's exec API: one fixed POSIX `sh` script reads the
-**cgroup v2** files `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
-`memory.current` (a cgroup v1 host has none of them: CPU is `— cpus`,
-memory is left out, and only disk is read),
+cgroup v2 files `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
+`memory.current`, or on a cgroup v1 host, for each one missing, the v1
+file instead: `cpu.cfs_quota_us`/`cpu.cfs_period_us` (`-1` is no limit),
+`cpuacct.usage`, `memory.limit_in_bytes` (its huge default is no limit)
+and `memory.usage_in_bytes`;
 and `df -Pk /workspace`. It needs nothing but `sh` and
 `df` (BusyBox's do), uses no `timeout(1)`, and luxmux ends it after 3 s.
 CPU in use is a rate: the usage between two readings over the time
@@ -485,7 +487,11 @@ number that is no window's index is taken as a name: `luxmux info 7`
 finds a window named `7`). Without
 `-t` it is the session of the window it runs in (`$LUXMUX_SESSION`, a
 renamed session found by its Runs' label), else `main`. Each window is
-read from its own lux, all within 10 s; a lux that does not answer marks
+read from its own lux, all within 10 s: up to 8 windows' Runs are read
+at once (5 s each at most) and, apart, up to 8 resources execs run at
+once (3 s each at most), so an exec that hangs never holds up the next
+window's read; with many windows, the last start with what is left of
+the 10 s. A lux that does not answer marks
 its windows `unreachable`, the others still print, and the exit status is
 1 when any window could not be read, or (for a session rebuilt from its
 Runs, with no session file) when a lux could not be listed. The text is
