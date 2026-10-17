@@ -486,6 +486,23 @@ func TestNoSecretValue(t *testing.T) {
 	}
 }
 
+// TestPlainURLFailsClosed: credentials leave a URL url.Parse takes and
+// one it refuses; one that still holds an "@" after that is not shown.
+func TestPlainURLFailsClosed(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://example.com/api.git":           "https://example.com/api.git",
+		"https://user:tok@example.com/api.git":  "https://example.com/api.git",
+		"https://user:tok@example.com/a%zz.git": "https://example.com/a%zz.git",
+		"https://user:tok@example.com:x/r.git":  "https://example.com:x/r.git",
+		"https://u:t@k@example.com:x":           "https://example.com:x",
+		"https://u:to/k@example.com:x/r.git":    UnparseableURL,
+	} {
+		if got := PlainURL(in); got != want {
+			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFetchProblems(t *testing.T) {
 	now := t0
 	for _, tc := range []struct {

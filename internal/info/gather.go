@@ -254,15 +254,40 @@ func workloadOf(r *api.Run) *Workload {
 	return out
 }
 
-// PlainURL is u without credentials in it.
+// PlainURL is u without credentials in it. A u url.Parse refuses loses
+// everything of its authority up to the last "@"; one that still holds
+// an "@" after that (a credential with a "/" in it) is not shown at all.
 func PlainURL(u string) string {
 	p, err := url.Parse(u)
-	if err != nil || p.User == nil {
-		return u
+	if err == nil {
+		if p.User == nil {
+			return u
+		}
+		p.User = nil
+		return p.String()
 	}
-	p.User = nil
-	return p.String()
+	scheme, rest, ok := strings.Cut(u, "://")
+	if !ok {
+		scheme, rest = "", u
+	} else {
+		scheme += "://"
+	}
+	auth, path, slash := strings.Cut(rest, "/")
+	if i := strings.LastIndex(auth, "@"); i >= 0 {
+		auth = auth[i+1:]
+	}
+	out := scheme + auth
+	if slash {
+		out += "/" + path
+	}
+	if strings.Contains(out, "@") {
+		return UnparseableURL
+	}
+	return out
 }
+
+// UnparseableURL stands in for a repository URL PlainURL cannot clean.
+const UnparseableURL = "(unparseable url)"
 
 func egressOf(r *api.Run) *Egress {
 	n := r.Spec.Network
