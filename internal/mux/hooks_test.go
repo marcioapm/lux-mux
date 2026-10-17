@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -28,10 +29,26 @@ shell = ["sh"]
 
 const exampleSecret = "example-secret-value-1234"
 
+// requireWrapperTools skips a test that runs the start wrapper for real
+// when the host cannot: the tests expect Linux's sh prompt and output, and
+// the env file and facts need flock(1) and setsid(1) (util-linux).
+func requireWrapperTools(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("the start wrapper's tests expect a Linux sh, not %s", runtime.GOOS)
+	}
+	for _, tool := range []string{"sh", "flock", "setsid"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("the start wrapper needs %s: %v", tool, err)
+		}
+	}
+}
+
 // shellHarness is a harness whose Runs are real sh processes started from
 // their spec's workload command, with a state volume per Run.
 func shellHarness(t *testing.T, cfg string) (*harness, string) {
 	t.Helper()
+	requireWrapperTools(t)
 	dir := filepath.Join(t.TempDir(), "runs")
 	h := newHarnessEnv(t, cfg, map[string]string{"EXAMPLE_TOKEN": exampleSecret}, func(s *fakelux.Server) {
 		s.RunShells(dir, "PS1=PROMPT> ", "ENV=", "TERM=xterm")

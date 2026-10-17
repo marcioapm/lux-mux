@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -278,7 +279,7 @@ func (p *proc) restored() {
 	if alt || mouse || paste || !cursor {
 		p.t.Fatalf("terminal not restored: alt %v mouse %v paste %v cursor %v", alt, mouse, paste, cursor)
 	}
-	tio, err := unix.IoctlGetTermios(int(p.f.Fd()), unix.TCGETS)
+	tio, err := unix.IoctlGetTermios(int(p.f.Fd()), ioctlGetTermios)
 	if err != nil {
 		p.t.Fatal(err)
 	}
@@ -1091,6 +1092,16 @@ func TestEndUnterminatedSpareNamed(t *testing.T) {
 // a real sh: the hook's output is on the screen before
 // the prompt, and the shell starts after a failing hook.
 func TestOnStartVisible(t *testing.T) {
+	// The wrapper's env file and facts need util-linux's flock and setsid,
+	// and the screen match expects Linux sh's output.
+	if runtime.GOOS != "linux" {
+		t.Skipf("the start wrapper's test expects a Linux sh, not %s", runtime.GOOS)
+	}
+	for _, tool := range []string{"sh", "flock", "setsid"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("the start wrapper needs %s: %v", tool, err)
+		}
+	}
 	lux, env := e2eEnv(t)
 	lux.RunShells(filepath.Join(t.TempDir(), "runs"), "PS1=$ ", "ENV=", "TERM=xterm")
 	p := startLuxmux(t, env, "new -s hooks --on-start echo${IFS}HOOK-$LUXMUX_SESSION;false")

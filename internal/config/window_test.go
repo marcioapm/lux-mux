@@ -160,6 +160,11 @@ func TestRepositoriesEnvBound(t *testing.T) {
 }
 
 func TestStartWrapper(t *testing.T) {
+	// It runs the wrapper with the host's PATH and reads the env file,
+	// which needs flock(1); fixtures with toolDir skip on their own.
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skipf("the env file needs flock: %v", err)
+	}
 	shells := [][]string{{"sh"}}
 	if b, err := exec.LookPath("busybox"); err == nil {
 		shells = append(shells, []string{b, "sh"})
@@ -861,10 +866,7 @@ func TestWrapperProbeProcesses(t *testing.T) {
 trap '' TERM
 exec sleep 30`
 				}
-				ps, err := exec.LookPath("ps")
-				if err != nil {
-					t.Fatal(err)
-				}
+				ps := realTool(t, "ps")
 				f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine", Shell: []string{ps, "-e", "-o", "pid=,pgid="}})
 				f.shell = shell
 				repo := filepath.Join(f.dir, "repo")
@@ -996,7 +998,7 @@ exec sleep 30`, "stat": "exit 1"}
 // state volume, and keeps one whose pid is alive, another user's, and any
 // other name.
 func TestWrapperSweepsProbeDirs(t *testing.T) {
-	gone := exec.Command("true")
+	gone := exec.Command(realTool(t, "true"))
 	if err := gone.Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -1058,11 +1060,7 @@ func TestWrapperSweepsProbeDirs(t *testing.T) {
 // then the short sha once detached.
 func TestWrapperRealFacts(t *testing.T) {
 	f := newFixture(t, toolDir(t, append(slices.Clone(baseTools), "df", "stat", "git"), nil), Profile{Image: "alpine"})
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(f.dir, &st); err != nil {
-		t.Fatal(err)
-	}
-	want := int64(st.Blocks) * int64(st.Frsize)
+	want := statfsBytes(t, f.dir)
 	git := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command(realTool(t, "git"), append([]string{"-C", filepath.Join(f.dir, "repo")}, args...)...)
