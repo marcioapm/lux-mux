@@ -127,7 +127,7 @@ announce the release.
 **The first push creates a private package.** The owner must make it public
 once, on GitHub: the package's **Package settings → Change visibility →
 Public**. Until then the image cannot be pulled anonymously; set
-`image = "ubuntu:24.04"` in the profile (the light alternative `luxmux config
+`image = "ubuntu:26.04"` in the profile (the light alternative `luxmux config
 init` documents), which has no agents or extra tools.
 
 ## Updating

@@ -66,7 +66,7 @@ RUN set -eux; \
       "opencode-ai@${OPENCODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}"; \
     npm cache clean --force; \
-    rm -rf /root/.npm; \
+    rm -rf /root/.npm /tmp/node-compile-cache /tmp/opencode; \
     # opencode-ai's postinstall links the variant it selected into bin/; the others are never run.
     oc=/opt/npm/lib/node_modules/opencode-ai; \
     for d in "$oc"/node_modules/opencode-linux-*; do \

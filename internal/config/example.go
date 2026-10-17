@@ -24,7 +24,7 @@ default_profile = "default"
 image = "` + DefaultImage + `"
 # This luxmux's image; it stays at this tag when luxmux is upgraded. If the
 # tag cannot be pulled, use ghcr.io/marcioapm/luxmux:latest.
-# Light alternative (no preinstalled agents): ubuntu:24.04
+# Light alternative (no preinstalled agents): ubuntu:26.04
 # pool = "default"          # omitted: your tenant's default pool
 # On a shaped pool, a size (lux pools sizes <pool>), e.g. size = "m-2-arm64";
 # on an unshaped pool, cpus, memory and disk instead:

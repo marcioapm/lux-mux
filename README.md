@@ -42,7 +42,7 @@ A release's image is published by a workflow that starts with the release
 tag; if `:<version>` cannot be pulled yet (or its build failed), luxmux does
 not fall back by itself: set `image = "ghcr.io/marcioapm/luxmux:latest"`.
 The GHCR package must be made public by its owner after its first push.
-Until then, or for a light image without agents, set `image = "ubuntu:24.04"`
+Until then, or for a light image without agents, set `image = "ubuntu:26.04"`
 in `[profiles.default]`. No credentials are included in the image: pass keys
 through profile `secrets` and allow the required provider hosts in `egress`.
 
