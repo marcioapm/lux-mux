@@ -13,11 +13,12 @@ import (
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 )
 
-// ExecAnswer is what ExecResponder makes an exec stream answer: Output on
-// stdout then exit code Code, or Error as the stream's error frame. Hang
-// answers nothing until the client goes away.
+// ExecAnswer is what ExecResponder makes an exec stream answer: Stderr on
+// stderr, Output on stdout, then exit code Code; or Error as the stream's
+// error frame. Hang answers nothing until the client goes away.
 type ExecAnswer struct {
 	Output []byte
+	Stderr []byte
 	Code   int
 	Error  string
 	Hang   bool
@@ -111,6 +112,9 @@ func respondExec(ctx context.Context, ws *websocket.Conn, a ExecAnswer) {
 		_ = wsjson.Write(ctx, ws, api.StreamData{Error: a.Error})
 		_ = ws.Close(websocket.StatusNormalClosure, "")
 		return
+	}
+	if len(a.Stderr) > 0 {
+		_ = wsjson.Write(ctx, ws, api.StreamData{Channel: "stderr", Data: a.Stderr})
 	}
 	if len(a.Output) > 0 {
 		_ = wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: a.Output})
