@@ -269,12 +269,16 @@ func Gather(ctx context.Context, dial Dial, s *Sampler, t Target, now func() tim
 	return WithResources(ctx, c, s, t, now)
 }
 
-// WithResources is Fetch, then, while the Run is running, a Read of its
+// WithResources is Fetch, then AddResources.
+func WithResources(ctx context.Context, c Client, s *Sampler, t Target, now func() time.Time) Window {
+	return AddResources(ctx, c, s, Fetch(ctx, c, t, now), now)
+}
+
+// AddResources is w with, while its Run is running, a Read of its
 // resources with s (nil s: none). A failed or busy Read leaves the
 // section out.
-func WithResources(ctx context.Context, c Client, s *Sampler, t Target, now func() time.Time) Window {
-	w := Fetch(ctx, c, t, now)
-	if s == nil || w.Problem != "" || w.Run == nil || w.Run.State != "running" {
+func AddResources(ctx context.Context, c Client, s *Sampler, w Window, now func() time.Time) Window {
+	if !Running(w) || s == nil {
 		return w
 	}
 	epoch := 0
@@ -286,3 +290,7 @@ func WithResources(ctx context.Context, c Client, s *Sampler, t Target, now func
 	}
 	return w
 }
+
+// Running reports whether w was read and its Run is running: whether it
+// has resources to read.
+func Running(w Window) bool { return w.Problem == "" && w.Run != nil && w.Run.State == "running" }

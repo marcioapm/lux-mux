@@ -487,7 +487,11 @@ number that is no window's index is taken as a name: `luxmux info 7`
 finds a window named `7`). Without
 `-t` it is the session of the window it runs in (`$LUXMUX_SESSION`, a
 renamed session found by its Runs' label), else `main`. Each window is
-read from its own lux, all within 10 s; a lux that does not answer marks
+read from its own lux, all within 10 s: up to 8 windows' Runs are read
+at once (5 s each at most) and, apart, up to 8 resources execs run at
+once (3 s each at most), so an exec that hangs never holds up the next
+window's read; with many windows, the last start with what is left of
+the 10 s. A lux that does not answer marks
 its windows `unreachable`, the others still print, and the exit status is
 1 when any window could not be read, or (for a session rebuilt from its
 Runs, with no session file) when a lux could not be listed. The text is

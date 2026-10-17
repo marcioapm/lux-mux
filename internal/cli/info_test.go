@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -362,5 +363,55 @@ func TestInfoFanOutBounded(t *testing.T) {
 	defer mu.Unlock()
 	if len(o.Windows) != n || peak > infoParallel || peak < 2 {
 		t.Fatalf("%d windows, %d GETs at once", len(o.Windows), peak)
+	}
+}
+
+// TestInfoHungExecsLeaveReadTime: with 3×infoParallel windows whose first
+// infoParallel resources execs hang to their ExecTimeout, every later
+// window's Run is still read, and their execs run after, within the one
+// deadline: only the hung windows lack resources. With one slot for a
+// window's read and exec together, the third batch's reads would start
+// after 2×600 ms + ExecTimeout and outlive the 4.5 s deadline.
+func TestInfoHungExecsLeaveReadTime(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = 4500 * time.Millisecond
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb, _ := infoEnv(t)
+	s, _, _ := state.Load(env.StateDir, "work")
+	const n = 3 * infoParallel
+	// A Run each: the sampler runs one exec per Run at a time.
+	s.Windows = s.Windows[:0]
+	for len(s.Windows) < n {
+		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
+	}
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	var execs atomic.Int32
+	answer := func(string, []string) (fakelux.ExecAnswer, bool) {
+		if execs.Add(1) <= infoParallel {
+			return fakelux.ExecAnswer{Hang: true}, true
+		}
+		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
+	}
+	a.SetExecResponder(answer)
+	a.SetGetHook(func(string) { time.Sleep(600 * time.Millisecond) })
+	start := time.Now()
+	code := Main(env, []string{"info", "-t", "work", "--json"})
+	if d := time.Since(start); d > infoTimeout+time.Second {
+		t.Fatalf("took %v", d)
+	}
+	o := decodeInfo(t, out.Bytes())
+	without := 0
+	for i, w := range o.Windows {
+		if w.Problem != "" {
+			t.Fatalf("code %d: window %d not read behind hung execs: %+v\n%s", code, i, w, errb.String())
+		}
+		if w.Resources == nil {
+			without++
+		}
+	}
+	if code != 0 || len(o.Windows) != n || without != infoParallel {
+		t.Fatalf("code %d: %d windows, %d without resources", code, len(o.Windows), without)
 	}
 }
