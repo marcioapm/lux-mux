@@ -584,6 +584,18 @@ func TestParseReading(t *testing.T) {
 	}
 }
 
+// TestLineWidth: the width the keys are aligned to is the longest key's,
+// blank (section title) lines included at zero.
+func TestLineWidth(t *testing.T) {
+	if got := LineWidth(nil); got != 0 {
+		t.Fatalf("no lines: %d, want 0", got)
+	}
+	lines := []Line{{Key: ""}, {Key: "a"}, {Key: "longest"}, {Key: "mid"}}
+	if got := LineWidth(lines); got != len("longest") {
+		t.Fatalf("%d, want %d", got, len("longest"))
+	}
+}
+
 func TestFormat(t *testing.T) {
 	for d, want := range map[time.Duration]string{0: "0s", 59 * time.Second: "59s", 61 * time.Second: "1m 1s",
 		3*time.Hour + 5*time.Minute: "3h 5m", 50 * time.Hour: "2d 2h"} {
