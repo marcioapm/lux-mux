@@ -165,6 +165,68 @@ const lockSeconds = 2
 // probeSeconds bounds the whole optional probe group (df, stat, git).
 const probeSeconds = "1"
 
+// externalFunc defines _lm_external CMD ARGS: exec CMD found by a PATH
+// search, so a shell function (bash imports exported ones) cannot shadow it.
+const externalFunc = `_lm_external() {
+	_lm_cmd=$1; shift
+	_lm_path=$PATH
+	while :; do
+		_lm_dir=${_lm_path%%:*}
+		[ -n "$_lm_dir" ] || _lm_dir=.
+		if [ -x "$_lm_dir/$_lm_cmd" ]; then exec "$_lm_dir/$_lm_cmd" "$@"; fi
+		case $_lm_path in *:*) _lm_path=${_lm_path#*:} ;; *) return 127 ;; esac
+	done
+}
+`
+
+const numFunc = `_lm_num() { case $1 in ""|*[!0-9]*) return 1 ;; esac; }
+`
+
+// probeScript runs under setsid(1), so its shell leads a new session and
+// process group, with $1 the workspace and $2 the repository directory. It
+// prints ok:DISK:BRANCH:end when every probe finished, then SIGKILLs its
+// whole group; a watchdog in the group does the same after probeSeconds.
+//
+// The kill names the group, not pids, so it reaches every process a probe
+// forked, and no process escapes between a fork and a shell recording $!:
+// Linux fails a fork that races with a group-wide signal, so a child exists
+// in the group before the kill or never exists.
+//
+// The wrapper reads this script's stdout to EOF and never waits for a
+// probe. That pipe is held only by this shell, which never touches the
+// workspace (the .git test runs in a child) and so always dies on SIGKILL;
+// each probe writes to its own substitution pipe, the watchdog to
+// /dev/null. A probe that cannot die (uninterruptible sleep on a dead
+// mount) stays an orphan of init, reaped if it ever exits; the facts are
+// empty and the prompt is not delayed past the deadline.
+//
+// It is embedded in single quotes, so it contains none.
+const probeScript = `{ sleep ` + probeSeconds + `; kill -s KILL -- -$$; } >/dev/null 2>&1 &
+_lm_ws=$1 _lm_g=$2 _lm_k="" _lm_br="" _lm_nl="
+"
+` + externalFunc + numFunc + `set -f
+if _lm_o=$(_lm_external df -Pk "$_lm_ws"); then
+	# shellcheck disable=SC2086
+	set -- ${_lm_o#*"$_lm_nl"}
+	_lm_num "${2-}" && _lm_k=$(($2 * 1024))
+elif _lm_o=$(_lm_external stat -f -c "%S %b" "$_lm_ws"); then
+	# shellcheck disable=SC2086
+	set -- $_lm_o
+	_lm_num "${1-}" && _lm_num "${2-}" && _lm_k=$(($1 * $2))
+fi
+if [ -n "$_lm_g" ] && command -v git >/dev/null 2>&1; then
+	_lm_br=$([ -e "$_lm_g/.git" ] || exit 99; _lm_external git -C "$_lm_g" symbolic-ref -q --short HEAD)
+	case $? in
+	0) ;;
+	99) _lm_br= ;;
+	*) _lm_br=$(_lm_external git -C "$_lm_g" rev-parse --short -q --verify HEAD) || _lm_br= ;;
+	esac
+	_lm_br=${_lm_br%%"$_lm_nl"*}
+fi
+printf "ok:%s:%s:end" "$_lm_k" "$_lm_br"
+kill -s KILL -- -$$
+`
+
 // StartWrapper is the POSIX sh script every window's Run starts with. Its
 // text is the same for every profile: on_start ($1) and on_resume ($2)
 // are arguments, only ever run as sh -c "$cmd", never part of the text.
@@ -263,6 +325,9 @@ const putFunc = `_lm_put() {
 `
 
 func buildWrapper() string {
+	if strings.Contains(probeScript, "'") {
+		panic("probeScript contains a single quote")
+	}
 	names := strings.Join(append(slices.Clone(StaticEnv), ComputedEnv...), " ")
 	return `# luxmux window start: LUXMUX_* facts, on_start/on_resume, then the shell.
 _lm_s=$1 _lm_r=$2
@@ -270,8 +335,7 @@ shift 2
 _lm_ws=${` + EnvTestWorkspace + `:-/workspace}
 _lm_cg=${` + EnvTestCgroup + `:-/sys/fs/cgroup}
 _lm_d=$_lm_ws/.luxmux
-_lm_num() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
-` + quoteFunc + lockFunc + putFunc + `LUXMUX_CPU='' _lm_q='' _lm_p=''
+` + numFunc + quoteFunc + lockFunc + putFunc + `LUXMUX_CPU='' _lm_q='' _lm_p=''
 { read -r _lm_q _lm_p <"$_lm_cg/cpu.max"; } 2>/dev/null
 if _lm_num "$_lm_q" && _lm_num "$_lm_p" && [ "$_lm_p" -gt 0 ]; then
 	_lm_m=$((_lm_q * 1000 / _lm_p))
@@ -286,66 +350,22 @@ fi
 LUXMUX_MEMORY='' _lm_v=''
 { read -r _lm_v <"$_lm_cg/memory.max"; } 2>/dev/null
 _lm_num "$_lm_v" && LUXMUX_MEMORY=$_lm_v
-# Optional probes share one background job and one watchdog. The trap kills
-# the currently running child before the job exits, so a timed-out probe
-# cannot leave df, stat or git behind.
-LUXMUX_DISK='' LUXMUX_BRANCH_CHECKED_OUT='' _lm_t=''
-for _lm_t in "${TMPDIR:-/tmp}" "$_lm_d" ''; do
-	[ -n "$_lm_t" ] || break
-	_lm_t=$_lm_t/.luxmux-probe.$$
-	{ rm -rf "$_lm_t" && mkdir -m 700 "$_lm_t"; } 2>/dev/null && break
-done
-if [ -n "$_lm_t" ]; then
-	_lm_external() {
-		_lm_cmd=$1; shift
-		_lm_path=$PATH
-		while :; do
-			_lm_dir=${_lm_path%%:*}
-			[ -n "$_lm_dir" ] || _lm_dir=.
-			if [ -x "$_lm_dir/$_lm_cmd" ]; then exec "$_lm_dir/$_lm_cmd" "$@"; fi
-			case $_lm_path in *:*) _lm_path=${_lm_path#*:} ;; *) return 127 ;; esac
-		done
-	}
-	_lm_probe_group() {
-		trap '[ -n "${_lm_child-}" ] && { kill -KILL "$_lm_child" 2>/dev/null; wait "$_lm_child" 2>/dev/null; }; exit 124' TERM INT
-		_lm_external df -Pk "$_lm_ws" >"$_lm_t/df" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_df=$?
-		if [ "$_lm_df" -ne 0 ]; then
-			_lm_external stat -f -c '%S %b' "$_lm_ws" >"$_lm_t/stat" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_stat=$?
-		else
-			_lm_stat=1
-		fi
-		_lm_g=${LUXMUX_REPO_DIR-}
-		_lm_git=1
-		if [ -n "$_lm_g" ] && [ -e "$_lm_g/.git" ] && command -v git >/dev/null 2>&1; then
-			_lm_external git -C "$_lm_g" symbolic-ref -q --short HEAD >"$_lm_t/git" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_git=$?
-			if [ "$_lm_git" -ne 0 ]; then
-				_lm_external git -C "$_lm_g" rev-parse --short -q --verify HEAD >"$_lm_t/git" 2>/dev/null & _lm_child=$!; wait "$_lm_child"; _lm_git=$?
-			fi
-		fi
-		printf '%s %s %s\n' "$_lm_df" "$_lm_stat" "$_lm_git" >"$_lm_t/status"
-	}
-	_lm_probe_group & _lm_pg=$!
-	(
-		trap 'kill "$_lm_sleep" 2>/dev/null; wait "$_lm_sleep" 2>/dev/null; exit' TERM INT
-		sleep ` + probeSeconds + ` & _lm_sleep=$!
-		wait "$_lm_sleep"
-		kill "$_lm_pg" 2>/dev/null
-	) & _lm_wd=$!
-	wait "$_lm_pg"; _lm_prc=$?
-	kill "$_lm_wd" 2>/dev/null; wait "$_lm_wd" 2>/dev/null
-	if [ "$_lm_prc" -eq 0 ] && read -r _lm_df _lm_stat _lm_git <"$_lm_t/status" 2>/dev/null; then
-		_lm_b='' _lm_n=''
-		[ "$_lm_df" -eq 0 ] && { read -r _lm_x; read -r _lm_x _lm_b _lm_x; } <"$_lm_t/df" 2>/dev/null
-		if _lm_num "$_lm_b"; then
-			LUXMUX_DISK=$((_lm_b * 1024))
-		elif [ "$_lm_stat" -eq 0 ]; then
-			{ read -r _lm_b _lm_n; } <"$_lm_t/stat" 2>/dev/null
-			_lm_num "$_lm_b" && _lm_num "$_lm_n" && LUXMUX_DISK=$((_lm_b * _lm_n))
-		fi
-		if [ "$_lm_git" -eq 0 ]; then IFS= read -r LUXMUX_BRANCH_CHECKED_OUT <"$_lm_t/git" 2>/dev/null; fi
-	fi
-	rm -rf "$_lm_t" 2>/dev/null
+# Optional probes run in their own process group (probeScript); without
+# setsid(1) both facts stay empty.
+LUXMUX_DISK='' LUXMUX_BRANCH_CHECKED_OUT='' _lm_o=''
+if command -v setsid >/dev/null 2>&1; then
+	# shellcheck disable=SC2016
+	{ _lm_o=$(setsid sh -c '` + probeScript + `' luxmux-probe "$_lm_ws" "${LUXMUX_REPO_DIR-}" </dev/null); } 2>/dev/null
 fi
+case $_lm_o in
+ok:*:*:end)
+	_lm_o=${_lm_o#ok:}
+	_lm_o=${_lm_o%:end}
+	LUXMUX_DISK=${_lm_o%%:*}
+	LUXMUX_BRANCH_CHECKED_OUT=${_lm_o#*:}
+	_lm_num "$LUXMUX_DISK" || LUXMUX_DISK=''
+	;;
+esac
 mkdir -p "$_lm_d" 2>/dev/null
 if [ -e "$_lm_d/started" ]; then
 	LUXMUX_START=resume
