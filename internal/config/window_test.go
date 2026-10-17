@@ -1059,11 +1059,14 @@ func TestWrapperProbeResultStrict(t *testing.T) {
 // state volume, and keeps one whose pid is alive, another user's, and any
 // other name.
 func TestWrapperSweepsProbeDirs(t *testing.T) {
-	gone := exec.Command(realTool(t, "true"))
-	if err := gone.Run(); err != nil {
-		t.Fatal(err)
+	deadPid := func() string {
+		gone := exec.Command(realTool(t, "true"))
+		if err := gone.Run(); err != nil {
+			t.Fatal(err)
+		}
+		return strconv.Itoa(gone.Process.Pid)
 	}
-	dead, live := strconv.Itoa(gone.Process.Pid), strconv.Itoa(os.Getpid())
+	dead, deadLink, live := deadPid(), deadPid(), strconv.Itoa(os.Getpid())
 	for label, shell := range testShells(t) {
 		t.Run(label, func(t *testing.T) {
 			f := newFixture(t, toolDir(t, baseTools, nil), Profile{Image: "alpine"})
@@ -1081,6 +1084,12 @@ func TestWrapperSweepsProbeDirs(t *testing.T) {
 			}
 			stale := []string{mk(tmp, ".luxmux-probe."+dead), mk(state, ".luxmux-probe."+dead)}
 			kept := []string{mk(tmp, ".luxmux-probe."+live), mk(state, ".luxmux-probe."+live), mk(tmp, ".luxmux-probe.x1"), mk(tmp, "luxmux-probe."+dead)}
+			// The sweep never follows a symlink: its target's contents stay.
+			victim := mk(f.dir, "victim")
+			if err := os.Symlink(victim, filepath.Join(tmp, ".luxmux-probe."+deadLink)); err != nil {
+				t.Fatal(err)
+			}
+			kept = append(kept, victim)
 			file := filepath.Join(state, ".luxmux-probe.1"+dead)
 			if err := os.WriteFile(file, nil, 0o600); err != nil {
 				t.Fatal(err)
