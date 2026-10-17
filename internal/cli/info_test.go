@@ -226,7 +226,7 @@ func TestInfoOneLuxDown(t *testing.T) {
 // deadline, and the other lux's window still prints.
 func TestInfoHungLuxBounded(t *testing.T) {
 	old := infoTimeout
-	infoTimeout = time.Second
+	infoTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { infoTimeout = old })
 	env, _, _, out, errb, _ := infoEnv(t)
 	hung := config.Endpoint{URL: hangingLux(t), KeyEnv: cliKeyEnv}
@@ -286,7 +286,7 @@ func TestInfoNumberAsName(t *testing.T) {
 // not one for the listing and another for the reads.
 func TestInfoOneDeadlineWithListing(t *testing.T) {
 	old := infoTimeout
-	infoTimeout = 2 * time.Second
+	infoTimeout = time.Second
 	t.Cleanup(func() { infoTimeout = old })
 	env, a, _, out, errb := twoLuxEnv(t)
 	writeConfig(t, env, twoProfiles+"[profiles.remote]\nimage = \"x\"\nlux_url = \""+hangingLux(t)+"\"\napi_key_env = \""+cliKeyEnv+"\"\n")
@@ -296,7 +296,8 @@ func TestInfoOneDeadlineWithListing(t *testing.T) {
 	a.SetGetHook(func(string) { <-release })
 	start := time.Now()
 	code := Main(env, []string{"info", "-t", "work", "--json"})
-	if d := time.Since(start); d > 3*time.Second || code == 0 {
+	// One deadline is about 1 s; a listing's and then the reads' are 2 s.
+	if d := time.Since(start); d > 1600*time.Millisecond || code == 0 {
 		t.Fatalf("%d after %v: %s", code, d, errb.String())
 	}
 	if o := decodeInfo(t, out.Bytes()); len(o.Windows) != 1 || o.Windows[0].RunID != id || o.Windows[0].Problem != info.ProblemUnreachable {
