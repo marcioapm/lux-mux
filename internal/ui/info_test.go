@@ -346,6 +346,42 @@ func TestInfoWindowSwitchDropsLate(t *testing.T) {
 	}
 }
 
+// TestInfoSwitchSeenByResultKeepsRefreshing: a switch noticed when a
+// read's answer arrives (not on a tick) still leaves the dialog reading
+// the new window every InfoEvery.
+func TestInfoSwitchSeenByResultKeepsRefreshing(t *testing.T) {
+	r := newInfoRig(t, 30, 100)
+	r.waitCalls(1)
+	next := r.host.target
+	next.Index, next.Name, next.RunID = 0, "web", "run_9"
+	r.host.setTarget(next)
+	r.answer(r.goodWindow("old-host"))
+	r.waitCalls(2)
+	r.answer(r.goodWindow("new-host"))
+	for i := 3; i <= 6; i++ {
+		r.advance(InfoEvery)
+		r.waitCalls(i)
+		r.answer(r.goodWindow("new-host"))
+	}
+	if tg := r.host.targets[5]; tg.RunID != "run_9" {
+		t.Fatalf("read %+v", tg)
+	}
+	if v := r.view(); lineOf(v, "host") != "new-host" {
+		t.Fatalf("after the switch:\n%s", v)
+	}
+}
+
+// lineOf is the value of the view's body line keyed k ("" if none).
+func lineOf(view, k string) string {
+	for _, l := range strings.Split(view, "\n") {
+		l = strings.Trim(l, "│ ")
+		if key, v, ok := strings.Cut(l, "  "); ok && key == k {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 // TestInfoErrorKeepsLastValues: a failed read says why in one line and
 // keeps the last good values, with their age.
 func TestInfoErrorKeepsLastValues(t *testing.T) {

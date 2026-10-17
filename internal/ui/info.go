@@ -182,8 +182,9 @@ func (d *InfoDialog) result(m infoResultMsg) tea.Cmd {
 	}
 	d.inFlight, d.cancel = false, nil
 	if d.follow() {
-		// Read for a window no longer shown: the new one's read starts.
-		return d.fetch()
+		// Read for a window no longer shown: the new one's read starts,
+		// and its own clock, since the pending tick is of the old gen.
+		return tea.Batch(d.fetch(), d.after(InfoEvery, infoTickMsg{d.gen}))
 	}
 	if m.w.Problem != "" {
 		d.errLine = m.w.Error
