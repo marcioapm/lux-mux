@@ -432,6 +432,35 @@ func (f *fixture) shortProbes(d string) {
 	f.cmd[2] = strings.Replace(f.cmd[2], probeDeadline, "sleep "+d+";", 1)
 }
 
+// dfFake prints df -Pk output for a 10-block (10240-byte) volume.
+const dfFake = `printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 10 0%% workspace\n'`
+
+func readPid(t *testing.T, file string) int {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+// waitGone fails unless pid is gone within 2 s: SIGKILL is delivered at
+// once, but the exit may lag a moment.
+func waitGone(t *testing.T, pid int) {
+	t.Helper()
+	for end := time.Now().Add(2 * time.Second); syscall.Kill(pid, 0) == nil && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("process %d remains: %v", pid, err)
+	}
+}
+
 // source runs ". env" in a shell with an empty environment and returns
 // every LUXMUX_* value it defines.
 func (f *fixture) source() map[string]string {
@@ -1067,6 +1096,64 @@ func TestWrapperSweepsProbeDirs(t *testing.T) {
 				t.Errorf("another user's %s removed: %v", other, err)
 			}
 		})
+	}
+}
+
+// TestWrapperProbeKillQuiet: the probe script's own group kill is a valid
+// kill(1) in dash, bash and BusyBox sh. Its stderr is discarded in the
+// wrapper, so a shell that rejected the syntax would fail silently.
+func TestWrapperProbeKillQuiet(t *testing.T) {
+	bin := toolDir(t, baseTools, map[string]string{"df": dfFake, "stat": "exit 1"})
+	shells := map[string][]string{}
+	for _, n := range []string{"dash", "bash"} {
+		if p, err := exec.LookPath(n); err == nil {
+			shells[n] = []string{p}
+		}
+	}
+	if b, err := exec.LookPath("busybox"); err == nil {
+		shells["busybox"] = []string{b, "sh"}
+	}
+	for label, shell := range shells {
+		t.Run(label, func(t *testing.T) {
+			cmd := exec.Command(shell[0], append(slices.Clone(shell[1:]), "-c", probeScript, "luxmux-probe", t.TempDir(), "")...)
+			cmd.Env = []string{"PATH=" + bin}
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			_ = cmd.Run()
+			if stdout.String() != "ok:10240::end" || stderr.String() != "" {
+				t.Fatalf("stdout %q stderr %q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestWrapperBusyBoxProbeShell: with BusyBox as PATH's sh and setsid, so
+// the probe shell itself is BusyBox, a df that ignores SIGTERM is cut off
+// at the deadline and leaves no process and no disk fact.
+func TestWrapperBusyBoxProbeShell(t *testing.T) {
+	bb, err := exec.LookPath("busybox")
+	if err != nil {
+		t.Skip("busybox unavailable")
+	}
+	bin := toolDir(t, toolsWithout("sh", "setsid"), map[string]string{"df": `printf '%s' "$$" >"$LM_STATE/df.pid"
+trap '' TERM
+exec sleep 30`, "stat": "exit 1"})
+	for _, n := range []string{"sh", "setsid"} {
+		if err := os.Symlink(bb, filepath.Join(bin, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newFixture(t, bin, Profile{Image: "alpine"})
+	f.shell = []string{bb, "sh"}
+	f.shortProbes("0.3")
+	out, d, err := f.wrapper()
+	if err != nil || out != "shell:start" || d > 4*time.Second {
+		t.Fatalf("%q %v after %v", out, err, d)
+	}
+	waitGone(t, readPid(t, filepath.Join(f.state, "df.pid")))
+	if got := f.source(); got[EnvDisk] != "" {
+		t.Fatalf("disk %q", got[EnvDisk])
 	}
 }
 

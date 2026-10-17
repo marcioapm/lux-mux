@@ -201,7 +201,7 @@ const numFunc = `_lm_num() { case $1 in ""|*[!0-9]*) return 1 ;; esac; }
 // empty and the prompt is not delayed past the deadline.
 //
 // It is embedded in single quotes, so it contains none.
-const probeScript = `{ sleep ` + probeSeconds + `; kill -s KILL -- -$$; } >/dev/null 2>&1 &
+const probeScript = `{ sleep ` + probeSeconds + `; kill -KILL -$$; } >/dev/null 2>&1 &
 _lm_ws=$1 _lm_g=$2 _lm_k="" _lm_br="" _lm_nl="
 "
 ` + externalFunc + numFunc + `set -f
@@ -224,7 +224,7 @@ if [ -n "$_lm_g" ] && command -v git >/dev/null 2>&1; then
 	_lm_br=${_lm_br%%"$_lm_nl"*}
 fi
 printf "ok:%s:%s:end" "$_lm_k" "$_lm_br"
-kill -s KILL -- -$$
+kill -KILL -$$
 `
 
 // StartWrapper is the POSIX sh script every window's Run starts with. Its
