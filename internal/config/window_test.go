@@ -990,6 +990,11 @@ printf '%s' "$!" >"$LM_STATE/child.pid"
 	for label, df := range map[string]string{"killed": fork + "kill -KILL 0", "done": fork + dfFake} {
 		t.Run(label, func(t *testing.T) {
 			f := newFixture(t, toolDir(t, baseTools, map[string]string{"df": df, "stat": "exit 1"}), Profile{Image: "alpine"})
+			if label == "done" {
+				// A watchdog that cannot fire within waitGone: only the
+				// probe's closing group kill can reach the child.
+				f.shortProbes("10")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cmd := commandIn(ctx, f, f.cmd[1:])
@@ -1127,6 +1132,14 @@ exec REAL_find "$@"`}), Profile{Image: "alpine"})
 	}
 	if b, _ := os.ReadFile(filepath.Join(f.state, "find.calls")); strings.Count(string(b), "\n") != 1 {
 		t.Fatalf("find ran %d times", strings.Count(string(b), "\n"))
+	}
+	// No stale directory left: the next placement runs no find at all.
+	if err := os.Remove(filepath.Join(f.state, "find.calls")); err != nil {
+		t.Fatal(err)
+	}
+	f.mustWrapper()
+	if _, err := os.Stat(filepath.Join(f.state, "find.calls")); !os.IsNotExist(err) {
+		t.Fatalf("find ran with nothing to sweep: %v", err)
 	}
 }
 
