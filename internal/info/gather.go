@@ -323,7 +323,7 @@ func plainSCP(u string) string {
 		return u
 	}
 	out := u[strings.LastIndex(head, "@")+1:]
-	if !strings.Contains(out, ":") {
+	if !strings.Contains(out, ":") || strings.Contains(out, "@") {
 		return UnparseableURL
 	}
 	return out
