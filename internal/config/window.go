@@ -393,13 +393,15 @@ if _lm_lock; then
 	# only when that pid cannot be signalled: kill -0 fails for a dead pid,
 	# or for a reused one now another user's, whose creator is gone too. An
 	# unmatched glob is its own text and fails -d, so no match costs no fork.
-	_lm_uid=''
-	for _lm_x in "${TMPDIR:-/tmp}"/.luxmux-probe.* "$_lm_d"/.luxmux-probe.*; do
-		_lm_num "${_lm_x##*.}" && [ -d "$_lm_x" ] || continue
-		! kill -0 "${_lm_x##*.}" 2>/dev/null || continue
-		[ -n "$_lm_uid" ] || _lm_uid=$(id -u 2>/dev/null) || break
-		find "$_lm_x" -prune -type d -user "$_lm_uid" -exec rm -rf {} + 2>/dev/null
-	done
+	# find without -H/-L tests a symlinked candidate itself, never its target.
+	_lm_sweep() {
+		set --
+		for _lm_x in "${TMPDIR:-/tmp}"/.luxmux-probe.* "$_lm_d"/.luxmux-probe.*; do
+			_lm_num "${_lm_x##*.}" && [ -d "$_lm_x" ] && ! kill -0 "${_lm_x##*.}" && set -- "$@" "$_lm_x"
+		done
+		[ $# -eq 0 ] || find "$@" -prune -type d -user "$(id -u)" -exec rm -rf {} +
+	}
+	_lm_sweep 2>/dev/null
 	_lm_tf=$_lm_d/.lm-tmp.facts.$$ _lm_te=$_lm_d/.lm-tmp.env.$$
 	if _lm_facts 2>/dev/null >"$_lm_tf" && _lm_put "$_lm_tf" "$_lm_d/` + FactsFile + `"; then
 		if { _lm_facts && { [ ! -e "$_lm_d/` + WindowFile + `" ] || cat "$_lm_d/` + WindowFile + `"; }; } 2>/dev/null >"$_lm_te"; then

@@ -321,7 +321,7 @@ func toolDir(t *testing.T, real []string, fakes map[string]string) string {
 		}
 	}
 	for n, body := range fakes {
-		for _, r := range []string{"mv", "flock", "timeout", "df", "stat", "git"} {
+		for _, r := range []string{"mv", "flock", "timeout", "df", "stat", "git", "find"} {
 			if strings.Contains(body, "REAL_"+r) {
 				body = strings.ReplaceAll(body, "REAL_"+r, realTool(t, r))
 			}
@@ -1122,6 +1122,34 @@ func TestWrapperSweepsProbeDirs(t *testing.T) {
 				t.Errorf("another user's %s removed: %v", other, err)
 			}
 		})
+	}
+}
+
+// TestWrapperSweepOneFind: however many stale probe directories there are,
+// the sweep (held under the env lock) starts find once and removes all.
+func TestWrapperSweepOneFind(t *testing.T) {
+	f := newFixture(t, toolDir(t, baseTools, map[string]string{"find": `echo >>"$LM_STATE/find.calls"
+exec REAL_find "$@"`}), Profile{Image: "alpine"})
+	var stale []string
+	for range 3 {
+		gone := exec.Command(realTool(t, "true"))
+		if err := gone.Run(); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(f.dir, "tmp", ".luxmux-probe."+strconv.Itoa(gone.Process.Pid))
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stale = append(stale, p)
+	}
+	f.mustWrapper()
+	for _, p := range stale {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale %s remains: %v", p, err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.state, "find.calls")); strings.Count(string(b), "\n") != 1 {
+		t.Fatalf("find ran %d times", strings.Count(string(b), "\n"))
 	}
 }
 
