@@ -1,15 +1,16 @@
 # The default luxmux image
 
 `ghcr.io/marcioapm/luxmux` is the image luxmux's built-in profile runs: a
-login shell with the usual development tools and three coding agents
-preinstalled, for `linux/amd64` and `linux/arm64`.
+login shell with the usual development tools, video and speech tools and
+three coding agents preinstalled, for `linux/amd64` and `linux/arm64`.
 
 | | |
 | --- | --- |
-| Base | `ubuntu:24.04`, pinned by digest (`UBUNTU_DIGEST`) |
-| Agents | Claude Code `2.1.301`, OpenCode `1.19.1`, Codex `0.162.1` |
-| Runtimes | Node.js `24.22.0` (LTS), Python 3.12 with `python3-venv`, uv `0.13.1` |
-| Tools | bash, git, gh, curl, openssh-client, ripgrep, fd, jq, less, vim, nano, zip/unzip, xz, procps, iproute2, build-essential, pkg-config |
+| Base | `ubuntu:26.04`, pinned by digest (`UBUNTU_DIGEST`) |
+| Agents | Claude Code `2.1.302`, OpenCode `1.19.3`, Codex `0.163.0` |
+| Runtimes | Node.js `26.12.0`, Python 3.14 with `python3-venv`, uv `0.13.1` |
+| Tools | bash, git, gh, curl, openssh-client, ripgrep, fd, jq, less, vim, nano, zip/unzip, xz, procps, iproute2, build-essential, pkgconf |
+| Video and speech | ffmpeg and ffprobe (with `libx264`, `drawtext`, `subtitles`/`ass`, `overlay`), `fonts-dejavu-core`, espeak-ng, edge-tts `7.3.1` |
 | Locales | `C.UTF-8`, `en_US.UTF-8` (the default), tzdata |
 | User | `agent`, uid/gid 1000, home `/home/agent` |
 
@@ -17,7 +18,11 @@ Every version is a build `ARG` in the [Dockerfile](Dockerfile). Node and uv
 come from their official release archives and gh from GitHub's apt
 repository; each download is checked against a sha256 pinned there. The agents
 are installed with `npm install --global`, as each vendor documents, into
-`/opt/npm` (on `PATH`).
+`/opt/npm` (on `PATH`). ffmpeg, espeak-ng and the fonts are Ubuntu packages;
+edge-tts is a `uv tool` venv in `/opt/uv-tools` with `edge-tts` and
+`edge-playback` in `/usr/local/bin`. edge-tts needs network access to
+Microsoft's speech service (and that host in the profile's `egress`);
+espeak-ng is the offline fallback.
 
 ## How it fits lux
 
@@ -31,10 +36,11 @@ are installed with `npm install --global`, as each vendor documents, into
   `~/.codex`, `~/.local/share/opencode`, `~/.config/gh` and shell history
   survive a move to another host. lux hands a fresh volume's root to the
   workload user.
-- **The CLIs are outside the home.** `/opt/npm` belongs to the image, so an
-  empty or restored home never loses or shadows them. It is root-owned and
-  `agent` has no `sudo`, so a plain `npm install -g` fails with `EACCES`;
-  install global packages into the home instead with
+- **The CLIs are outside the home.** `/opt/npm` and `/opt/uv-tools` belong
+  to the image, so an empty or restored home never loses or shadows them.
+  They are root-owned and `agent` has no `sudo`, so a plain
+  `npm install -g` fails with `EACCES`; install global packages into the
+  home instead with
   `npm install -g --prefix ~/.local <package>`. Ubuntu's `~/.profile` puts
   `~/.local/bin` on the login shell's `PATH` once it exists (open a new
   window, or `exec bash -l`), and it lives on the home volume.
@@ -121,20 +127,21 @@ announce the release.
 **The first push creates a private package.** The owner must make it public
 once, on GitHub: the package's **Package settings → Change visibility →
 Public**. Until then the image cannot be pulled anonymously; set
-`image = "ubuntu:24.04"` in the profile (the light alternative `luxmux config
+`image = "ubuntu:26.04"` in the profile (the light alternative `luxmux config
 init` documents), which has no agents or extra tools.
 
 ## Updating
 
 Bump the `ARG`s in the Dockerfile:
 
-- `UBUNTU_DIGEST`: `docker buildx imagetools inspect ubuntu:24.04`, the index
+- `UBUNTU_DIGEST`: `docker buildx imagetools inspect ubuntu:26.04`, the index
   digest at the top.
-- `NODE_VERSION` and its hashes: the newest LTS in
+- `NODE_VERSION` and its hashes: the newest `v26.x` in
   `https://nodejs.org/dist/index.json`, hashes from its `SHASUMS256.txt`.
 - `UV_VERSION` and its hashes: the release's `*.tar.gz.sha256` assets.
 - `CLAUDE_CODE_VERSION`, `OPENCODE_VERSION`, `CODEX_VERSION`:
   `npm view <package> version`.
+- `EDGE_TTS_VERSION`: `info.version` in `https://pypi.org/pypi/edge-tts/json`.
 - `GH_KEYRING_SHA256` only when GitHub rotates its apt key.
 
 ## Building and testing locally
@@ -148,15 +155,23 @@ docker run --rm --network none \
 ```
 
 The smoke test runs as the image's `USER`, as lux does (so no `--user`),
-with an empty home, no network and no credentials. It first checks that the
-user is `agent` (uid 1000) and that `HOME` is a writable `/home/agent`, the
-path luxmux's home volume is mounted at, then that every agent and tool
-starts. Each failing check prints `smoke: FAIL:` and what failed.
+with an empty home, no network and no credentials. It checks that:
 
-For `linux/arm64`
+- the user is `agent` (uid 1000) and `HOME` is a writable `/home/agent`, the
+  path luxmux's home volume is mounted at;
+- every agent and tool starts (the CLIs must also print a version), and the
+  login shell's Node is 26.x;
+- ffmpeg has `libx264` and the `drawtext`, `subtitles`, `ass` and `overlay`
+  filters, and a one-second drawtext render to H.264 decodes to 25 frames;
+- an espeak-ng WAV is PCM and lasts at least 0.5 s;
+- a Python venv can be created and the login shell's locale loads.
+
+Each failing check prints `smoke: FAIL:` and what failed. For `linux/arm64`
 on an amd64 machine, the same commands work with QEMU binfmt installed.
 
 Size at the versions above, measured as gzip of `docker save` (close to the
-registry's compressed layers): amd64 about 613 MB (1.66 GB unpacked), arm64
-about 592 MB (1.62 GB unpacked). Most of it is the three agents' native
-binaries (Codex alone ships about 430 MB unpacked).
+registry's compressed layers): amd64 about 828 MB (2.22 GB unpacked), arm64
+about 801 MB (2.15 GB unpacked). Most of it is the three agents' native
+binaries (Codex alone ships about 410 MB unpacked) and the ffmpeg package's
+hard dependencies, which include SDL, Mesa and LLVM (about 180 MB unpacked
+for `libllvm21` and `mesa-libgallium`).
