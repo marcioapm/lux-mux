@@ -66,7 +66,9 @@ RUN set -eux; \
       "opencode-ai@${OPENCODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}"; \
     npm cache clean --force; \
-    rm -rf /root/.npm /tmp/node-compile-cache /tmp/opencode; \
+    rm -rf /root/.npm /tmp/node-compile-cache /tmp/opencode \
+      /root/.cache/opencode /root/.config/opencode \
+      /root/.local/share/opencode /root/.local/state/opencode; \
     # opencode-ai's postinstall links the variant it selected into bin/; the others are never run.
     oc=/opt/npm/lib/node_modules/opencode-ai; \
     for d in "$oc"/node_modules/opencode-linux-*; do \
@@ -84,7 +86,8 @@ RUN set -eux; \
 ARG EDGE_TTS_VERSION=7.3.1
 RUN set -eux; \
     UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_DOWNLOADS=never \
-      uv tool install --no-cache --no-build --python /usr/bin/python3 "edge-tts==${EDGE_TTS_VERSION}"
+      uv tool install --no-cache --no-build --python /usr/bin/python3 "edge-tts==${EDGE_TTS_VERSION}"; \
+    rm -f /opt/uv-tools/.lock
 
 # Update checks and telemetry off, by each vendor's documented switch; a Run's env can override them.
 ENV DISABLE_AUTOUPDATER=1 \
