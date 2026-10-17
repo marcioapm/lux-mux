@@ -1035,6 +1035,25 @@ printf '%s' "$!" >"$LM_STATE/child.pid"
 	}
 }
 
+// TestWrapperProbeResultStrict: only a complete ok:DISK:BRANCH:end line
+// sets the facts; a truncated or prefixed line sets neither.
+func TestWrapperProbeResultStrict(t *testing.T) {
+	for line, want := range map[string][2]string{
+		"ok:10240:main:end":      {"10240", "main"},
+		"ok:10240:main":          {},
+		"ok:10240":               {},
+		"junk:ok:10240:main:end": {},
+	} {
+		t.Run(line, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, map[string]string{"setsid": "printf '%s' '" + line + "'"}), Profile{Image: "alpine"})
+			f.mustWrapper()
+			if got := f.source(); got[EnvDisk] != want[0] || got[EnvBranchCheckedOut] != want[1] {
+				t.Fatalf("facts from %q: %q, want %q", line, got, want)
+			}
+		})
+	}
+}
+
 // TestWrapperSweepsProbeDirs: a placement removes the .luxmux-probe.<pid>
 // directories an earlier wrapper killed mid-probe left in TMPDIR or on the
 // state volume, and keeps one whose pid is alive, another user's, and any
