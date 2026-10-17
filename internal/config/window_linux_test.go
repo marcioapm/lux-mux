@@ -80,6 +80,7 @@ while [ ! -e "$LM_STATE/seized" ]; do sleep 0.01; done
 exec sleep 30`
 			f := newFixture(t, toolDir(t, baseTools, map[string]string{"df": stuck, "stat": "exit 1"}), Profile{Image: "alpine"})
 			f.shell = shell
+			const deadline = 500 * time.Millisecond
 			f.shortProbes("0.5")
 			tr := newStuckTracer()
 			pid := 0
@@ -106,9 +107,15 @@ exec sleep 30`
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := tr.seize(p); errors.Is(err, unix.EPERM) {
+					err = tr.seize(p)
+					switch {
+					case errors.Is(err, unix.EPERM):
 						t.Skipf("ptrace not permitted here: %v", err)
-					} else if err != nil {
+					case errors.Is(err, unix.ESRCH) && time.Since(start) >= deadline:
+						// The watchdog fired before this poll seized df: the
+						// stuck state was never built, so there is nothing to test.
+						t.Skipf("seize %d after the %v deadline: %v", p, deadline, err)
+					case err != nil:
 						t.Fatalf("seize %d: %v", p, err)
 					}
 					pid = p
