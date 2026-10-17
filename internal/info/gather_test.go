@@ -130,20 +130,22 @@ func TestFromRunAllFields(t *testing.T) {
 		t.Fatal(w.Error)
 	}
 	text := Text(w, now)
-	for _, want := range []string{
-		"window", "1 api", "profile", "dev", "session", "work", "lux.example.com · tenant example", "run_1",
-		"luxmux-work", "running", "key ci · dev@example.com", "team=example",
-		"ghcr.io/example/dev:latest", "sha256:abc123",
-		"pool", "m", "size", "m-2-arm64", "2 cpus, 8Gi memory, 40Gi disk", "host-3", "3 (2 moves since the first)",
-		"stage", "running, since 2026-01-02 01:34:05Z", "1h 30m (this placement)", "2h 0m (all placements)",
-		"12s (for a host)", "8s (on a host)",
-		"https://example.com/api.git @ main", "https://example.com/web.git → /workspace/web", "/workspace/repos/api",
-		"only example.com, 192.0.2.0/24", "EXAMPLE_TOKEN",
-		"1.25 USD (final 1, estimated 0.25)", "incomplete",
-		"— of 2 cpus", "1Gi of 8Gi (12%)", "10Gi of 40Gi (25%)",
+	for k, want := range map[string]string{
+		"window": "1 api", "profile": "dev", "session": "work", "lux": "lux.example.com · tenant example", "run": "run_1",
+		"name": "luxmux-work", "state": "running", "submitted by": "key ci · dev@example.com", "labels": "team=example",
+		"ref": "ghcr.io/example/dev:latest", "resolved": "sha256:abc123",
+		"pool": "m", "size": "m-2-arm64", "asked": "size m-2-arm64", "effective": "2 cpus, 8Gi memory, 40Gi disk",
+		"host": "host-3", "epoch": "3 (2 moves since the first)",
+		"stage": "running, since 2026-01-02 01:34:05Z (1h 30m ago)", "uptime": "1h 30m (this placement)",
+		"runtime": "2h 0m (all placements)", "waiting": "12s (for a host)", "starting": "8s (on a host)",
+		"repository 1": "https://example.com/api.git @ main", "repository 2": "https://example.com/web.git → /workspace/web",
+		"workdir": "/workspace/repos/api", "egress": "only example.com, 192.0.2.0/24", "secrets": "EXAMPLE_TOKEN",
+		"so far": "1.25 USD (final 1, estimated 0.25)", "status": "incomplete",
+		"resumable": "no", "snapshot": "snap_1",
+		"cpu": "— of 2 cpus", "memory": "1Gi of 8Gi (12%)", "disk": "10Gi of 40Gi (25%)",
 	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("text lacks %q", want)
+		if got := lineValue(w, now, k); got != want {
+			t.Errorf("%s: %q, want %q", k, got, want)
 		}
 	}
 	if strings.Contains(text, "luxmux-session") || strings.Contains(text, "app=luxmux") || strings.Contains(text, "tok@") {
