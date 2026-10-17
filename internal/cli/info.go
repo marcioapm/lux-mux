@@ -79,12 +79,13 @@ func infoCmd(env Env, args []string) error {
 	reads, execs := make(chan struct{}, infoParallel), make(chan struct{}, infoParallel)
 	for i, t := range targets {
 		wg.Go(func() {
+			reads <- struct{}{}
 			c, err := dial(t.Endpoint)
 			if err != nil {
+				<-reads
 				out.Windows[i] = info.NoKey(t)
 				return
 			}
-			reads <- struct{}{}
 			w := info.Fetch(ctx, c, t, time.Now)
 			<-reads
 			if info.Running(w) {

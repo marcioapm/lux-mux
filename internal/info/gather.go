@@ -271,7 +271,7 @@ func PlainURL(u string) string {
 		if p.User == nil {
 			return u
 		}
-		if name := p.User.Username(); ssh && name != "" {
+		if name := p.User.Username(); ssh && name != "" && !strings.Contains(name, ":") {
 			p.User = url.User(name)
 		} else {
 			p.User = nil
@@ -309,10 +309,17 @@ func sshScheme(s string) bool {
 // with one (user:pass@host:path) is a credential and is cut through the
 // last "@" before the path's first "/". What is left without a ":" is no
 // host:path and is not shown. A local path (a "/" before any "@") is u.
+//
+// A path holding "user:x@" after a ":" (host:team@b:c.git) cannot be told
+// from a credential without a guess: it is cut, the safe side.
 func plainSCP(u string) string {
 	head, _, _ := strings.Cut(u, "/")
 	first := strings.Index(head, "@")
 	if first < 0 || !strings.Contains(head[:first], ":") {
+		// A password with a "/" in it hides its "@" past the first "/".
+		if at := strings.Index(u, "@"); at >= 0 && strings.Contains(u[:at], ":") && strings.Contains(u[at+1:], ":") {
+			return UnparseableURL
+		}
 		return u
 	}
 	out := u[strings.LastIndex(head, "@")+1:]

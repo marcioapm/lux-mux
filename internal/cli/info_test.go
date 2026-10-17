@@ -282,6 +282,56 @@ func TestInfoNumberAsName(t *testing.T) {
 	}
 }
 
+// TestInfoReadAndExecPools: luxmux info reads Runs and runs resources
+// execs in pools of their own, infoParallel each: both are in flight at
+// once (one pool would cap them together at infoParallel), and execs
+// never pass infoParallel.
+func TestInfoReadAndExecPools(t *testing.T) {
+	old := infoTimeout
+	infoTimeout = 5 * time.Second
+	t.Cleanup(func() { infoTimeout = old })
+	env, a, _, out, errb, _ := infoEnv(t)
+	s, _, _ := state.Load(env.StateDir, "work")
+	const n = 3 * infoParallel
+	s.Windows = s.Windows[:0]
+	for len(s.Windows) < n {
+		s.Windows = append(s.Windows, state.Window{RunID: submitInfo(t, a, cliKeyA, "work", "a"), Name: "w", Profile: "a"})
+	}
+	if err := state.Save(env.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+	var in, peakAll, inExec, peakExec atomic.Int32
+	enter := func(c, peak *atomic.Int32) {
+		v := c.Add(1)
+		for o := peak.Load(); v > o && !peak.CompareAndSwap(o, v); o = peak.Load() {
+		}
+	}
+	a.SetExecResponder(func(string, []string) (fakelux.ExecAnswer, bool) {
+		enter(&in, &peakAll)
+		enter(&inExec, &peakExec)
+		defer in.Add(-1)
+		defer inExec.Add(-1)
+		time.Sleep(200 * time.Millisecond)
+		return fakelux.ExecAnswer{Output: fakelux.ResourcesOutput("100000 100000", "1073741824", "536870912", "1000", 1024, 512)}, true
+	})
+	a.SetGetHook(func(string) {
+		enter(&in, &peakAll)
+		defer in.Add(-1)
+		time.Sleep(200 * time.Millisecond)
+	})
+	if code := Main(env, []string{"info", "-t", "work", "--json"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, w := range decodeInfo(t, out.Bytes()).Windows {
+		if w.Problem != "" || w.Resources == nil {
+			t.Fatalf("window not fully read: %+v", w)
+		}
+	}
+	if peakAll.Load() <= infoParallel || peakExec.Load() > infoParallel {
+		t.Fatalf("peak in flight %d (want more than %d), peak execs %d (want at most %d)", peakAll.Load(), infoParallel, peakExec.Load(), infoParallel)
+	}
+}
+
 // TestInfoListingLeavesReadTime: a lux that hangs the rebuild listing
 // leaves the listed windows of a healthy lux time to be read, and the
 // unanswered listing still makes the exit non-zero.

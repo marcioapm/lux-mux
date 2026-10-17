@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -146,6 +147,14 @@ func TestFromRunAllFields(t *testing.T) {
 	} {
 		if got := lineValue(w, now, k); got != want {
 			t.Errorf("%s: %q, want %q", k, got, want)
+		}
+	}
+	// Text renders those same lines, its cost section included.
+	width := LineWidth(Lines(w, now))
+	for _, k := range []string{"pool", "effective", "so far", "memory"} {
+		want := fmt.Sprintf("  %-*s  %s\n", width, k, lineValue(w, now, k))
+		if !strings.Contains(text, want) {
+			t.Errorf("Text lacks %q:\n%s", want, text)
 		}
 	}
 	if strings.Contains(text, "luxmux-session") || strings.Contains(text, "app=luxmux") || strings.Contains(text, "tok@") {
@@ -545,6 +554,18 @@ func TestPlainURLFailsClosed(t *testing.T) {
 		"user:tok@example.com":                 UnparseableURL,
 		"example.com:o/r.git":                  "example.com:o/r.git",
 		"/srv/git/u:p@r.git":                   "/srv/git/u:p@r.git",
+		"user:ab/cd@example.com:o/r.git":       UnparseableURL,
+		"user:tok@[::1]:o/r.git":               "[::1]:o/r.git",
+		"user:tok@example.com:22/o/r.git":      "example.com:22/o/r.git",
+		"git@example.com:o/user:pass@r.git":    "git@example.com:o/user:pass@r.git",
+		// ssh, more shapes: IPv6, an encoded "/" or ":" in the userinfo,
+		// "user:pass@" inside the path, both scheme spellings.
+		"ssh://git:p@[::1]:22/o/r.git":              "ssh://git@[::1]:22/o/r.git",
+		"ssh://git:p%2Fx@example.com/r.git":         "ssh://git@example.com/r.git",
+		"ssh://alice%3As3cret@example.com/o/r.git":  "ssh://example.com/o/r.git",
+		"ssh://example.com/o/user:pass@x.git":       "ssh://example.com/o/user:pass@x.git",
+		"ssh+git://deploy:tok@example.com:22/r.git": "ssh+git://deploy@example.com:22/r.git",
+		"git+ssh://git:t@k@example.com:x/r.git":     "git+ssh://git@example.com:x/r.git",
 	} {
 		if got := PlainURL(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
@@ -606,6 +627,13 @@ func TestParseReading(t *testing.T) {
 	r = ParseReading([]byte("cpu.max 50000 100000\ngarbage\ndf  \n"))
 	if *r.CPULimit != 0.5 || r.DiskSize != nil {
 		t.Fatalf("%+v", r)
+	}
+	// From 2^62 up a memory limit is no limit (v1's page-rounded 2^63-1).
+	if r := ParseReading([]byte("memory.max 4611686018427387904\n")); r.MemoryLimit != nil {
+		t.Fatalf("2^62: limit %d, want none", *r.MemoryLimit)
+	}
+	if r := ParseReading([]byte("memory.max 4611686018427387903\n")); r.MemoryLimit == nil || *r.MemoryLimit != 1<<62-1 {
+		t.Fatalf("2^62-1: %+v, want that limit", r.MemoryLimit)
 	}
 }
 
