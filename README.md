@@ -52,6 +52,7 @@ through profile `secrets` and allow the required provider hosts in `egress`.
 | `luxmux new-window [-t NAME] [-n WINDOW] [-p PROFILE] [overrides]` | add a window to a session, attached or not |
 | `luxmux attach [-t NAME]` | attach a session |
 | `luxmux ls` | list sessions: windows, running Runs, spares |
+| `luxmux info [-t NAME] [WINDOW] [--json]` | each window's Run: image, placement, times, cost, resources in use (see [Window info](#window-info)) |
 | `luxmux kill-session -t NAME [-y]` | terminate the session's Runs (after asking) and forget it |
 | `luxmux spares [--rm]` | list waiting warm spares; `--rm` terminates them |
 | `luxmux config init [--force]` | write the example configuration |
@@ -108,6 +109,7 @@ The prefix is `C-b` (configurable). Press it twice to send it to the shell.
 | `s` | session chooser |
 | `(` / `)` | previous / next session |
 | `$` | rename this session |
+| `i` | window info: the shown window's Run (see [Window info](#window-info)) |
 | `d` | detach |
 | `?` | key help |
 
@@ -423,6 +425,91 @@ after one of them, nor a secret named after a variable lux sets in every
 Run (`LUX_RUN_ID`, `LUX_EPOCH`, `LUX_INPUTS`, `LUX_SERVICE_*`). Other
 `LUX_` names, such as `LUX_API_KEY` for the lux CLI in a window, are
 ordinary secrets.
+
+## Window info
+
+`C-b i` shows the shown window's Run, read from that window's own lux, in
+a dialog like the key help; `luxmux info` prints the same for a session's
+windows. Inside a shell, the same facts that do not need lux are in the
+`LUXMUX_*` variables and `/workspace/.luxmux/env` (see [window
+facts](#start-and-resume-commands-and-window-facts)).
+
+A field lux does not report is left out, never shown as zero. The sources
+(lux v0.1.30, `GET /v1/runs/{id}` unless said):
+
+| Section | Field | From |
+| --- | --- | --- |
+| Window | window, profile, session, lux | luxmux's session file; the lux as its host and tenant, never its key or where the key is read from |
+| Run | name, state, created, submitted by | `name`, `state`/`stateReason`, `createdAt`, `submittedBy` (key name, else id; email) |
+| | labels | `labels`, without `app=luxmux` and luxmux's own `luxmux-*` labels (their facts are fields here) |
+| Image | ref, resolved | `spec.image.ref`; `image.imageId`, which lux reports for a built image only (none for a pulled ref) |
+| Placement | pool, size, asked, effective | `pool`; `sizing.resolved` and `sizing.requested` on a shaped pool, else `luxmux-resources` (asked) and `spec.resources` (effective) |
+| | host, epoch | `host`, `epoch`; moves are `epoch − 1`: lux counts every placement in it |
+| Timing | stage | `stage`, `stageReason`, `stageSince` |
+| | uptime, runtime | from `runtimeSince` (this placement), `runtimeSeconds` (all placements) |
+| | waiting, starting | `placementWaitSeconds` (for a host), `placementStartSeconds` (on it) |
+| Workload | repositories, workdir | `spec.git.repositories` (URLs without credentials), `spec.workload.workdir` |
+| Access | egress, secrets | `spec.network` (unrestricted, an allow list, or none); the names in `secrets`, never a value |
+| Cost | so far | `GET /v1/runs/{id}/cost`: its status and per-currency totals; left out while lux has none (`pending`) |
+| Resume | resumable, snapshot, blockers | `resumable` and `resume` (lux sends it for a stopped, lost, failed or succeeded Run) |
+| In use | cpu, memory, disk | read inside the running Run (below) |
+
+lux v0.1.30 has no usage endpoint, so resources in use are read inside
+the Run with lux's exec API: one fixed POSIX `sh` script reads the
+cgroup's `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
+`memory.current`, and `df -Pk /workspace`. It needs nothing but `sh` and
+`df` (BusyBox's do), uses no `timeout(1)`, and luxmux ends it after 3 s.
+CPU in use is a rate: the usage between two readings over the time
+between them, so it is `—` until the second reading. The section is left
+out while the Run is not running, when the exec fails or the image lacks
+the tools; at most one exec per window is in flight.
+
+**The dialog** paints at once from what luxmux knows (window, profile,
+Run, lux), then fills in, and reads again every 3 s while it is open. Its
+reads never hold up the keyboard, the screen or the windows: each runs in
+the background, one at a time, within 5 s for the Run and its cost and
+3 s for the exec. Closing the dialog, another window being shown,
+detaching or the session ending stops the read in flight, and an answer
+that comes after is dropped. A read that fails says so in one line
+(`lux unreachable (host · tenant)`, `lux refused the key (…)`) and keeps
+the last values, with their age. It scrolls (↑↓, PgUp/PgDn) on a small
+terminal; Esc, `q` or `C-b i` closes it.
+
+**`luxmux info [-t NAME] [WINDOW] [--json]`** prints every window of the
+session in window order, or one: `WINDOW` is an index or a name. Without
+`-t` it is the session of the window it runs in (`$LUXMUX_SESSION`, a
+renamed session found by its Runs' label), else `main`. Each window is
+read from its own lux, all within 10 s; a lux that does not answer marks
+its windows `unreachable`, the others still print, and the exit status is
+1 when any window could not be read. The text is `key  value` lines in
+the sections above.
+
+`--json` prints one object with `snake_case` keys. `index`, `name`,
+`session` and `endpoint` are always there; any other field is left out
+when unknown. Numbers are numbers (bytes, cores,
+seconds; cost amounts as lux's decimals), times in RFC 3339 UTC:
+
+```
+{ "schema_version": 1, "session": "work", "windows": [ {
+    "index", "name", "profile", "session", "session_label", "endpoint", "run_id",
+    "problem": "unreachable" | "refused" | "not_found" | "no_key", "error", "fetched_at",
+    "run":       { "name", "state", "state_reason", "labels", "submitted_by": { "key", "email", "revoked" }, "created_at" },
+    "image":     { "ref", "resolved" },
+    "placement": { "pool", "size", "asked", "effective", "host", "epoch", "moves" },
+    "timing":    { "stage", "stage_reason", "stage_since", "placement_since", "uptime_seconds",
+                   "runtime_seconds", "waiting_seconds", "starting_seconds" },
+    "workload":  { "repositories": [ { "name", "url", "ref", "path" } ], "workdir" },
+    "egress":    { "policy": "unrestricted" | "allowlist" | "deny", "allow" },
+    "secrets":   [ names ],
+    "cost":      { "status", "totals": [ { "currency", "amount", "final", "estimate" } ] },
+    "resume":    { "resumable", "snapshot", "uploaded", "on_hosts", "secrets", "secrets_held", "blockers" },
+    "resources": { "cpus", "cpu_limit", "memory_bytes", "memory_limit_bytes", "disk_bytes", "disk_size_bytes" }
+} ] }
+```
+
+`asked` and `effective` have `size`, `cpus`, `memory_bytes` and
+`disk_bytes`. `schema_version` changes only when a field is removed or
+changes meaning; new fields keep it.
 
 ## Moves and reconnects
 
