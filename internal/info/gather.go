@@ -317,7 +317,11 @@ func plainSCP(u string) string {
 	first := strings.Index(head, "@")
 	if first < 0 || !strings.Contains(head[:first], ":") {
 		// A password with a "/" in it hides its "@" past the first "/".
-		if at := strings.Index(u, "@"); at >= 0 && strings.Contains(u[:at], ":") && strings.Contains(u[at+1:], ":") {
+		// Only a colon before that slash can introduce a password;
+		// absolute, relative and drive-letter local paths stay intact.
+		colon := strings.Index(head, ":")
+		drive := len(head) == 2 && colon == 1 && ((head[0] >= 'A' && head[0] <= 'Z') || (head[0] >= 'a' && head[0] <= 'z'))
+		if first < 0 && colon >= 0 && !drive && strings.Contains(u, "@") {
 			return UnparseableURL
 		}
 		return u
