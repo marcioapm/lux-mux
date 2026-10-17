@@ -159,8 +159,8 @@ with an empty home, no network and no credentials. It checks that:
 
 - the user is `agent` (uid 1000) and `HOME` is a writable `/home/agent`, the
   path luxmux's home volume is mounted at;
-- every agent and tool starts and prints a version, and the login shell's
-  Node is 26.x;
+- every agent and tool starts (the CLIs must also print a version), and the
+  login shell's Node is 26.x;
 - ffmpeg has `libx264` and the `drawtext`, `subtitles`, `ass` and `overlay`
   filters, and a one-second drawtext render to H.264 decodes to 25 frames;
 - an espeak-ng WAV is PCM and lasts at least 0.5 s;
