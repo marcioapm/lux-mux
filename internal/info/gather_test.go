@@ -309,6 +309,100 @@ func TestCPURateFromTwoSamples(t *testing.T) {
 	}
 }
 
+// TestNoRateAcrossEpochWhenUsageGrows: the new placement's usage is above
+// the old one's, so only the epoch in the Sampler's key keeps the two
+// samples apart.
+func TestNoRateAcrossEpochWhenUsageGrows(t *testing.T) {
+	now := t0
+	c := &fakeClient{run: fullRun(), execFn: cgroupOut(1_000_000)}
+	s := NewSampler()
+	WithResources(context.Background(), c, s, target(), clock(&now))
+	r := fullRun()
+	r.Epoch = 4
+	c.run = r
+	now = now.Add(3 * time.Second)
+	c.execFn = cgroupOut(4_000_000)
+	if w := WithResources(context.Background(), c, s, target(), clock(&now)); w.Resources == nil || w.Resources.CPUs != nil {
+		t.Fatalf("rate across placements: %+v", w.Resources)
+	}
+	// The same epoch again does give a rate: the first check was not
+	// vacuous.
+	now = now.Add(3 * time.Second)
+	c.execFn = cgroupOut(7_000_000)
+	if w := WithResources(context.Background(), c, s, target(), clock(&now)); w.Resources == nil || w.Resources.CPUs == nil || *w.Resources.CPUs != 1 {
+		t.Fatalf("same placement: %+v", w.Resources)
+	}
+}
+
+// blockingClient's Get and Cost block until their context ends, each as
+// told.
+type blockingClient struct {
+	fakeClient
+	hangGet, hangCost bool
+}
+
+func (b *blockingClient) Get(ctx context.Context, id string) (*api.Run, error) {
+	if b.hangGet {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return b.fakeClient.Get(ctx, id)
+}
+
+func (b *blockingClient) Cost(ctx context.Context, id string) (*luxapi.RunCost, error) {
+	if b.hangCost {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return b.fakeClient.Cost(ctx, id)
+}
+
+// TestFetchTimeoutBoundsHungLux: a Run GET or a cost lux never answers
+// ends at fetchTimeout, the context given having no deadline: a hung GET
+// is unreachable, a hung cost leaves the cost out.
+func TestFetchTimeoutBoundsHungLux(t *testing.T) {
+	old := fetchTimeout
+	fetchTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { fetchTimeout = old })
+	fetch := func(c Client) Window {
+		t.Helper()
+		now := t0
+		got := make(chan Window, 1)
+		go func() { got <- Fetch(context.Background(), c, target(), clock(&now)) }()
+		select {
+		case w := <-got:
+			return w
+		case <-time.After(5 * time.Second):
+			t.Fatal("Fetch outlived fetchTimeout")
+			return Window{}
+		}
+	}
+	if w := fetch(&blockingClient{fakeClient: fakeClient{run: fullRun()}, hangGet: true}); w.Problem != ProblemUnreachable {
+		t.Fatalf("hung GET: %+v", w)
+	}
+	w := fetch(&blockingClient{fakeClient: fakeClient{run: fullRun(), cost: fullCost()}, hangCost: true})
+	if w.Problem != "" || w.Cost != nil || w.Placement == nil || w.Placement.Host != "host-3" {
+		t.Fatalf("hung cost: %+v", w)
+	}
+}
+
+// TestEgressPolicies: unrestricted wins over rules; no rules is deny.
+func TestEgressPolicies(t *testing.T) {
+	now := t0
+	r := fullRun()
+	r.Spec.Network = api.Network{Unrestricted: true, Egress: []api.EgressRule{{Host: "example.com"}}}
+	w := Fetch(context.Background(), &fakeClient{run: r}, target(), clock(&now))
+	if w.Egress == nil || w.Egress.Policy != EgressUnrestricted || w.Egress.Allow != nil || lineValue(w, now, "egress") != "unrestricted" {
+		t.Fatalf("unrestricted: %+v\n%s", w.Egress, Text(w, now))
+	}
+	r = fullRun()
+	r.Spec.Network = api.Network{}
+	w = Fetch(context.Background(), &fakeClient{run: r}, target(), clock(&now))
+	if w.Egress == nil || w.Egress.Policy != EgressDeny || !strings.HasPrefix(lineValue(w, now, "egress"), "none") {
+		t.Fatalf("deny: %+v\n%s", w.Egress, Text(w, now))
+	}
+}
+
 // TestResourcesExecFailures: an exec that fails, exits non-zero, reports
 // nothing or outlives ExecTimeout leaves the section out, and the rest of
 // the window is there.

@@ -32,6 +32,9 @@ const (
 	ExecTimeout  = 3 * time.Second
 )
 
+// fetchTimeout is FetchTimeout; tests shorten it.
+var fetchTimeout = FetchTimeout
+
 // Fetch reads t's Run and its cost from c, within ctx and FetchTimeout. A Run lux cannot
 // be asked for (it does not answer, it refuses the key, it has no such
 // Run) is Base(t) with Problem and Error set. A cost lux cannot answer is
@@ -42,7 +45,7 @@ func Fetch(ctx context.Context, c Client, t Target, now func() time.Time) Window
 		w.Problem, w.Error = ProblemNotFound, "the window has no Run yet"
 		return w
 	}
-	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	r, err := c.Get(ctx, t.RunID)
 	if err != nil {
