@@ -77,19 +77,21 @@ func TestResourcesScript(t *testing.T) {
 	unlimited := map[string]string{"cpu.max": "max 100000\n", "memory.max": "max\n", "memory.current": "4096\n", "cpu.stat": "usage_usec 9\n"}
 	for name, shell := range scriptShells(t) {
 		t.Run(name, func(t *testing.T) {
-			// BusyBox sh runs its own df applet whatever PATH holds: its
-			// df line is checked against busybox df of the same directory.
+			// A BusyBox built to prefer its applets runs its own df whatever
+			// PATH holds (Ubuntu 26.04's does; 24.04's runs PATH's): its df
+			// line is then busybox df of the same directory.
 			applet := name == "busybox"
 			out := runScript(t, shell, numeric, "/dev/x 41943040 10485760 31457280 25% /workspace")
 			r := ParseReading([]byte(out))
 			if r.CPULimit == nil || *r.CPULimit != 2 || *r.MemoryLimit != 8<<30 || *r.Memory != 1<<30 || *r.UsageUsec != 123456 {
 				t.Fatalf("numeric: %q", out)
 			}
-			if applet {
+			fake := r.DiskSize != nil && r.DiskUsed != nil && *r.DiskSize == 40<<30 && *r.DiskUsed == 10<<30
+			if applet && !fake {
 				if r.DiskSize == nil || r.DiskUsed == nil || *r.DiskSize != busyboxDiskSize(t, shell[0]) || *r.DiskUsed > *r.DiskSize {
 					t.Fatalf("busybox df: %q", out)
 				}
-			} else if *r.DiskSize != 40<<30 || *r.DiskUsed != 10<<30 {
+			} else if !fake {
 				t.Fatalf("df: %q", out)
 			}
 			out = runScript(t, shell, unlimited, "")
