@@ -52,6 +52,10 @@ const usage = `luxmux: a terminal multiplexer whose windows are shells on lux Ru
                                   add a window to a session, attached or not
   luxmux attach [-t NAME]         attach a session (rebuilt from lux if its file is gone)
   luxmux ls                       list sessions
+  luxmux info [-t NAME] [WINDOW] [--json]
+                                  a session's windows (WINDOW: an index or a name) as
+                                  their Runs are: image, placement, times, cost, use;
+                                  -t defaults to the session it runs in, else main
   luxmux kill-session -t NAME [-y]  terminate a session's Runs and forget it
   luxmux spares [--rm]            list warm spares; --rm terminates them
   luxmux config init [--force]    write a commented example configuration
@@ -111,6 +115,8 @@ func run(env Env, args []string) error {
 		return attach(env, *name, false)
 	case "ls", "list-sessions":
 		return list(env)
+	case "info":
+		return infoCmd(env, args[1:])
 	case "kill-session":
 		fs := flag.NewFlagSet("kill-session", flag.ContinueOnError)
 		name := fs.String("t", "", "session name")
