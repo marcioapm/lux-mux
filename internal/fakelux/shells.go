@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +32,21 @@ const (
 // spec names none: HOME and USER are set for it, as the shim sets them for
 // the image's user.
 const shellUser = "luxuser"
+
+// WrapperUnsupported is why the start wrapper cannot run for real here, or
+// "": tests of its output expect Linux's sh, and the env file and facts
+// need flock(1) and setsid(1).
+func WrapperUnsupported() string {
+	if runtime.GOOS != "linux" {
+		return "the start wrapper's tests expect a Linux sh, not " + runtime.GOOS
+	}
+	for _, tool := range []string{"sh", "flock", "setsid"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return "the start wrapper needs " + tool + ": " + err.Error()
+		}
+	}
+	return ""
+}
 
 // RunShells makes every Run's terminal its spec's workload command, run by
 // a real sh in a pty with the spec's env, its secret values and LUX_RUN_ID,

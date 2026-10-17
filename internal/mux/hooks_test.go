@@ -32,6 +32,9 @@ const exampleSecret = "example-secret-value-1234"
 // their spec's workload command, with a state volume per Run.
 func shellHarness(t *testing.T, cfg string) (*harness, string) {
 	t.Helper()
+	if why := fakelux.WrapperUnsupported(); why != "" {
+		t.Skip(why)
+	}
 	dir := filepath.Join(t.TempDir(), "runs")
 	h := newHarnessEnv(t, cfg, map[string]string{"EXAMPLE_TOKEN": exampleSecret}, func(s *fakelux.Server) {
 		s.RunShells(dir, "PS1=PROMPT> ", "ENV=", "TERM=xterm")

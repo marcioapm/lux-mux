@@ -160,6 +160,11 @@ func TestRepositoriesEnvBound(t *testing.T) {
 }
 
 func TestStartWrapper(t *testing.T) {
+	// It runs the wrapper with the host's PATH and reads the env file,
+	// which needs flock(1); fixtures with toolDir skip on their own.
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skipf("the env file needs flock: %v", err)
+	}
 	shells := [][]string{{"sh"}}
 	if b, err := exec.LookPath("busybox"); err == nil {
 		shells = append(shells, []string{b, "sh"})
@@ -279,7 +284,7 @@ func TestWrapperText(t *testing.T) {
 
 // baseTools are the external commands the wrapper and WindowNameScript
 // use; fixtures give them a PATH holding these and nothing else.
-var baseTools = []string{"sh", "cat", "mv", "chmod", "rm", "mkdir", "sleep", "flock", "timeout"}
+var baseTools = []string{"sh", "cat", "mv", "chmod", "rm", "mkdir", "sleep", "flock", "timeout", "setsid", "id", "find"}
 
 // realTool resolves a command, preferring the system's own binary over a
 // PATH wrapper that a restricted PATH could not run.
@@ -316,7 +321,7 @@ func toolDir(t *testing.T, real []string, fakes map[string]string) string {
 		}
 	}
 	for n, body := range fakes {
-		for _, r := range []string{"mv", "flock", "timeout", "df", "stat", "git"} {
+		for _, r := range []string{"mv", "flock", "timeout", "df", "stat", "git", "find"} {
 			if strings.Contains(body, "REAL_"+r) {
 				body = strings.ReplaceAll(body, "REAL_"+r, realTool(t, r))
 			}
@@ -367,11 +372,17 @@ func newFixture(t *testing.T, bin string, p Profile) *fixture {
 	return f
 }
 
+// commandIn is f's shell running args in f's environment.
+func commandIn(ctx context.Context, f *fixture, args []string, extra ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, f.shell[0], append(slices.Clone(f.shell[1:]), args...)...)
+	cmd.Env = append(slices.Clone(f.env), extra...)
+	return cmd
+}
+
 func (f *fixture) run(args []string, extra ...string) (string, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, f.shell[0], append(slices.Clone(f.shell[1:]), args...)...)
-	cmd.Env = append(slices.Clone(f.env), extra...)
+	cmd := commandIn(ctx, f, args, extra...)
 	start := time.Now()
 	b, err := cmd.CombinedOutput()
 	return string(b), time.Since(start), err
@@ -406,6 +417,49 @@ func (f *fixture) mustName(name string, extra ...string) {
 }
 
 func (f *fixture) path(name string) string { return filepath.Join(f.dir, ".luxmux", name) }
+
+// probeDeadline is the watchdog's sleep in the wrapper text.
+const probeDeadline = "sleep " + probeSeconds + ";"
+
+// shortProbes gives f's wrapper a probe deadline of d seconds, so tests of
+// what happens at the deadline do not each wait the production second;
+// TestWrapperProbesBounded/hung keeps the production value.
+func (f *fixture) shortProbes(d string) {
+	f.t.Helper()
+	if !strings.Contains(f.cmd[2], probeDeadline) {
+		f.t.Fatal("the probe deadline is not in the wrapper")
+	}
+	f.cmd[2] = strings.Replace(f.cmd[2], probeDeadline, "sleep "+d+";", 1)
+}
+
+// dfFake prints df -Pk output for a 10-block (10240-byte) volume.
+const dfFake = `printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nvolume 10 0 10 0%% workspace\n'`
+
+func readPid(t *testing.T, file string) int {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+// waitGone fails unless pid is gone within 2 s: SIGKILL is delivered at
+// once, but the exit may lag a moment.
+func waitGone(t *testing.T, pid int) {
+	t.Helper()
+	for end := time.Now().Add(2 * time.Second); syscall.Kill(pid, 0) == nil && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("process %d remains: %v", pid, err)
+	}
+}
 
 // source runs ". env" in a shell with an empty environment and returns
 // every LUXMUX_* value it defines.
@@ -764,8 +818,9 @@ exec sleep 30`
 		if err != nil || out != "shell:start" {
 			t.Fatalf("%q %v", out, err)
 		}
-		// A single watchdog cuts off the probe group.
-		if d > 9*time.Second {
+		// One 1 s deadline for the group; 4 s leaves room for a loaded
+		// host, as in TestWrapperProbeProcesses.
+		if d > 4*time.Second {
 			t.Fatalf("prompt after %v", d)
 		}
 		if _, err := os.Stat(filepath.Join(f.state, "df.ran")); err != nil {
@@ -789,6 +844,7 @@ exec REAL_timeout "$@"`},
 				tools = toolsWithout("timeout")
 			}
 			f := newFixture(t, toolDir(t, tools, fakes), Profile{Image: "alpine"})
+			f.shortProbes("0.3")
 			out, d, err := f.wrapper(repo(f))
 			if err != nil || out != "shell:start" || d > 3*time.Second {
 				t.Fatalf("%q %v after %v", out, err, d)
@@ -849,18 +905,16 @@ func TestWrapperProbeProcesses(t *testing.T) {
 	for label, shell := range testShells(t) {
 		for _, hung := range []string{"", "df", "git"} {
 			t.Run(label+"/"+hung, func(t *testing.T) {
-				fakes := map[string]string{"df": "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nvolume 10 0 10 0%% workspace\\n'", "git": "printf 'main\\n'"}
+				fakes := map[string]string{"df": dfFake, "git": "printf 'main\\n'"}
 				if hung != "" {
 					fakes[hung] = `printf '%s' "$$" >"$LM_STATE/probe.pid"
 trap '' TERM
 exec sleep 30`
 				}
-				ps, err := exec.LookPath("ps")
-				if err != nil {
-					t.Fatal(err)
-				}
+				ps := realTool(t, "ps")
 				f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine", Shell: []string{ps, "-e", "-o", "pid=,pgid="}})
 				f.shell = shell
+				f.shortProbes("0.3")
 				repo := filepath.Join(f.dir, "repo")
 				if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
 					t.Fatal(err)
@@ -889,14 +943,7 @@ exec sleep 30`
 					t.Fatalf("processes at shell exec: %v", pids)
 				}
 				if hung != "" {
-					b, err := os.ReadFile(filepath.Join(f.state, "probe.pid"))
-					if err != nil {
-						t.Fatal(err)
-					}
-					pid, err := strconv.Atoi(string(b))
-					if err != nil {
-						t.Fatal(err)
-					}
+					pid := readPid(t, filepath.Join(f.state, "probe.pid"))
 					if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 						t.Fatalf("probe %d remains: %v", pid, err)
 					}
@@ -909,16 +956,257 @@ exec sleep 30`
 	}
 }
 
+// TestWrapperProbeForks: a df that forks a grandchild (which ignores
+// SIGTERM, records its pid and sleeps) and then hangs is cut off with its
+// whole process group: after the prompt no grandchild remains.
+func TestWrapperProbeForks(t *testing.T) {
+	for label, shell := range testShells(t) {
+		t.Run(label, func(t *testing.T) {
+			fakes := map[string]string{"df": `( trap '' TERM; printf '%s' "$(exec sh -c 'echo $PPID')" >"$LM_STATE/grandchild.pid"; exec sleep 30 ) &
+trap '' TERM
+while [ ! -s "$LM_STATE/grandchild.pid" ]; do sleep 0.01; done
+exec sleep 30`, "stat": "exit 1"}
+			f := newFixture(t, toolDir(t, baseTools, fakes), Profile{Image: "alpine"})
+			f.shell = shell
+			f.shortProbes("0.3")
+			out, d, err := f.wrapper()
+			if err != nil || out != "shell:start" || d > 4*time.Second {
+				t.Fatalf("%q %v after %v", out, err, d)
+			}
+			waitGone(t, readPid(t, filepath.Join(f.state, "grandchild.pid")))
+		})
+	}
+}
+
+// TestWrapperProbeDeadlineSweep: df forks a child that ignores SIGTERM.
+// When df then SIGKILLs its process group, a kill landing right after a
+// fork, no child and no disk fact remain. When df prints and exits, the
+// disk fact is exactly its value and the probe's closing group kill still
+// reaches the child nothing recorded.
+func TestWrapperProbeDeadlineSweep(t *testing.T) {
+	fork := `( trap '' TERM; exec sleep 30 ) >/dev/null &
+printf '%s' "$!" >"$LM_STATE/child.pid"
+`
+	for label, df := range map[string]string{"killed": fork + "kill -KILL 0", "done": fork + dfFake} {
+		t.Run(label, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, map[string]string{"df": df, "stat": "exit 1"}), Profile{Image: "alpine"})
+			if label == "done" {
+				// A watchdog that cannot fire within waitGone: only the
+				// probe's closing group kill can reach the child.
+				f.shortProbes("10")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := commandIn(ctx, f, f.cmd[1:])
+			// A probe outside its own group would kill this group, not the test's.
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			start := time.Now()
+			out, err := cmd.CombinedOutput()
+			if d := time.Since(start); err != nil || string(out) != "shell:start" || d > 4*time.Second {
+				t.Fatalf("%q %v after %v", out, err, d)
+			}
+			waitGone(t, readPid(t, filepath.Join(f.state, "child.pid")))
+			want := "10240"
+			if label == "killed" {
+				want = ""
+			}
+			if got := f.source(); got[EnvDisk] != want {
+				t.Fatalf("disk %q, want %q", got[EnvDisk], want)
+			}
+		})
+	}
+}
+
+// TestWrapperProbeResultStrict: only a complete ok:DISK:BRANCH:end line
+// sets the facts; a truncated or prefixed line sets neither.
+func TestWrapperProbeResultStrict(t *testing.T) {
+	for line, want := range map[string][2]string{
+		"ok:10240:main:end":      {"10240", "main"},
+		"ok:10240:main":          {},
+		"ok:10240":               {},
+		"junk:ok:10240:main:end": {},
+	} {
+		t.Run(line, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, map[string]string{"setsid": "printf '%s' '" + line + "'"}), Profile{Image: "alpine"})
+			f.mustWrapper()
+			if got := f.source(); got[EnvDisk] != want[0] || got[EnvBranchCheckedOut] != want[1] {
+				t.Fatalf("facts from %q: %q, want %q", line, got, want)
+			}
+		})
+	}
+}
+
+// TestWrapperSweepsProbeDirs: a placement removes the .luxmux-probe.<pid>
+// directories an earlier wrapper killed mid-probe left in TMPDIR or on the
+// state volume, and keeps one whose pid is alive, another user's, and any
+// other name.
+func TestWrapperSweepsProbeDirs(t *testing.T) {
+	deadPid := func() string {
+		gone := exec.Command(realTool(t, "true"))
+		if err := gone.Run(); err != nil {
+			t.Fatal(err)
+		}
+		return strconv.Itoa(gone.Process.Pid)
+	}
+	dead, deadLink, live := deadPid(), deadPid(), strconv.Itoa(os.Getpid())
+	for label, shell := range testShells(t) {
+		t.Run(label, func(t *testing.T) {
+			f := newFixture(t, toolDir(t, baseTools, nil), Profile{Image: "alpine"})
+			f.shell = shell
+			tmp, state := filepath.Join(f.dir, "tmp"), filepath.Join(f.dir, ".luxmux")
+			mk := func(dir, name string) string {
+				p := filepath.Join(dir, name)
+				if err := os.MkdirAll(p, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(p, "df"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}
+			stale := []string{mk(tmp, ".luxmux-probe."+dead), mk(state, ".luxmux-probe."+dead)}
+			kept := []string{mk(tmp, ".luxmux-probe."+live), mk(state, ".luxmux-probe."+live), mk(tmp, ".luxmux-probe.x1"), mk(tmp, "luxmux-probe."+dead)}
+			// The sweep never follows a symlink: its target's contents stay.
+			victim := mk(f.dir, "victim")
+			if err := os.Symlink(victim, filepath.Join(tmp, ".luxmux-probe."+deadLink)); err != nil {
+				t.Fatal(err)
+			}
+			kept = append(kept, victim)
+			file := filepath.Join(state, ".luxmux-probe.1"+dead)
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.mustWrapper()
+			for _, p := range stale {
+				if _, err := os.Stat(p); !os.IsNotExist(err) {
+					t.Errorf("stale %s remains: %v", p, err)
+				}
+			}
+			for _, p := range kept {
+				if _, err := os.Stat(filepath.Join(p, "df")); err != nil {
+					t.Errorf("%s removed: %v", p, err)
+				}
+			}
+			if _, err := os.Stat(file); err != nil {
+				t.Errorf("a file named like a probe directory was removed: %v", err)
+			}
+			// Directories that are not this user's stay: with id reporting
+			// another uid, the dead pid's directories are not this user's.
+			// BusyBox sh runs id as an applet, past a PATH fake.
+			if label != "sh" {
+				return
+			}
+			g := newFixture(t, toolDir(t, baseTools, map[string]string{"id": "echo " + strconv.Itoa(os.Getuid()+1)}), Profile{Image: "alpine"})
+			g.shell = shell
+			other := mk(filepath.Join(g.dir, "tmp"), ".luxmux-probe."+dead)
+			g.mustWrapper()
+			if _, err := os.Stat(filepath.Join(other, "df")); err != nil {
+				t.Errorf("another user's %s removed: %v", other, err)
+			}
+		})
+	}
+}
+
+// TestWrapperSweepOneFind: however many stale probe directories there are,
+// the sweep (held under the env lock) starts find once and removes all.
+func TestWrapperSweepOneFind(t *testing.T) {
+	f := newFixture(t, toolDir(t, baseTools, map[string]string{"find": `echo >>"$LM_STATE/find.calls"
+exec REAL_find "$@"`}), Profile{Image: "alpine"})
+	var stale []string
+	for range 3 {
+		gone := exec.Command(realTool(t, "true"))
+		if err := gone.Run(); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(f.dir, "tmp", ".luxmux-probe."+strconv.Itoa(gone.Process.Pid))
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stale = append(stale, p)
+	}
+	f.mustWrapper()
+	for _, p := range stale {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale %s remains: %v", p, err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.state, "find.calls")); strings.Count(string(b), "\n") != 1 {
+		t.Fatalf("find ran %d times", strings.Count(string(b), "\n"))
+	}
+	// No stale directory left: the next placement runs no find at all.
+	if err := os.Remove(filepath.Join(f.state, "find.calls")); err != nil {
+		t.Fatal(err)
+	}
+	f.mustWrapper()
+	if _, err := os.Stat(filepath.Join(f.state, "find.calls")); !os.IsNotExist(err) {
+		t.Fatalf("find ran with nothing to sweep: %v", err)
+	}
+}
+
+// TestWrapperProbeKillQuiet: the probe script's own group kill is a valid
+// kill(1) in dash, bash and BusyBox sh. Its stderr is discarded in the
+// wrapper, so a shell that rejected the syntax would fail silently.
+func TestWrapperProbeKillQuiet(t *testing.T) {
+	bin := toolDir(t, baseTools, map[string]string{"df": dfFake, "stat": "exit 1"})
+	shells := map[string][]string{}
+	for _, n := range []string{"dash", "bash"} {
+		if p, err := exec.LookPath(n); err == nil {
+			shells[n] = []string{p}
+		}
+	}
+	if b, err := exec.LookPath("busybox"); err == nil {
+		shells["busybox"] = []string{b, "sh"}
+	}
+	for label, shell := range shells {
+		t.Run(label, func(t *testing.T) {
+			cmd := exec.Command(shell[0], append(slices.Clone(shell[1:]), "-c", probeScript, "luxmux-probe", t.TempDir(), "")...)
+			cmd.Env = []string{"PATH=" + bin}
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			_ = cmd.Run()
+			if stdout.String() != "ok:10240::end" || stderr.String() != "" {
+				t.Fatalf("stdout %q stderr %q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestWrapperBusyBoxProbeShell: with BusyBox as PATH's sh and setsid, so
+// the probe shell itself is BusyBox, a df that ignores SIGTERM is cut off
+// at the deadline and leaves no process and no disk fact.
+func TestWrapperBusyBoxProbeShell(t *testing.T) {
+	bb, err := exec.LookPath("busybox")
+	if err != nil {
+		t.Skip("busybox unavailable")
+	}
+	bin := toolDir(t, toolsWithout("sh", "setsid"), map[string]string{"df": `printf '%s' "$$" >"$LM_STATE/df.pid"
+trap '' TERM
+exec sleep 30`, "stat": "exit 1"})
+	for _, n := range []string{"sh", "setsid"} {
+		if err := os.Symlink(bb, filepath.Join(bin, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newFixture(t, bin, Profile{Image: "alpine"})
+	f.shell = []string{bb, "sh"}
+	f.shortProbes("0.3")
+	out, d, err := f.wrapper()
+	if err != nil || out != "shell:start" || d > 4*time.Second {
+		t.Fatalf("%q %v after %v", out, err, d)
+	}
+	waitGone(t, readPid(t, filepath.Join(f.state, "df.pid")))
+	if got := f.source(); got[EnvDisk] != "" {
+		t.Fatalf("disk %q", got[EnvDisk])
+	}
+}
+
 // TestWrapperRealFacts: LUXMUX_DISK from the real df matches statfs of the
 // workspace, and LUXMUX_BRANCH_CHECKED_OUT from the real git is the branch,
 // then the short sha once detached.
 func TestWrapperRealFacts(t *testing.T) {
 	f := newFixture(t, toolDir(t, append(slices.Clone(baseTools), "df", "stat", "git"), nil), Profile{Image: "alpine"})
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(f.dir, &st); err != nil {
-		t.Fatal(err)
-	}
-	want := int64(st.Blocks) * int64(st.Frsize)
+	want := statfsBytes(t, f.dir)
 	git := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command(realTool(t, "git"), append([]string{"-C", filepath.Join(f.dir, "repo")}, args...)...)
