@@ -56,9 +56,9 @@ RUN set -eux; \
 # The CLIs live under /opt/npm, outside the home, so a fresh or restored home keeps them.
 # Agent versions are declared here, not at the top: an ARG in scope is part of a RUN's
 # cache key, so bumping one rebuilds only this layer.
-ARG CLAUDE_CODE_VERSION=2.1.301
-ARG OPENCODE_VERSION=1.19.1
-ARG CODEX_VERSION=0.162.1
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG OPENCODE_VERSION=1.19.3
+ARG CODEX_VERSION=0.163.0
 RUN set -eux; \
     npm install --global --no-update-notifier --no-fund --no-audit \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
