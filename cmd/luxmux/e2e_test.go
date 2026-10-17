@@ -1101,3 +1101,26 @@ func TestOnStartVisible(t *testing.T) {
 	p.typ("\x02d")
 	p.exited()
 }
+
+// TestInfoDialog: C-b i shows the shown window's info over it, read from
+// its lux; Esc closes it and the shell is back, taking keys.
+func TestInfoDialog(t *testing.T) {
+	lux, env := e2eEnv(t)
+	p := startLuxmux(t, env, "new -s inf")
+	p.wait("first prompt", has("$"))
+	id := lux.RunIDs()[0]
+	lux.Update(id, func(r *api.Run) { r.Host = "e2e-info-host" })
+	p.typ("\x02i")
+	p.wait("info", func(s string) bool {
+		return strings.Contains(s, "Window 0") && strings.Contains(s, id) && strings.Contains(s, "ago · every 3s")
+	})
+	// The placement is below the first page.
+	p.typ("\x1b[6~")
+	p.wait("its host", has("e2e-info-host"))
+	p.typ("\x1b")
+	p.wait("shell back", func(s string) bool { return !strings.Contains(s, "e2e-info-host") })
+	p.typ("echo after-info\r")
+	p.wait("after-info", has("\nafter-info"))
+	p.typ("\x02d")
+	p.exited()
+}

@@ -27,6 +27,7 @@ var opWords = map[string]string{
 	config.OpRelaunch:  "resume a stopped Run / relaunch an ended one",
 	config.OpDetach:    "detach (the Runs keep running)",
 	config.OpHelp:      "this help",
+	config.OpInfo:      "window info: its Run, placement, times, cost, use",
 
 	config.OpChooseSession: "session chooser (switch, n new, , rename, x kill)",
 	config.OpNextSession:   "next session (by name; skips those attached elsewhere)",
@@ -40,7 +41,7 @@ var helpSections = []struct {
 	ops   []string
 }{
 	{"Windows", []string{config.OpNew, config.OpNewDialog, config.OpNext, config.OpPrev, config.OpSelect, config.OpLast,
-		config.OpPrompt, config.OpChoose, config.OpRename, config.OpKill, config.OpRelaunch}},
+		config.OpPrompt, config.OpChoose, config.OpRename, config.OpKill, config.OpRelaunch, config.OpInfo}},
 	{"Session", []string{config.OpChooseSession, config.OpNextSession, config.OpPrevSession, config.OpRenameSession,
 		config.OpDetach, config.OpHelp}},
 }

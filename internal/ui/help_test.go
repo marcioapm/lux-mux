@@ -34,7 +34,7 @@ func TestHelpSectionsAndConfiguredKeys(t *testing.T) {
 	for _, want := range []string{"Keys", "Windows", "Session", "Prefix", "Direct bindings", "In dialogs",
 		"C-a c", "new window (the session's default profile)", "C-a C", "new window (dialog)", "C-a n", "C-a p", "C-a 0-9",
 		"C-a l", "C-a '", "C-a w", "window chooser", "C-a ,", "rename window", "C-a &", "kill window",
-		"C-a d", "detach", "C-a ?", "C-a C-a", "send C-a to the window",
+		"C-a d", "detach", "C-a ?", "C-a C-a", "send C-a to the window", "C-a i", "window info",
 		"C-a s", "session chooser", "C-a )", "next session", "C-a (", "previous session", "C-a $", "rename this session",
 		"M-n", "next window", "M-1", "select window 1",
 		"Tab / Shift-Tab", "Enter", "Space", "Ctrl-S", "Esc", "shell behind"} {

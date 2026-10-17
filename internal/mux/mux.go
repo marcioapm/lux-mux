@@ -21,6 +21,7 @@ import (
 	"github.com/marcioapm/lux/vterm"
 
 	"github.com/marcioapm/lux-mux/internal/config"
+	"github.com/marcioapm/lux-mux/internal/info"
 	"github.com/marcioapm/lux-mux/internal/keys"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
 	"github.com/marcioapm/lux-mux/internal/screen"
@@ -34,6 +35,8 @@ type UI interface {
 	Choose(m *Mux) (ChooseResult, error)
 	NewDialog(m *Mux) (*NewWindowRequest, error)
 	Help(m *Mux) error
+	// Info shows the shown window's info (InfoTarget, FetchInfo).
+	Info(m *Mux) error
 	// ChooseSession runs the session chooser. Its renames and kills
 	// happen through the Mux as they are made.
 	ChooseSession(m *Mux) (SessionChoice, error)
@@ -181,6 +184,9 @@ type Mux struct {
 	preview sessionPreview
 	// stepping: a C-b ( or ) is listing the sessions.
 	stepping atomic.Bool
+	// infoSampler keeps the window-info dialog's CPU samples and its one
+	// resources exec per window.
+	infoSampler *info.Sampler
 }
 
 // ErrNoSession is returned by Open for attach to a session lux has no
@@ -251,7 +257,8 @@ func New(opt Options, sess *state.Session) (*Mux, error) {
 	m := &Mux{opt: opt, eps: eps, keys: km, tw: con.tw, in: con.in, console: con, label: opt.Label,
 		name: opt.Session, unlock: opt.Unlock, inputDone: make(chan struct{}),
 		sess: sess, byRun: map[string]*Window{}, considered: map[string]bool{}, consideredOn: map[string]config.Endpoint{},
-		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1)}
+		feeds: map[config.Endpoint]bool{}, listed: map[config.Endpoint]chan struct{}{}, done: make(chan string, 1),
+		infoSampler: info.NewSampler()}
 	m.rows, m.cols = clampSize(opt.Size())
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.spareCtx, m.stopSpares = context.WithCancel(context.Background())

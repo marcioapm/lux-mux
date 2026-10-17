@@ -203,29 +203,57 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 // Exec runs command in the Run without a TTY and returns its exit code.
 // It sends EOF before reading, so the command gets no input.
 func (c *Client) Exec(ctx context.Context, id string, command []string) (int, error) {
+	_, code, err := c.ExecOutput(ctx, id, command, 0)
+	return code, err
+}
+
+// ExecOutput is Exec that also returns what the command wrote to its
+// stdout channel, up to limit bytes (0: none kept); the rest is read and
+// dropped.
+func (c *Client) ExecOutput(ctx context.Context, id string, command []string, limit int) ([]byte, int, error) {
 	ws, err := c.C.Dial(ctx, "/v1/runs/"+url.PathEscape(id)+"/exec")
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	defer ws.CloseNow()
 	if err := wsjson.Write(ctx, ws, api.StreamOpen{Command: command}); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	if err := wsjson.Write(ctx, ws, api.StreamData{EOF: true}); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
+	var out []byte
 	for {
 		var d api.StreamData
 		if err := wsjson.Read(ctx, ws, &d); err != nil {
-			return 0, err
+			return out, 0, err
 		}
 		if d.Error != "" {
-			return 0, errors.New(d.Error)
+			return out, 0, errors.New(d.Error)
+		}
+		if (d.Channel == "" || d.Channel == "stdout") && len(out) < limit {
+			out = append(out, d.Data[:min(len(d.Data), limit-len(out))]...)
 		}
 		if d.ExitCode != nil {
-			return *d.ExitCode, nil
+			return out, *d.ExitCode, nil
 		}
 	}
+}
+
+// RunCost is the part of GET /v1/runs/{id}/cost luxmux reads (lux
+// internal/server/costs.go, RunCost): its status and per-currency totals.
+type RunCost struct {
+	Status string          `json:"status"`
+	Totals []api.CostTotal `json:"totals"`
+}
+
+// Cost is what a Run cost so far.
+func (c *Client) Cost(ctx context.Context, id string) (*RunCost, error) {
+	var rc RunCost
+	if err := c.C.Do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(id)+"/cost", nil, &rc); err != nil {
+		return nil, err
+	}
+	return &rc, nil
 }
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

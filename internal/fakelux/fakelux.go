@@ -102,6 +102,12 @@ type Server struct {
 	// host whose workload has not started.
 	ExecEnv func(run *api.Run) []string
 	execs   [][]string
+	// execResponder answers execs in place of ExecEnv (SetExecResponder).
+	execResponder func(runID string, command []string) (ExecAnswer, bool)
+	// resumability and costs override GET's resume and the cost
+	// endpoint's answer per Run (SetResume, SetCost).
+	resumability map[string]*api.Resumability
+	costs        map[string]*luxapi.RunCost
 
 	// failing: every attach to the Run is ended with this error as its
 	// first frame (FailAttaches).
@@ -249,6 +255,7 @@ func NewWithKey(key string) *Server {
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resume)
 	mux.HandleFunc("GET /v1/runs/{id}/attach", s.attach)
 	mux.HandleFunc("GET /v1/runs/{id}/exec", s.exec)
+	mux.HandleFunc("GET /v1/runs/{id}/cost", s.cost)
 	mux.HandleFunc("GET /v1/events", s.feed)
 	mux.HandleFunc("GET /v1/pools", s.listPools)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -597,6 +604,9 @@ func (s *Server) get(w http.ResponseWriter, req *http.Request) {
 				names = append(names, sr.Name)
 			}
 			c.Resume = &api.Resumability{Secrets: names, SecretsHeld: c.StateReason != SecretsLostReason && len(names) > 0}
+		}
+		if rs := s.resumability[r.run.ID]; rs != nil {
+			c.Resume = rs
 		}
 	}
 	s.mu.Unlock()

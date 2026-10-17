@@ -332,7 +332,7 @@ func (m *Mux) handleInput(b []byte) {
 // was typed after its key is handed to it.
 func opensDialog(op string) bool {
 	switch op {
-	case config.OpChoose, config.OpNewDialog, config.OpHelp, config.OpChooseSession:
+	case config.OpChoose, config.OpNewDialog, config.OpHelp, config.OpInfo, config.OpChooseSession:
 		return true
 	}
 	return false
@@ -366,6 +366,8 @@ func (m *Mux) command(c config.Command) {
 		m.openChooser()
 	case config.OpHelp:
 		m.openHelp()
+	case config.OpInfo:
+		m.openInfo()
 	case config.OpChooseSession:
 		m.openSessionChooser()
 	case config.OpNextSession:
