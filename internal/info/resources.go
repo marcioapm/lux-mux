@@ -148,18 +148,10 @@ func Key(runID string, epoch int) string { return runID + "#" + strconv.Itoa(epo
 // ErrBusy while another Read of key is in flight, and an error when the
 // exec fails or the Run reports nothing.
 func (s *Sampler) Read(ctx context.Context, c Client, key, id string, now func() time.Time) (*Resources, error) {
-	s.mu.Lock()
-	if s.inFlight[key] {
-		s.mu.Unlock()
+	if !s.start(key) {
 		return nil, ErrBusy
 	}
-	s.inFlight[key] = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.inFlight, key)
-		s.mu.Unlock()
-	}()
+	defer s.finish(key)
 	ctx, cancel := context.WithTimeout(ctx, ExecTimeout)
 	defer cancel()
 	out, code, err := c.ExecOutput(ctx, id, ResourcesCommand(), 4096)
@@ -174,6 +166,22 @@ func (s *Sampler) Read(ctx context.Context, c Client, key, id string, now func()
 		return nil, errNoSample
 	}
 	return s.resources(key, r, now()), nil
+}
+
+func (s *Sampler) start(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight[key] {
+		return false
+	}
+	s.inFlight[key] = true
+	return true
+}
+
+func (s *Sampler) finish(key string) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
 }
 
 // resources is r with the CPU rate against key's previous sample, which

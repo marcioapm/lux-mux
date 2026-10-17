@@ -226,10 +226,7 @@ func Lines(w Window, now time.Time) []Line {
 // Text is Lines as aligned "key  value" lines under section titles.
 func Text(w Window, now time.Time) string {
 	ls := Lines(w, now)
-	width := 0
-	for _, l := range ls {
-		width = max(width, len(l.Key))
-	}
+	width := LineWidth(ls)
 	var b strings.Builder
 	for _, l := range ls {
 		if l.Key == "" {
@@ -242,6 +239,15 @@ func Text(w Window, now time.Time) string {
 		fmt.Fprintf(&b, "  %-*s  %s\n", width, l.Key, l.Value)
 	}
 	return b.String()
+}
+
+// LineWidth is the width needed to align the keys in lines.
+func LineWidth(lines []Line) int {
+	width := 0
+	for _, line := range lines {
+		width = max(width, len(line.Key))
+	}
+	return width
 }
 
 func ofLimit(used, limit *int64) string {

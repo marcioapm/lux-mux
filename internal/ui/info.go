@@ -234,10 +234,7 @@ func (d *InfoDialog) maxScroll() int { return max(0, len(d.lines())-d.page()) }
 // each line cut to the box (never wrapped).
 func (d *InfoDialog) lines() []string {
 	ls := info.Lines(d.cur, d.now())
-	width := 0
-	for _, l := range ls {
-		width = max(width, len(l.Key))
-	}
+	width := info.LineWidth(ls)
 	var out []string
 	for _, l := range ls {
 		if l.Key == "" {
