@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -221,7 +222,7 @@ func execReturned(t *testing.T, done <-chan error) {
 // gatedStart submits a Run whose shell has spawned (and forked a writer)
 // while Start is held before it hands the terminal back, as a Close that
 // races a submit (a spare made at teardown) finds it.
-func gatedStart(t *testing.T) (*Server, string, string, chan struct{}) {
+func gatedStart(t *testing.T) (*Server, string, string, func()) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "runs")
 	s := New()
@@ -229,6 +230,11 @@ func gatedStart(t *testing.T) (*Server, string, string, chan struct{}) {
 	s.RunShells(dir, "PS1=$ ", "ENV=")
 	inner := s.NewTerminal
 	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	// Registered after Close, so it runs first: a failing test never
+	// leaves Start, and Close behind it, held.
+	t.Cleanup(release)
 	spawned := make(chan struct{}, 1)
 	s.NewTerminal = func(run *api.Run) *Terminal {
 		tm := inner(run)
@@ -244,32 +250,34 @@ func gatedStart(t *testing.T) (*Server, string, string, chan struct{}) {
 	select {
 	case <-spawned:
 	case <-time.After(5 * time.Second):
-		close(gate)
 		t.Fatal("the Run's shell never spawned")
 	}
 	s.mu.Lock()
 	id := s.order[0]
 	s.mu.Unlock()
-	return s, dir, id, gate
+	return s, dir, id, release
 }
 
-// TestCloseWaitsInflightStart: Close during a Start under way does not
-// return while that Start's processes run.
+// TestCloseWaitsInflightStart: Close's process stop during a Start under
+// way does not return while that Start's processes run. It calls
+// stopProcs, not Close: closing the HTTP server would itself wait for the
+// held Submit and hide an early return.
 func TestCloseWaitsInflightStart(t *testing.T) {
-	s, dir, id, gate := gatedStart(t)
+	s, dir, id, release := gatedStart(t)
 	pids := pidsOf(t, dir, id, "shell")
-	closed := make(chan struct{})
-	go func() { s.Close(); close(closed) }()
+	stopped := make(chan struct{})
+	go func() { s.stopProcs(); close(stopped) }()
 	select {
-	case <-closed:
-		if left := running(pids); len(left) > 0 {
-			close(gate)
-			t.Fatalf("Close returned while %v of an in-flight Start still exist", left)
-		}
+	case <-stopped:
+		t.Fatalf("stopProcs returned while a Start was under way (its processes %v)", running(pids))
 	case <-time.After(500 * time.Millisecond):
 	}
-	close(gate)
-	<-closed
+	release()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stopProcs did not return once the Start finished")
+	}
 	assertStopped(t, dir, id, "shell", pids)
 }
 
@@ -279,13 +287,17 @@ func TestLateStartKilled(t *testing.T) {
 	old := procWait
 	procWait = 300 * time.Millisecond
 	t.Cleanup(func() { procWait = old })
-	s, dir, id, gate := gatedStart(t)
+	s, dir, id, release := gatedStart(t)
 	pids := pidsOf(t, dir, id, "shell")
-	closed := make(chan struct{})
-	go func() { s.Close(); close(closed) }()
-	time.Sleep(procWait + 300*time.Millisecond)
-	close(gate)
-	<-closed
+	stopped := make(chan struct{})
+	go func() { s.stopProcs(); close(stopped) }()
+	// The Start registers its group only after stopProcs gave up on it.
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopProcs did not give up on the held Start after procWait")
+	}
+	release()
 	if !WaitFor(context.Background(), 2*time.Second, func() bool { return len(running(pids)) == 0 }) {
 		t.Fatalf("processes %v of a Start finished after Close still exist", running(pids))
 	}

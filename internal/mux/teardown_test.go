@@ -19,7 +19,9 @@ import (
 // directory, or the test's TempDir cleanup fails with "directory not
 // empty". A flock stub on PATH holds only the name write (the start
 // wrapper exports LUXMUX_START before it locks; the exec has none) until
-// the test releases it after Close: an exec still alive then writes.
+// the test releases it after Close: an exec still alive then writes. The
+// stub waits for nothing else, so no stall can let it publish early; it
+// gives up once the test's directory is removed.
 func TestDetachNameWriteStopsAtClose(t *testing.T) {
 	flock, err := exec.LookPath("flock")
 	if err != nil {
@@ -28,7 +30,7 @@ func TestDetachNameWriteStopsAtClose(t *testing.T) {
 	bin := t.TempDir()
 	w := `"$` + config.EnvTestWorkspace + `"`
 	stub := "#!/bin/sh\n" +
-		`[ -n "${LUXMUX_START-}" ] || { : >` + w + `/.name-write; i=0; while [ ! -e ` + w + `/.release ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done; }` + "\n" +
+		`[ -n "${LUXMUX_START-}" ] || { : >` + w + `/.name-write; while [ ! -e ` + w + `/.release ]; do [ -d ` + w + ` ] || exit 1; sleep 0.01; done; }` + "\n" +
 		`exec ` + flock + ` "$@"` + "\n"
 	if err := os.WriteFile(filepath.Join(bin, "flock"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
@@ -45,8 +47,8 @@ func TestDetachNameWriteStopsAtClose(t *testing.T) {
 	})
 	window := filepath.Join(ws, ".luxmux", config.WindowFile)
 	h.detach()
-	if _, err := os.Stat(window); err == nil {
-		t.Fatal("precondition: the name write finished before Close")
+	if _, err := os.Stat(window); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("precondition: %s before Close: %v", window, err)
 	}
 	h.lux.Close()
 	if err := os.WriteFile(filepath.Join(ws, ".release"), nil, 0o644); err != nil {
