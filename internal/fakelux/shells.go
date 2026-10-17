@@ -1,7 +1,9 @@
 package fakelux
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -9,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -155,19 +158,33 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer ws.CloseNow()
-	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	// The hijacked connection does not cancel req's context: conn ends
+	// once the client closes or drops the stream (the reader below), ctx
+	// also after 10 s.
+	conn, gone := context.WithCancel(req.Context())
+	defer gone()
+	ctx, cancel := context.WithTimeout(conn, 10*time.Second)
 	defer cancel()
 	var open api.StreamOpen
 	if wsjson.Read(ctx, ws, &open) != nil || len(open.Command) == 0 {
 		_ = wsjson.Write(ctx, ws, api.StreamData{Error: "no command"})
 		return
 	}
+	// What the client sends after StreamOpen (stdin, EOF) is not used.
+	go func() {
+		defer gone()
+		for {
+			if _, _, err := ws.Read(conn); err != nil {
+				return
+			}
+		}
+	}()
 	s.mu.Lock()
 	s.execs = append(s.execs, slices.Clone(open.Command))
 	s.mu.Unlock()
 	if a, ok := s.execResponse(id, open.Command); ok {
 		// A hang lasts until the client goes away, not the 10 s above.
-		respondExec(req.Context(), ws, a)
+		respondExec(conn, ws, a)
 		return
 	}
 	if envOf == nil {
@@ -175,15 +192,56 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 		_ = wsjson.Write(ctx, ws, api.StreamData{Error: "the workload has not started yet"})
 		return
 	}
-	cmd := exec.CommandContext(ctx, open.Command[0], open.Command[1:]...)
-	env := envOf(&run)
+	out, code := s.runExec(ctx, id, &run, envOf, open.Command)
+	if len(out) > 0 {
+		_ = wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: out})
+	}
+	_ = wsjson.Write(ctx, ws, api.StreamData{ExitCode: &code})
+	_ = ws.Close(websocket.StatusNormalClosure, "")
+}
+
+// runExec runs argv in Run id as lux's shim runs an exec: in its own
+// process group, all of which is killed when ctx ends (the client went
+// away, or the 10 s bound) and when the Run's workload stops. It returns
+// the combined output and the exit code.
+func (s *Server) runExec(ctx context.Context, id string, run *api.Run, envOf func(*api.Run) []string, argv []string) ([]byte, int) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	env := envOf(run)
 	cmd.Env = append(os.Environ(), env...)
 	if d := runsDirOf(env); d != "" {
 		cmd.Dir = ShellDir(d, run.ID, run.Spec.Workload.Workdir)
 	}
-	out, err := cmd.CombinedOutput()
-	if len(out) > 0 {
-		_ = wsjson.Write(ctx, ws, api.StreamData{Channel: "stdout", Data: out})
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Cancel runs before Wait reaps the leader, so its pid still names
+	// the group.
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// A child that escaped the group may hold the output pipe open.
+	cmd.WaitDelay = time.Second
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := errors.New("the fake is closed")
+	if s.beginProcs() {
+		var g *group
+		err = cmd.Start()
+		if err == nil {
+			g = &group{pgid: cmd.Process.Pid}
+			s.track(g)
+			s.mu.Lock()
+			var t *Terminal
+			if r := s.runs[id]; r != nil {
+				t = r.term
+			}
+			s.mu.Unlock()
+			if t != nil {
+				t.addExec(g)
+			}
+		}
+		s.endProcs()
+		if err == nil {
+			err = cmd.Wait()
+			// Marks a group left empty gone before its number can be reused.
+			g.alive()
+		}
 	}
 	code := 0
 	if err != nil {
@@ -192,6 +250,5 @@ func (s *Server) exec(w http.ResponseWriter, req *http.Request) {
 			code = max(cmd.ProcessState.ExitCode(), 1)
 		}
 	}
-	_ = wsjson.Write(ctx, ws, api.StreamData{ExitCode: &code})
-	_ = ws.Close(websocket.StatusNormalClosure, "")
+	return out.Bytes(), code
 }
