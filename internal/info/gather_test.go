@@ -191,7 +191,7 @@ func TestOptionalFieldsOmitted(t *testing.T) {
 		{"cost", func(_ *api.Run, c *fakeClient) { c.cost = nil }, []string{"Cost", "so far", "USD"}, []string{`"cost"`}},
 		{"cost pending", func(_ *api.Run, c *fakeClient) { c.cost = &luxapi.RunCost{Status: "pending"} }, []string{"Cost", "pending"}, []string{`"cost"`}},
 		{"cost zero", func(_ *api.Run, c *fakeClient) {
-			c.cost = &luxapi.RunCost{Status: "complete", Totals: []api.CostTotal{{Currency: "USD", Amount: "0"}}}
+			c.cost = &luxapi.RunCost{Status: "incomplete", Totals: []api.CostTotal{{Currency: "USD", Amount: "0"}}}
 		}, []string{"Cost", "0 USD", "$0"}, []string{`"cost"`}},
 		{"secrets", func(r *api.Run, _ *fakeClient) { r.Secrets = nil }, []string{"EXAMPLE_TOKEN"}, []string{`"secrets"`}},
 		{"submitter", func(r *api.Run, _ *fakeClient) { r.SubmittedBy = nil }, []string{"submitted by"}, []string{`"submitted_by"`}},
@@ -483,6 +483,27 @@ func TestNoSecretValue(t *testing.T) {
 	}
 	if !strings.Contains(out, "EXAMPLE_TOKEN") {
 		t.Fatal("the secret's name is missing")
+	}
+}
+
+// TestSettledZeroCostShown: a complete or final cost of zero is shown as
+// zero, in the text and the JSON; a pending one, even with an estimate,
+// is still left out.
+func TestSettledZeroCostShown(t *testing.T) {
+	now := t0
+	for _, status := range []string{"complete", "final"} {
+		c := &fakeClient{run: fullRun(), cost: &luxapi.RunCost{Status: status, Totals: []api.CostTotal{{Currency: "USD", Amount: "0.00"}}}}
+		w := Fetch(context.Background(), c, target(), clock(&now))
+		if w.Cost == nil || len(w.Cost.Totals) != 1 || lineValue(w, now, "so far") != "0.00 USD" || lineValue(w, now, "status") != status {
+			t.Fatalf("%s: %+v\n%s", status, w.Cost, Text(w, now))
+		}
+		if j := mustJSON(t, w); !strings.Contains(j, `"cost":{"status":"`+status+`","totals":[{"currency":"USD","amount":0.00}]}`) {
+			t.Fatalf("%s json: %s", status, j)
+		}
+	}
+	c := &fakeClient{run: fullRun(), cost: &luxapi.RunCost{Status: "pending", Totals: []api.CostTotal{{Currency: "USD", Amount: "0.40", Estimate: "0.40"}}}}
+	if w := Fetch(context.Background(), c, target(), clock(&now)); w.Cost != nil {
+		t.Fatalf("pending: %+v", w.Cost)
 	}
 }
 

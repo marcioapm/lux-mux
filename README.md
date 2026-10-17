@@ -434,7 +434,9 @@ windows. Inside a shell, the same facts that do not need lux are in the
 `LUXMUX_*` variables and `/workspace/.luxmux/env` (see [window
 facts](#start-and-resume-commands-and-window-facts)).
 
-A field lux does not report is left out, never shown as zero. The sources
+A field lux does not report is left out, never shown as zero; a cost lux
+reports as `complete` or `final` is shown even when it is zero
+(`0.00 USD`). The sources
 (lux v0.1.30, `GET /v1/runs/{id}` unless said):
 
 | Section | Field | From |
@@ -450,14 +452,16 @@ A field lux does not report is left out, never shown as zero. The sources
 | | waiting, starting | `placementWaitSeconds` (for a host), `placementStartSeconds` (on it) |
 | Workload | repositories, workdir | `spec.git.repositories` (URLs without credentials), `spec.workload.workdir` |
 | Access | egress, secrets | `spec.network` (unrestricted, an allow list, or none); the names in `secrets`, never a value |
-| Cost | so far | `GET /v1/runs/{id}/cost`: its status and per-currency totals; left out while lux has none (`pending`) |
+| Cost | so far | `GET /v1/runs/{id}/cost`: its status and per-currency totals; left out while lux has none (`pending`, or a zero not yet `complete`/`final`) |
 | Resume | resumable, snapshot, blockers | `resumable` and `resume` (lux sends it for a stopped, lost, failed or succeeded Run) |
 | In use | cpu, memory, disk | read inside the running Run (below) |
 
 lux v0.1.30 has no usage endpoint, so resources in use are read inside
 the Run with lux's exec API: one fixed POSIX `sh` script reads the
-cgroup's `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
-`memory.current`, and `df -Pk /workspace`. It needs nothing but `sh` and
+**cgroup v2** files `cpu.max`, `cpu.stat` (`usage_usec`), `memory.max` and
+`memory.current` (a cgroup v1 host has none of them: CPU is `— cpus`,
+memory is left out, and only disk is read),
+and `df -Pk /workspace`. It needs nothing but `sh` and
 `df` (BusyBox's do), uses no `timeout(1)`, and luxmux ends it after 3 s.
 CPU in use is a rate: the usage between two readings over the time
 between them, so it is `—` until the second reading. The section is left

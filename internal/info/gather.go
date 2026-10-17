@@ -314,9 +314,12 @@ func costOf(c *luxapi.RunCost) *Cost {
 		return nil
 	}
 	out := &Cost{Status: c.Status}
+	// A settled cost (complete or final) of zero is a real zero; an
+	// unsettled one is lux not knowing yet.
+	settled := c.Status == "complete" || c.Status == "final"
 	for _, t := range c.Totals {
 		amt, ok := number(t.Amount)
-		if !ok || t.Currency == "" || isZero(amt) {
+		if !ok || t.Currency == "" || (isZero(amt) && !settled) {
 			continue
 		}
 		m := Money{Currency: t.Currency, Amount: amt}
