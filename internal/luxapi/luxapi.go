@@ -10,8 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -26,25 +27,97 @@ type Client struct {
 }
 
 type renameSupport struct {
-	noRename atomic.Bool
-	told     atomic.Bool
+	mu                    sync.Mutex
+	known, noRename, told bool
+	probing               chan struct{}
+	slots                 chan struct{}
+	refs                  int
+	used                  time.Time
 }
 
-// Capabilities belong to the endpoint, not its credentials or one client.
-// Keeping them here also covers clients recreated after a session switch.
-var renameEndpoints sync.Map
+type renameKey struct{ URL, Tenant string }
 
-func (c *Client) renameSupport() *renameSupport {
-	key := struct{ URL, Tenant string }{c.C.Base, c.C.Tenant}
-	v, _ := renameEndpoints.LoadOrStore(key, &renameSupport{})
-	return v.(*renameSupport)
+const renameCapacity = 256
+const renameTTL = 10 * time.Minute
+
+// Only idle entries can expire or be evicted: active callers share the
+// same semaphore and discovery even while the registry is full.
+var renameEndpoints = struct {
+	sync.Mutex
+	entries map[renameKey]*renameSupport
+	changed chan struct{}
+}{entries: make(map[renameKey]*renameSupport), changed: make(chan struct{})}
+
+func (c *Client) renameSupport(ctx context.Context) (*renameSupport, error) {
+	key := renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}
+	for {
+		renameEndpoints.Lock()
+		now := time.Now()
+		for k, s := range renameEndpoints.entries {
+			if s.refs == 0 && now.Sub(s.used) >= renameTTL {
+				delete(renameEndpoints.entries, k)
+			}
+		}
+		s := renameEndpoints.entries[key]
+		if s == nil && len(renameEndpoints.entries) >= renameCapacity {
+			var oldest renameKey
+			var at time.Time
+			for k, v := range renameEndpoints.entries {
+				if v.refs == 0 && (at.IsZero() || v.used.Before(at)) {
+					oldest, at = k, v.used
+				}
+			}
+			if !at.IsZero() {
+				delete(renameEndpoints.entries, oldest)
+			}
+		}
+		if s == nil && len(renameEndpoints.entries) < renameCapacity {
+			s = &renameSupport{slots: make(chan struct{}, 8)}
+			renameEndpoints.entries[key] = s
+		}
+		if s != nil {
+			s.refs++
+			s.used = now
+			renameEndpoints.Unlock()
+			return s, nil
+		}
+		changed := renameEndpoints.changed
+		renameEndpoints.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
-// FirstRenameRefusal reports, once, that this luxd cannot rename Runs:
-// true for the first caller after Rename returned ErrRenameUnsupported.
+func releaseRenameSupport(s *renameSupport) {
+	renameEndpoints.Lock()
+	s.refs--
+	s.used = time.Now()
+	close(renameEndpoints.changed)
+	renameEndpoints.changed = make(chan struct{})
+	renameEndpoints.Unlock()
+}
+
+// FirstRenameRefusal reports once per retained endpoint capability.
 func (c *Client) FirstRenameRefusal() bool {
-	s := c.renameSupport()
-	return s.noRename.Load() && s.told.CompareAndSwap(false, true)
+	renameEndpoints.Lock()
+	s := renameEndpoints.entries[renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}]
+	if s == nil {
+		renameEndpoints.Unlock()
+		return false
+	}
+	s.refs++
+	renameEndpoints.Unlock()
+	defer releaseRenameSupport(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.noRename || s.told {
+		return false
+	}
+	s.told = true
+	return true
 }
 
 // New is a client of cfg's luxd.
@@ -138,28 +211,77 @@ func (c *Client) Get(ctx context.Context, id string) (*api.Run, error) {
 // PATCH /v1/runs/{id}.
 var ErrRenameUnsupported = errors.New("this lux cannot rename Runs")
 
-// Rename sets Run id's name ("" clears it). A luxd from before the route
-// answers 405, or 404 (then GET finds the Run), or 422 refusing the method
-// or body: Rename returns ErrRenameUnsupported, then and from then on
-// without asking.
+// Rename sets the name. Only 405, or 404 with a successful GET, proves
+// the route unsupported; validation and transient errors remain retryable.
 func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) {
-	if c.renameSupport().noRename.Load() {
-		return nil, ErrRenameUnsupported
-	}
-	var r api.Run
-	err := c.C.Do(ctx, http.MethodPatch, "/v1/runs/"+url.PathEscape(id), map[string]string{"name": name}, &r)
-	switch {
-	case err == nil:
-		return &r, nil
-	case IsStatus(err, http.StatusNotFound):
-		if _, gerr := c.Get(ctx, id); gerr != nil {
-			return nil, err
-		}
-	case !IsStatus(err, http.StatusMethodNotAllowed) && !IsStatus(err, http.StatusUnprocessableEntity):
+	s, err := c.renameSupport(ctx)
+	if err != nil {
 		return nil, err
 	}
-	c.renameSupport().noRename.Store(true)
-	return nil, ErrRenameUnsupported
+	defer releaseRenameSupport(s)
+	probe := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.noRename {
+			s.mu.Unlock()
+			return nil, ErrRenameUnsupported
+		}
+		if s.known {
+			s.mu.Unlock()
+			break
+		}
+		if s.probing == nil {
+			s.probing = make(chan struct{})
+			probe = true
+			s.mu.Unlock()
+			break
+		}
+		done := s.probing
+		s.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if probe {
+		defer func() { s.mu.Lock(); close(s.probing); s.probing = nil; s.mu.Unlock() }()
+	}
+	select {
+	case s.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.slots }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var r api.Run
+	err = c.C.Do(ctx, http.MethodPatch, "/v1/runs/"+url.PathEscape(id), map[string]string{"name": name}, &r)
+	unsupported := IsStatus(err, http.StatusMethodNotAllowed)
+	if IsStatus(err, http.StatusNotFound) {
+		_, gerr := c.Get(ctx, id)
+		unsupported = gerr == nil
+	}
+	s.mu.Lock()
+	if err == nil {
+		s.known = true
+	}
+	if unsupported {
+		s.known = true
+		s.noRename = true
+	}
+	s.mu.Unlock()
+	if unsupported {
+		return nil, ErrRenameUnsupported
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // ListSession is every Run labelled with the session (at most 1000, the

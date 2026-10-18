@@ -2,6 +2,7 @@ package fakelux
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"slices"
 	"unicode"
@@ -45,7 +46,14 @@ func (s *Server) rename(w http.ResponseWriter, req *http.Request) {
 	}
 	// Read first: the request's context ends with the client only once
 	// its body was read.
-	err := json.NewDecoder(req.Body).Decode(&body)
+	raw, err := io.ReadAll(io.LimitReader(req.Body, 1<<20))
+	if err == nil && !utf8.Valid(raw) {
+		writeErr(w, 422, "invalid_name", "name must be UTF-8")
+		return
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &body)
+	}
 	s.mu.Lock()
 	fail := s.failRenames
 	s.mu.Unlock()

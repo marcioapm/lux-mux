@@ -27,8 +27,7 @@ func TestRename(t *testing.T) {
 	if r, err := c.Rename(ctx, id, ""); err != nil || r.Name != "" {
 		t.Fatalf("clear a stopped Run's name: %+v %v", r, err)
 	}
-	// Over raw HTTP: the client reads a 422 as a lux that can't rename.
-	for _, bad := range []string{strings.Repeat("x", 201), "a\nb", "a\x1bb"} {
+	for _, bad := range []string{strings.Repeat("x", 201), "a\nb", "a\x1bb", "bad\xffbyte"} {
 		if code := patch(t, s, id, bad); code != 422 {
 			t.Errorf("%q: %d", bad, code)
 		}
@@ -59,6 +58,18 @@ func TestRename(t *testing.T) {
 	}
 }
 
+func TestRenameValidationDoesNotPoison(t *testing.T) {
+	s := New()
+	defer s.Close()
+	c, id := submitted(t, s)
+	if _, err := c.Rename(context.Background(), id, strings.Repeat("x", 201)); !luxapi.IsStatus(err, 422) {
+		t.Fatalf("validation: %v", err)
+	}
+	if _, err := c.Rename(context.Background(), id, "s/valid"); err != nil || s.Run(id).Name != "s/valid" {
+		t.Fatalf("valid after invalid: %v", err)
+	}
+}
+
 // patch sends PATCH /v1/runs/{id} with name, returning the status.
 func patch(t *testing.T, s *Server, id, name string) int {
 	t.Helper()
@@ -79,7 +90,7 @@ func patch(t *testing.T, s *Server, id, name string) int {
 // TestRenameOldLux: a lux without the route (405, or 404 for a Run GET
 // finds) can't rename; the client remembers it and asks no more.
 func TestRenameOldLux(t *testing.T) {
-	for _, code := range []int{http.StatusMethodNotAllowed, http.StatusNotFound, http.StatusUnprocessableEntity} {
+	for _, code := range []int{http.StatusMethodNotAllowed, http.StatusNotFound} {
 		s := New()
 		c, id := submitted(t, s)
 		s.FailRenames(code)
