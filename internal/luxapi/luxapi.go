@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -19,8 +20,12 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 )
 
-// Client is a luxd client.
-type Client struct{ C *api.Client }
+// Client is a luxd client. noRename: this luxd answered a rename as one
+// without PATCH /v1/runs/{id}; it is not asked again.
+type Client struct {
+	C        *api.Client
+	noRename atomic.Bool
+}
 
 // New is a client of cfg's luxd.
 func New(cfg api.Config) (*Client, error) {
@@ -107,6 +112,34 @@ func (c *Client) Get(ctx context.Context, id string) (*api.Run, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// ErrRenameUnsupported is Rename's error for a luxd without
+// PATCH /v1/runs/{id}.
+var ErrRenameUnsupported = errors.New("this lux cannot rename Runs")
+
+// Rename sets Run id's name ("" clears it). A luxd from before the route
+// answers 405, or 404 (then GET finds the Run), or 422 refusing the method
+// or body: Rename returns ErrRenameUnsupported, then and from then on
+// without asking.
+func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) {
+	if c.noRename.Load() {
+		return nil, ErrRenameUnsupported
+	}
+	var r api.Run
+	err := c.C.Do(ctx, http.MethodPatch, "/v1/runs/"+url.PathEscape(id), map[string]string{"name": name}, &r)
+	switch {
+	case err == nil:
+		return &r, nil
+	case IsStatus(err, http.StatusNotFound):
+		if _, gerr := c.Get(ctx, id); gerr != nil {
+			return nil, err
+		}
+	case !IsStatus(err, http.StatusMethodNotAllowed) && !IsStatus(err, http.StatusUnprocessableEntity):
+		return nil, err
+	}
+	c.noRename.Store(true)
+	return nil, ErrRenameUnsupported
 }
 
 // ListSession is every Run labelled with the session (at most 1000, the
