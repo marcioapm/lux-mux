@@ -59,7 +59,8 @@ func TestRunNameAtSubmit(t *testing.T) {
 }
 
 // TestRunNameSpare: a waiting spare is named <session>/spare; the window
-// that claims it renames it to the window's name.
+// that claims it renames it to the window's name at the claim, before any
+// attach (its attaches fail here).
 func TestRunNameSpare(t *testing.T) {
 	h := newHarness(t, cfgSpare, nil)
 	h.live(0)
@@ -68,10 +69,13 @@ func TestRunNameSpare(t *testing.T) {
 	if got := runName(h, spare); got != "s/spare" {
 		t.Fatalf("waiting spare is named %q", got)
 	}
+	h.lux.FailAttaches(spare, "host went away")
 	h.type_("\x02c")
 	h.waitFor("claimed", func() bool { return h.window(1) == spare })
 	want := "s/" + h.windowName(1)
 	h.waitFor("claimed spare renamed", func() bool { return runName(h, spare) == want })
+	h.lux.FailAttaches(spare, "")
+	h.live(1)
 	var next string
 	h.waitFor("replacement spare", func() bool { next = spareOf(h); return next != "" && next != spare })
 	if got := runName(h, next); got != "s/spare" {
@@ -186,6 +190,10 @@ func TestRunNameOldLux(t *testing.T) {
 	}
 	if got := runName(h, id); got != "s/app" {
 		t.Fatalf("Run renamed on an old lux: %q", got)
+	}
+	// Not left due either: nothing to retry at the next attach.
+	if s, ok, _ := state.Load(h.dir, "renamed"); !ok || s.Windows[0].RenameRun {
+		t.Fatalf("a rename an old lux refused is recorded due: %+v", s)
 	}
 	h.detach()
 }
