@@ -496,15 +496,11 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 
 // windowOfRun is the window name in Run r's name, when it has the form
 // config.RunName gives in session name or in its Runs' label: the name
-// may have been set on lux by hand, and is honoured. A spare's own name
-// (a claimed spare whose rename never reached lux) names no window.
+// may have been set on lux by hand, and is honoured.
 func windowOfRun(r *api.Run, name string) (string, bool) {
 	w, ok := config.WindowOfRunName(r.Name, name)
 	if !ok {
 		w, ok = config.WindowOfRunName(r.Name, r.Labels[config.LabelSession])
-	}
-	if ok && r.Labels[config.LabelSpare] == "true" && w == config.SpareWindow {
-		return "", false
 	}
 	return w, ok
 }

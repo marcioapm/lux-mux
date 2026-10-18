@@ -38,7 +38,7 @@ func TestRebuildWindowNamesFromRunNames(t *testing.T) {
 	for _, w := range s.Windows {
 		got = append(got, w.RunID+"="+w.Name)
 	}
-	want := []string{"r1=api", "r2=web/v2", "r3=dev", "r4=dev", "r5=dev", "r6=dev", "r7=labelled", "r8=dev"}
+	want := []string{"r1=api", "r2=web/v2", "r3=dev", "r4=dev", "r5=dev", "r6=dev", "r7=labelled", "r8=spare"}
 	if len(got) != len(want) {
 		t.Fatalf("windows %v, want %v", got, want)
 	}
