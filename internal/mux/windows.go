@@ -66,6 +66,8 @@ func (m *Mux) launch(w *Window) {
 		w.RunID = id
 		m.byRun[id] = w
 		w.steps.note("claimed warm spare " + id)
+		// The spare was named <session>/spare: it takes the window's name.
+		m.renameRunLocked(w, false)
 		m.saveLocked()
 		m.startSupervisor(w)
 		m.mu.Unlock()
@@ -78,14 +80,14 @@ func (m *Mux) launch(w *Window) {
 		return
 	}
 	m.mu.Lock()
-	spec, profile := w.Spec, w.Profile
+	spec, profile, runName := w.Spec, w.Profile, m.runNameLocked(w)
 	m.mu.Unlock()
 	secrets, err := spec.ResolveSecrets(m.opt.Lookup)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
 	}
-	sp, err := config.RunSpec(spec, config.Target{Session: m.label, Profile: profile}, secrets)
+	sp, err := config.RunSpec(spec, config.Target{Session: m.label, Profile: profile, Name: runName}, secrets)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
@@ -123,6 +125,11 @@ func (m *Mux) launch(w *Window) {
 	w.reason = ""
 	m.byRun[run.ID] = w
 	w.steps.note("submitted " + run.ID)
+	// A rename while the submit was in flight.
+	if runName != m.runNameLocked(w) {
+		w.runNamePending = true
+	}
+	m.sendRunNameLocked(w)
 	m.startSupervisor(w)
 	m.saveLocked()
 	m.mu.Unlock()
@@ -309,6 +316,8 @@ func (m *Mux) relaunch(w *Window) {
 	}
 	w.RunID = ""
 	w.nameSent = ""
+	// The new Run is submitted with the window's name.
+	w.runNamePending, w.runNameByUser = false, false
 	w.phase = phaseStarting
 	w.reason = ""
 	w.resumable = false
@@ -487,6 +496,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	// Reserved while submitting; the endpoint is recorded for every slot,
 	// the default lux's too, which may be another at the next attach.
 	m.sess.SetSpare(slot, "", ep)
+	spareName := config.RunName(m.name, config.SpareWindow)
 	m.mu.Unlock()
 	lux, err := m.eps.Client(ep)
 	var run *api.Run
@@ -495,7 +505,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		secrets, err = p.ResolveSecrets(m.opt.Lookup)
 		if err == nil {
 			var sp api.RunSpec
-			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
+			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Name: spareName, Spare: true}, secrets)
 			if err == nil {
 				// Not cancelled by a detach at once: lux may make the Run,
 				// and luxmux must learn its id to record it. A switch does

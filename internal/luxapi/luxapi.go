@@ -21,10 +21,18 @@ import (
 )
 
 // Client is a luxd client. noRename: this luxd answered a rename as one
-// without PATCH /v1/runs/{id}; it is not asked again.
+// without PATCH /v1/runs/{id}; it is not asked again. renameTold: a caller
+// took FirstRenameRefusal's true.
 type Client struct {
-	C        *api.Client
-	noRename atomic.Bool
+	C          *api.Client
+	noRename   atomic.Bool
+	renameTold atomic.Bool
+}
+
+// FirstRenameRefusal reports, once, that this luxd cannot rename Runs:
+// true for the first caller after Rename returned ErrRenameUnsupported.
+func (c *Client) FirstRenameRefusal() bool {
+	return c.noRename.Load() && c.renameTold.CompareAndSwap(false, true)
 }
 
 // New is a client of cfg's luxd.

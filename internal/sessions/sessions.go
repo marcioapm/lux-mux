@@ -372,6 +372,10 @@ func Move(dir, old, new, label string) error {
 	}
 	if ok {
 		s.Name = new
+		// The next attach renames its Runs on lux to the new name.
+		for i := range s.Windows {
+			s.Windows[i].RenameRun = true
+		}
 		if err := state.Save(dir, s); err != nil {
 			return err
 		}

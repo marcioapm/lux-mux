@@ -289,6 +289,7 @@ func (m *Mux) addWindowLocked(sw state.Window, profiles map[string]config.Profil
 	}
 	w := m.newWindow(sw.Name, sw.Profile, spec, ep)
 	w.RunID = sw.RunID
+	w.runNamePending = sw.RenameRun
 	m.windows = append(m.windows, w)
 	m.byRun[w.RunID] = w
 	return w
@@ -785,7 +786,8 @@ func (m *Mux) saveLocked() {
 		}
 		spec := w.Spec
 		ep := w.Endpoint
-		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep})
+		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep,
+			RenameRun: w.runNamePending})
 	}
 	s.Active, s.Last = m.active, m.last
 	if m.opt.StateDir != "" {
@@ -931,6 +933,7 @@ func (m *Mux) Rename(i int, name string) {
 	if i >= 0 && i < len(m.windows) && name != "" {
 		m.windows[i].Name = name
 		m.sendNameLocked(m.windows[i])
+		m.renameRunLocked(m.windows[i], true)
 		m.saveLocked()
 	}
 }

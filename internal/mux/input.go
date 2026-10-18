@@ -427,6 +427,7 @@ func (m *Mux) commandLocked(c config.Command) {
 			if ok && s != "" && m.indexLocked(w) >= 0 {
 				w.Name = s
 				m.sendNameLocked(w)
+				m.renameRunLocked(w, true)
 				m.saveLocked()
 				m.repaintLocked()
 			}

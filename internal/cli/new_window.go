@@ -16,10 +16,14 @@ import (
 )
 
 // submitWindow checks p's spec with lux's dry run, then submits it as a
-// window of the session whose Runs are labelled label, which an attached
-// luxmux adopts.
-func submitWindow(ctx context.Context, env Env, c *luxapi.Client, label, profile, name string, p config.Profile) (state.Window, error) {
-	t := config.Target{Session: label, Profile: profile}
+// window of session (its Runs labelled label), which an attached luxmux
+// adopts; the Run is named after the session and the window.
+func submitWindow(ctx context.Context, env Env, c *luxapi.Client, session, label, profile, name string, p config.Profile) (state.Window, error) {
+	window := name
+	if window == "" {
+		window = profile
+	}
+	t := config.Target{Session: label, Profile: profile, Name: config.RunName(session, window)}
 	sp, err := externalSpec(p, t, name, nil)
 	if err != nil {
 		return state.Window{}, err
@@ -38,10 +42,7 @@ func submitWindow(ctx context.Context, env Env, c *luxapi.Client, label, profile
 	if err != nil {
 		return state.Window{}, fmt.Errorf("submit: %s", luxapi.Describe(err))
 	}
-	if name == "" {
-		name = profile
-	}
-	return state.Window{RunID: run.ID, Name: name, Profile: profile, Spec: &p}, nil
+	return state.Window{RunID: run.ID, Name: window, Profile: profile, Spec: &p}, nil
 }
 
 // externalSpec is RunSpec labelled as made outside the attached process,
@@ -176,7 +177,7 @@ func newWindow(env Env, o windowFlags) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
-	w, err := submitWindow(ctx, env, c, label, profile, o.Name, p)
+	w, err := submitWindow(ctx, env, c, o.Session, label, profile, o.Name, p)
 	if err != nil {
 		return err
 	}

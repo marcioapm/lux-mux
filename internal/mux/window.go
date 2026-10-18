@@ -220,8 +220,14 @@ type Window struct {
 	// nameSending: a write is in flight.
 	nameSent    string
 	nameSending bool
-	cancel      context.CancelFunc
-	closed      bool
+	// runNamePending: the Run is due a rename on lux (state.Window's
+	// RenameRun); runNameSending: one is in flight; runNameByUser: the
+	// user asked for the one due.
+	runNamePending bool
+	runNameSending bool
+	runNameByUser  bool
+	cancel         context.CancelFunc
+	closed         bool
 
 	// connMu guards the stream and the window's input queue. in holds the
 	// keystrokes typed for the window and not yet written, in order: the
