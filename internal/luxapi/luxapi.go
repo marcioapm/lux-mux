@@ -22,34 +22,51 @@ import (
 )
 
 // Client is a luxd client.
-type Client struct {
-	C *api.Client
-}
+type Client struct{ C *api.Client }
 
+// renameSupport is what is known of one endpoint's rename API, shared by
+// every Client of that endpoint (URL and tenant).
 type renameSupport struct {
-	mu                    sync.Mutex
+	mu sync.Mutex
+	// known: a PATCH succeeded or proved the route missing; noRename: lux has no rename
+	// route; told: FirstRenameRefusal has reported it.
 	known, noRename, told bool
-	probing               chan struct{}
-	slots                 chan struct{}
-	refs                  int
-	used                  time.Time
+	// probing is non-nil while one caller's PATCH decides known; it is
+	// closed and reset on every path the prober returns by.
+	probing chan struct{}
+	// slots bounds the endpoint's concurrent PATCHes to renameSlots.
+	slots chan struct{}
+	// refs and used are guarded by renameEndpoints, not mu.
+	refs int
+	used time.Time
 }
 
 type renameKey struct{ URL, Tenant string }
 
-const renameCapacity = 256
-const renameTTL = 10 * time.Minute
+func (c *Client) renameKey() renameKey {
+	return renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}
+}
 
-// Only idle entries can expire or be evicted: active callers share the
-// same semaphore and discovery even while the registry is full.
+const (
+	renameCapacity = 256
+	renameTTL      = 10 * time.Minute
+	renameSlots    = 8
+)
+
+// renameEndpoints holds at most renameCapacity entries. An entry with
+// refs>0 is never expired or evicted, so its callers always share one
+// semaphore and one probe; while every entry is referenced, a caller of a
+// new endpoint waits on changed (closed and replaced at each release).
 var renameEndpoints = struct {
 	sync.Mutex
 	entries map[renameKey]*renameSupport
 	changed chan struct{}
 }{entries: make(map[renameKey]*renameSupport), changed: make(chan struct{})}
 
+// renameSupport is c's endpoint's entry with a reference held; the caller
+// releases it with releaseRenameSupport.
 func (c *Client) renameSupport(ctx context.Context) (*renameSupport, error) {
-	key := renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}
+	key := c.renameKey()
 	for {
 		renameEndpoints.Lock()
 		now := time.Now()
@@ -60,6 +77,7 @@ func (c *Client) renameSupport(ctx context.Context) (*renameSupport, error) {
 		}
 		s := renameEndpoints.entries[key]
 		if s == nil && len(renameEndpoints.entries) >= renameCapacity {
+			// Evict the least recently used idle entry, if there is one.
 			var oldest renameKey
 			var at time.Time
 			for k, v := range renameEndpoints.entries {
@@ -72,7 +90,7 @@ func (c *Client) renameSupport(ctx context.Context) (*renameSupport, error) {
 			}
 		}
 		if s == nil && len(renameEndpoints.entries) < renameCapacity {
-			s = &renameSupport{slots: make(chan struct{}, 8)}
+			s = &renameSupport{slots: make(chan struct{}, renameSlots)}
 			renameEndpoints.entries[key] = s
 		}
 		if s != nil {
@@ -100,10 +118,11 @@ func releaseRenameSupport(s *renameSupport) {
 	renameEndpoints.Unlock()
 }
 
-// FirstRenameRefusal reports once per retained endpoint capability.
+// FirstRenameRefusal is true once per retained endpoint entry: the first
+// time it is asked after Rename found the endpoint without a rename route.
 func (c *Client) FirstRenameRefusal() bool {
 	renameEndpoints.Lock()
-	s := renameEndpoints.entries[renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}]
+	s := renameEndpoints.entries[c.renameKey()]
 	if s == nil {
 		renameEndpoints.Unlock()
 		return false
@@ -211,8 +230,10 @@ func (c *Client) Get(ctx context.Context, id string) (*api.Run, error) {
 // PATCH /v1/runs/{id}.
 var ErrRenameUnsupported = errors.New("this lux cannot rename Runs")
 
-// Rename sets the name. Only 405, or 404 with a successful GET, proves
-// the route unsupported; validation and transient errors remain retryable.
+// Rename sets Run id's name. Until the endpoint's support is known, one
+// caller probes and the others wait for it. Only 405, or 404 followed by a
+// successful GET of the Run, proves the route missing; 422, other errors
+// and a cancelled probe leave support unknown, so the next call probes.
 func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) {
 	s, err := c.renameSupport(ctx)
 	if err != nil {
@@ -248,6 +269,7 @@ func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) 
 		}
 	}
 	if probe {
+		// Waiters re-check known on close, whatever this call returns.
 		defer func() { s.mu.Lock(); close(s.probing); s.probing = nil; s.mu.Unlock() }()
 	}
 	select {
