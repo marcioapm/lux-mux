@@ -132,28 +132,30 @@ filters as you type, `,` renames, `x` kills (with confirmation), Esc or `q`
 closes. The lower part previews the highlighted window's screen.
 
 **Run names.** Each window's Run is named `<session>/<window>` on lux
-(e.g. `work/api`), so `lux ls`, the lux console and `luxmux info` show it:
-the Run is submitted with that name, and renaming the window (`C-b ,`, the
+(e.g. `work/api`), so `lux ls`, the lux console and `luxmux info` show it.
+The Run is submitted with that name, and renaming the window (`C-b ,`, the
 chooser's `,`) or the session (`$`) renames it. A waiting warm spare is
-named `<session>/spare` until a window takes it. Control characters become
-spaces and the name is cut to lux's 200 bytes. Renames are best effort,
-off the keyboard path, with a 5 s overall deadline including queueing and at
-most eight active rename calls per lux URL and tenant. A failed intent stays
-recorded for the next attach; a newer name queued during that call is sent
-once immediately, without retrying unchanged failures in a loop. Waiting
-spares follow session renames too, without restarting their workloads. Claiming
-a spare waits for its older rename delivery before sending the window name.
-Only HTTP 405, or 404 followed by a successful GET, means unsupported; 422 is
-validation and does not disable later valid requests. Unsupported discovery is
-single-flight per endpoint, with cancelable waiters. Capability and concurrency
-state is shared process-wide by URL and tenant, not credentials. The registry
-holds at most 256 entries: idle entries expire after ten minutes, or the
-least-recently-used idle entry is evicted at capacity. Active entries cannot be
-evicted; callers wait cancelably if all 256 are active. A lux from before Run
-renames keeps the names Runs were made with; luxmux probes and notifies once
-while that endpoint capability remains cached.
-Labels never change: a renamed session's Runs keep their `luxmux-session`
-label (see below).
+named `<session>/spare` and follows session renames without restarting its
+workload; a window that claims it renames it once any older spare rename
+has finished. Control characters become spaces and the name is cut to
+lux's 200 bytes. Labels never change: a renamed session's Runs keep their
+`luxmux-session` label (see below).
+
+Renames are best effort and off the keyboard path. Each has a 5 s deadline,
+queueing included, and at most eight rename calls run at once per lux URL
+and tenant. A rename that fails stays recorded and is sent at the next
+attach; a newer name given meanwhile is sent at once, but an unchanged
+failure is not retried in a loop. Only HTTP 405, or 404 followed by a
+successful GET of the Run, means lux cannot rename Runs; a 422 rejects that
+one name only. One request per endpoint finds this out while others wait.
+A lux from before Run renames keeps the names Runs were made with: luxmux
+stops asking it and shows one notice, at the first rename you make there.
+What luxmux learns about an endpoint is shared across the process by URL
+and tenant (not credentials) and kept for at most 256 endpoints: an idle
+entry expires after ten minutes, or is evicted least recently used first
+when the table is full, and is then learned again; an entry in use is
+never evicted, and a caller for a new endpoint waits while all 256 are in
+use.
 
 ## Sessions inside luxmux
 
@@ -534,9 +536,10 @@ Runs, with no session file) when a lux could not be listed. The text is
 `--json` prints one object with `snake_case` keys. `index`, `name`,
 `session` and `endpoint` are always there; any other field is left out
 when unknown. `name` is the window's name in luxmux; `run.name` is the
-Run's name on lux (`<session>/<window>`, see **Run names** under [Keys](#keys)), as is
-the Run section's `name` line of the text. Numbers are numbers (bytes, cores,
-seconds; cost amounts as lux's decimals), times in RFC 3339 UTC:
+Run's name on lux (`<session>/<window>`, see **Run names** under
+[Keys](#keys)), as is the `name` line of the text's Run section. Numbers
+are numbers (bytes, cores, seconds; cost amounts as lux's decimals), times
+in RFC 3339 UTC:
 
 ```
 { "schema_version": 1, "session": "work", "windows": [ {
