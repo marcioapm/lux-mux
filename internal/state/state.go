@@ -33,6 +33,10 @@ type Window struct {
 	// its key's source, never the key. Nil (files from before endpoints):
 	// the lux CLI configuration's.
 	Endpoint *config.Endpoint `json:"endpoint,omitempty"`
+	// RenameRun: the Run's name on lux is due to become
+	// config.RunName(session, Name), which a rename that failed or a
+	// session renamed while detached leaves for the next attach.
+	RenameRun bool `json:"renameRun,omitempty"`
 }
 
 // EndpointOr is w's endpoint, def when it has none recorded.
@@ -410,8 +414,9 @@ type Listing struct {
 // RebuildFrom makes a session from what every endpoint lists for it
 // (Runs labelled with the session), for when its file is gone: its
 // non-terminated Runs that are not a waiting warm spare, oldest first.
-// Names are lost: each window is named after its profile. A Run whose
-// spec lux returns gets that spec as its window's (profiles: the
+// A window is named after its Run's name when that is
+// <session>/<window> (windowOfRun), else after its window label (Runs
+// whose spec lux returns) or its profile. A Run whose spec lux returns gets that spec as its window's (profiles: the
 // configuration's, by name). Each window and spare records the endpoint
 // its Run was listed on, and each spare's slot is config.SpareSlot of its
 // spec on that endpoint (def: the lux CLI configuration's). A Run two
@@ -474,13 +479,34 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 		byID[r.ID] = r
 	}
 	for i, w := range s.Windows {
-		if r := byID[w.RunID]; r != nil && r.Spec.Image.Ref != "" {
+		r := byID[w.RunID]
+		if r != nil && r.Spec.Image.Ref != "" {
 			nw := WindowFromRun(r, profiles[w.Profile])
 			nw.Endpoint = w.Endpoint
 			s.Windows[i] = nw
 		}
+		if r != nil {
+			if n, ok := windowOfRun(r, name); ok {
+				s.Windows[i].Name = n
+			}
+		}
 	}
 	return s
+}
+
+// windowOfRun is the window name in Run r's name, when it has the form
+// config.RunName gives in session name or in its Runs' label: the name
+// may have been set on lux by hand, and is honoured. A spare's own name
+// (a claimed spare whose rename never reached lux) names no window.
+func windowOfRun(r *api.Run, name string) (string, bool) {
+	w, ok := config.WindowOfRunName(r.Name, name)
+	if !ok {
+		w, ok = config.WindowOfRunName(r.Name, r.Labels[config.LabelSession])
+	}
+	if ok && r.Labels[config.LabelSpare] == "true" && w == config.SpareWindow {
+		return "", false
+	}
+	return w, ok
 }
 
 // WindowFromRun is the window of a Run luxmux did not record: its spec
