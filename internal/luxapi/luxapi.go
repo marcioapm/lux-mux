@@ -20,19 +20,31 @@ import (
 	"github.com/marcioapm/lux-mux/internal/config"
 )
 
-// Client is a luxd client. noRename: this luxd answered a rename as one
-// without PATCH /v1/runs/{id}; it is not asked again. renameTold: a caller
-// took FirstRenameRefusal's true.
+// Client is a luxd client.
 type Client struct {
-	C          *api.Client
-	noRename   atomic.Bool
-	renameTold atomic.Bool
+	C *api.Client
+}
+
+type renameSupport struct {
+	noRename atomic.Bool
+	told     atomic.Bool
+}
+
+// Capabilities belong to the endpoint, not its credentials or one client.
+// Keeping them here also covers clients recreated after a session switch.
+var renameEndpoints sync.Map
+
+func (c *Client) renameSupport() *renameSupport {
+	key := struct{ URL, Tenant string }{c.C.Base, c.C.Tenant}
+	v, _ := renameEndpoints.LoadOrStore(key, &renameSupport{})
+	return v.(*renameSupport)
 }
 
 // FirstRenameRefusal reports, once, that this luxd cannot rename Runs:
 // true for the first caller after Rename returned ErrRenameUnsupported.
 func (c *Client) FirstRenameRefusal() bool {
-	return c.noRename.Load() && c.renameTold.CompareAndSwap(false, true)
+	s := c.renameSupport()
+	return s.noRename.Load() && s.told.CompareAndSwap(false, true)
 }
 
 // New is a client of cfg's luxd.
@@ -131,7 +143,7 @@ var ErrRenameUnsupported = errors.New("this lux cannot rename Runs")
 // or body: Rename returns ErrRenameUnsupported, then and from then on
 // without asking.
 func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) {
-	if c.noRename.Load() {
+	if c.renameSupport().noRename.Load() {
 		return nil, ErrRenameUnsupported
 	}
 	var r api.Run
@@ -146,7 +158,7 @@ func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) 
 	case !IsStatus(err, http.StatusMethodNotAllowed) && !IsStatus(err, http.StatusUnprocessableEntity):
 		return nil, err
 	}
-	c.noRename.Store(true)
+	c.renameSupport().noRename.Store(true)
 	return nil, ErrRenameUnsupported
 }
 

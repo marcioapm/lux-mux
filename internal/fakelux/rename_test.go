@@ -90,6 +90,13 @@ func TestRenameOldLux(t *testing.T) {
 		if _, err := c.Rename(context.Background(), id, "y"); !errors.Is(err, luxapi.ErrRenameUnsupported) || len(s.Requests()) != n {
 			t.Fatalf("%d: asked again: %v, %v", code, err, s.Requests()[n:])
 		}
+		fresh, _ := luxapi.New(s.Config())
+		if _, err := fresh.Rename(context.Background(), id, "z"); !errors.Is(err, luxapi.ErrRenameUnsupported) || len(s.Requests()) != n {
+			t.Fatalf("%d: a new client forgot the endpoint's capability: %v", code, err)
+		}
+		if !c.FirstRenameRefusal() || fresh.FirstRenameRefusal() {
+			t.Fatal("rename refusal notice is not shared by endpoint")
+		}
 		s.Close()
 	}
 }
