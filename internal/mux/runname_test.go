@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/marcioapm/lux/api"
 
-	"context"
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
@@ -84,8 +84,7 @@ func TestRunNameWaitingSpare(t *testing.T) {
 	h := newHarness(t, cfgSpare, nil)
 	h.live(0)
 	defer h.detach()
-	var id string
-	h.waitFor("waiting spare", func() bool { id = spareOf(h); return id != "" })
+	id := waitSpare(h)
 	if err := h.m.RenameSession("s", "new"); err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +96,7 @@ func TestRunNameSpareRetryAndRecovery(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			h := newHarness(t, cfgSpare, nil)
 			h.live(0)
-			var id string
-			h.waitFor("spare", func() bool { id = spareOf(h); return id != "" })
+			id := waitSpare(h)
 			if mode == "failed" {
 				h.lux.FailRenames(500)
 				if err := h.m.RenameSession("s", "new"); err != nil {
@@ -168,8 +166,7 @@ func TestRunNameSpareClaimOrdering(t *testing.T) {
 			}))
 			h.live(0)
 			defer h.detach()
-			var id string
-			h.waitFor("spare", func() bool { id = spareOf(h); return id != "" })
+			id := waitSpare(h)
 			target.Store(id)
 			if err := h.m.RenameSession("s", "new"); err != nil {
 				t.Fatal(err)
@@ -243,6 +240,13 @@ default_profile = "dev"
 image = "alpine"
 `
 
+// waitSpare is the dev profile's waiting spare, once there is one.
+func waitSpare(h *harness) string {
+	var id string
+	h.waitFor("waiting spare", func() bool { id = spareOf(h); return id != "" })
+	return id
+}
+
 // runName is the name lux has for Run id.
 func runName(h *harness, id string) string { return h.lux.Run(id).Name }
 
@@ -288,8 +292,7 @@ func TestRunNameAtSubmit(t *testing.T) {
 func TestRunNameSpare(t *testing.T) {
 	h := newHarness(t, cfgSpare, nil)
 	h.live(0)
-	var spare string
-	h.waitFor("spare", func() bool { spare = spareOf(h); return spare != "" })
+	spare := waitSpare(h)
 	if got := runName(h, spare); got != "s/spare" {
 		t.Fatalf("waiting spare is named %q", got)
 	}
