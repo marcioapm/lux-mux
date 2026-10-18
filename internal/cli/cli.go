@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -438,9 +439,10 @@ func spares(env Env, rm bool) error {
 	out := ls.Live(func(r *api.Run) bool { return r.Labels[config.LabelSpare] == "true" && !claimed[r.ID] })
 	if !rm {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "RUN\tSESSION\tPROFILE\tSTATE\tLUX")
+		fmt.Fprintln(tw, "RUN\tNAME\tSESSION\tPROFILE\tSTATE\tLUX")
 		for _, s := range out {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", s.Run.ID, s.Run.Labels[config.LabelSession], s.Run.Labels[config.LabelProfile], s.Run.State, s.Endpoint.Label())
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Run.ID, cmp.Or(s.Run.Name, "-"), s.Run.Labels[config.LabelSession],
+				s.Run.Labels[config.LabelProfile], s.Run.State, s.Endpoint.Label())
 		}
 		return tw.Flush()
 	}
