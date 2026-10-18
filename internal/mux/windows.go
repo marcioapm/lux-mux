@@ -361,7 +361,9 @@ func (m *Mux) claimSpare(w *Window) string {
 		slot = config.SpareSlot(config.SpecKey(w.Spec), w.Endpoint, m.eps.Default())
 	}
 	id := ""
-	pendingName := m.sess.SpareRenames[slot]
+	// A session renamed while this claim held the spare leaves a returned
+	// spare due its new <session>/spare name.
+	pendingName, claimedAs := m.sess.SpareRenames[slot], m.name
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
@@ -390,7 +392,7 @@ func (m *Mux) claimSpare(w *Window) string {
 			m.keepLeftoverLocked(w.Endpoint, id, err)
 		} else {
 			m.sess.SetSpare(slot, id, w.Endpoint)
-			if pendingName {
+			if pendingName || m.name != claimedAs {
 				m.sess.MarkSpareRename(slot)
 			}
 			m.saveLocked()
@@ -422,7 +424,7 @@ func (m *Mux) claimSpare(w *Window) string {
 			return ""
 		}
 		m.sess.SetSpare(slot, id, w.Endpoint)
-		if pendingName {
+		if pendingName || m.name != claimedAs {
 			m.sess.MarkSpareRename(slot)
 		}
 		m.saveLocked()
