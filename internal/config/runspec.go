@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/api"
 )
@@ -69,11 +71,52 @@ const Workspace = "/workspace"
 // profile's HomeVolume says so.
 const Home = "/home/agent"
 
-// Target says which session (and profile) a Run is made for.
+// Target says which session (and profile) a Run is made for. Name is the
+// Run's name (RunName); empty, the Run is named luxmux-<Session>, which is
+// also what SpecKey hashes, so the name never changes a key.
 type Target struct {
 	Session string
 	Profile string
+	Name    string
 	Spare   bool
+}
+
+// MaxRunName is the longest Run name lux takes, in bytes.
+const MaxRunName = 200
+
+// SpareWindow stands for the window in a waiting spare's Run name.
+const SpareWindow = "spare"
+
+// RunName is the name of the Run of window window in the session shown as
+// session: "<session>/<window>", each control character replaced by a
+// space and cut to MaxRunName bytes on a character boundary, which lux
+// accepts. Rebuilding a session splits it at the first '/' (session names
+// have none).
+func RunName(session, window string) string {
+	s := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, session+"/"+window)
+	if len(s) <= MaxRunName {
+		return s
+	}
+	n := MaxRunName
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// WindowOfRunName is the window a Run named name says it is of, if that
+// name has the form RunName gives for a session named session.
+func WindowOfRunName(name, session string) (string, bool) {
+	s, w, ok := strings.Cut(name, "/")
+	if !ok || s != session || w == "" {
+		return "", false
+	}
+	return w, true
 }
 
 // RunSpec maps a profile to the spec of a window's Run: a generic tty
@@ -84,8 +127,12 @@ func RunSpec(p Profile, t Target, secrets map[string]string) (api.RunSpec, error
 	if err := p.Validate(); err != nil {
 		return api.RunSpec{}, err
 	}
+	name := t.Name
+	if name == "" {
+		name = "luxmux-" + t.Session
+	}
 	sp := api.RunSpec{
-		Name:   "luxmux-" + t.Session,
+		Name:   name,
 		Labels: map[string]string{},
 		Image:  api.Image{Ref: p.Image},
 		Workload: api.Workload{
