@@ -55,7 +55,7 @@ through profile `secrets` and allow the required provider hosts in `egress`.
 | `luxmux ls` | list sessions: windows, running Runs, spares |
 | `luxmux info [-t NAME] [WINDOW] [--json]` | each window's Run: image, placement, times, cost, resources in use (see [Window info](#window-info)) |
 | `luxmux kill-session -t NAME [-y]` | terminate the session's Runs (after asking) and forget it |
-| `luxmux spares [--rm]` | list waiting warm spares; `--rm` terminates them |
+| `luxmux spares [--rm]` | list waiting warm spares (with their Run names); `--rm` terminates them |
 | `luxmux config init [--force]` | write the example configuration |
 
 `new` and `new-window` take a profile (`-p`) and overrides of it for that
@@ -131,6 +131,32 @@ repository@branch (the first, and `+N` for N more) and age; arrows or `j`/`k` mo
 filters as you type, `,` renames, `x` kills (with confirmation), Esc or `q`
 closes. The lower part previews the highlighted window's screen.
 
+**Run names.** Each window's Run is named `<session>/<window>` on lux
+(e.g. `work/api`), so `lux ls`, the lux console and `luxmux info` show it.
+The Run is submitted with that name, and renaming the window (`C-b ,`, the
+chooser's `,`) or the session (`$`) renames it. A waiting warm spare is
+named `<session>/spare` and follows session renames without restarting its
+workload; a window that claims it renames it once any older spare rename
+has finished. Control characters become spaces and the name is cut to
+lux's 200 bytes. Labels never change: a renamed session's Runs keep their
+`luxmux-session` label (see below).
+
+Renames are best effort and off the keyboard path. Each has a 5 s deadline,
+queueing included, and at most eight rename calls run at once per lux URL
+and tenant. A rename that fails stays recorded and is sent at the next
+attach; a newer name given meanwhile is sent at once, but an unchanged
+failure is not retried in a loop. Only HTTP 405, or 404 followed by a
+successful GET of the Run, means lux cannot rename Runs; a 422 rejects that
+one name only. One request per endpoint finds this out while others wait.
+A lux from before Run renames keeps the names Runs were made with: luxmux
+stops asking it and shows one notice, at the first rename you make there.
+What luxmux learns about an endpoint is shared across the process by URL
+and tenant (not credentials) and kept for at most 256 endpoints: an idle
+entry expires after ten minutes, or is evicted least recently used first
+when the table is full, and is then learned again; an entry in use is
+never evicted, and a caller for a new endpoint waits while all 256 are in
+use.
+
 ## Sessions inside luxmux
 
 One luxmux shows one session at a time, and can move between them
@@ -175,7 +201,9 @@ session sees it ended.
 session's file. lux cannot change the labels of a Run, so the session's
 Runs (and the windows it makes later) keep the `luxmux-session` label of
 the name they were made under; `$XDG_STATE_HOME/luxmux/.renames.json`
-maps the new name to it. `ls`, `attach`, `new-window` and `kill-session`
+maps the new name to it. The Runs' names do change: each becomes
+`<new name>/<window>` (at once for the session attached here, at its next
+attach for another). `ls`, `attach`, `new-window` and `kill-session`
 follow the map, on every lux, and a session rebuilt from its Runs on
 every lux after its file is gone gets its new name, as long as that map is
 there. The old name stays taken
@@ -507,8 +535,11 @@ Runs, with no session file) when a lux could not be listed. The text is
 
 `--json` prints one object with `snake_case` keys. `index`, `name`,
 `session` and `endpoint` are always there; any other field is left out
-when unknown. Numbers are numbers (bytes, cores,
-seconds; cost amounts as lux's decimals), times in RFC 3339 UTC:
+when unknown. `name` is the window's name in luxmux; `run.name` is the
+Run's name on lux (`<session>/<window>`, see **Run names** under
+[Keys](#keys)), as is the `name` line of the text's Run section. Numbers
+are numbers (bytes, cores, seconds; cost amounts as lux's decimals), times
+in RFC 3339 UTC:
 
 ```
 { "schema_version": 1, "session": "work", "windows": [ {
@@ -641,10 +672,16 @@ rebuilds the session from lux: its non-terminated Runs, ordered by
 creation, each with its Run's spec (all its repositories included). A
 window's size, cpus, memory and disk come from what it asked
 (`luxmux-resources`, e.g. `cpus=4`, or lux's `sizing.requested` on a
-shaped pool), never from the defaults lux fills in. That
-rebuild is lossy: window names become their profile names (or the name
-`new-window -n` gave), the session's default profile is forgotten, and of
-several spares of one spec the newest is taken to be the waiting one.
+shaped pool), never from the defaults lux fills in. A window takes its
+name from its Run's name when that is `<session>/<window>` for the
+session's name or its Runs' label (split at the first `/`, so a window
+name may hold one): a name you set on lux by hand in that form is
+honoured, and a Run named otherwise keeps its name and gives its window
+the profile's name (or the name `new-window -n` gave). The rest of the
+rebuild is lossy: the session's default profile is forgotten, and of
+several spares of one spec the newest is taken to be the waiting one. A
+Run still named as luxmux named Runs before (`luxmux-<session>`) is
+renamed to `<session>/<window>` when its window attaches.
 
 One luxmux process attaches a session at a time: a second `luxmux attach`
 of an attached session fails, naming the process that has it. Switching

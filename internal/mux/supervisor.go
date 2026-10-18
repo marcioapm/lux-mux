@@ -500,6 +500,13 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 	w.tail.Reset()
 	w.hasScreen = true
 	m.sendNameLocked(w)
+	// A Run named as luxmux named every Run before window names reached
+	// lux, or a claimed spare still named as one, is renamed; a name set
+	// on lux by hand is left as it is.
+	if (run.Name == "luxmux-"+m.label || run.Name == m.spareRunNameLocked()) && run.Name != m.runNameLocked(w) {
+		w.runNamePending = true
+	}
+	m.sendRunNameLocked(w)
 	active := m.showingLocked(w)
 	raw := restoring && firstHere && active
 	if raw {

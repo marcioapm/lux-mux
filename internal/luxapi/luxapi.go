@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -21,6 +23,121 @@ import (
 
 // Client is a luxd client.
 type Client struct{ C *api.Client }
+
+// renameSupport is what is known of one endpoint's rename API, shared by
+// every Client of that endpoint (URL and tenant).
+type renameSupport struct {
+	mu sync.Mutex
+	// known: a PATCH succeeded or proved the route missing; noRename: lux has no rename
+	// route; told: FirstRenameRefusal has reported it.
+	known, noRename, told bool
+	// probing is non-nil while one caller's PATCH decides known; it is
+	// closed and reset on every path the prober returns by.
+	probing chan struct{}
+	// slots bounds the endpoint's concurrent PATCHes to renameSlots.
+	slots chan struct{}
+	// refs and used are guarded by renameEndpoints, not mu.
+	refs int
+	used time.Time
+}
+
+type renameKey struct{ URL, Tenant string }
+
+func (c *Client) renameKey() renameKey {
+	return renameKey{strings.TrimRight(c.C.Base, "/"), c.C.Tenant}
+}
+
+const (
+	renameCapacity = 256
+	renameTTL      = 10 * time.Minute
+	renameSlots    = 8
+)
+
+// renameEndpoints holds at most renameCapacity entries. An entry with
+// refs>0 is never expired or evicted, so its callers always share one
+// semaphore and one probe; while every entry is referenced, a caller of a
+// new endpoint waits on changed (closed and replaced at each release).
+var renameEndpoints = struct {
+	sync.Mutex
+	entries map[renameKey]*renameSupport
+	changed chan struct{}
+}{entries: make(map[renameKey]*renameSupport), changed: make(chan struct{})}
+
+// renameSupport is c's endpoint's entry with a reference held; the caller
+// releases it with releaseRenameSupport.
+func (c *Client) renameSupport(ctx context.Context) (*renameSupport, error) {
+	key := c.renameKey()
+	for {
+		renameEndpoints.Lock()
+		now := time.Now()
+		for k, s := range renameEndpoints.entries {
+			if s.refs == 0 && now.Sub(s.used) >= renameTTL {
+				delete(renameEndpoints.entries, k)
+			}
+		}
+		s := renameEndpoints.entries[key]
+		if s == nil && len(renameEndpoints.entries) >= renameCapacity {
+			// Evict the least recently used idle entry, if there is one.
+			var oldest renameKey
+			var at time.Time
+			for k, v := range renameEndpoints.entries {
+				if v.refs == 0 && (at.IsZero() || v.used.Before(at)) {
+					oldest, at = k, v.used
+				}
+			}
+			if !at.IsZero() {
+				delete(renameEndpoints.entries, oldest)
+			}
+		}
+		if s == nil && len(renameEndpoints.entries) < renameCapacity {
+			s = &renameSupport{slots: make(chan struct{}, renameSlots)}
+			renameEndpoints.entries[key] = s
+		}
+		if s != nil {
+			s.refs++
+			s.used = now
+			renameEndpoints.Unlock()
+			return s, nil
+		}
+		changed := renameEndpoints.changed
+		renameEndpoints.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func releaseRenameSupport(s *renameSupport) {
+	renameEndpoints.Lock()
+	s.refs--
+	s.used = time.Now()
+	close(renameEndpoints.changed)
+	renameEndpoints.changed = make(chan struct{})
+	renameEndpoints.Unlock()
+}
+
+// FirstRenameRefusal is true once per retained endpoint entry: the first
+// time it is asked after Rename found the endpoint without a rename route.
+func (c *Client) FirstRenameRefusal() bool {
+	renameEndpoints.Lock()
+	s := renameEndpoints.entries[c.renameKey()]
+	if s == nil {
+		renameEndpoints.Unlock()
+		return false
+	}
+	s.refs++
+	renameEndpoints.Unlock()
+	defer releaseRenameSupport(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.noRename || s.told {
+		return false
+	}
+	s.told = true
+	return true
+}
 
 // New is a client of cfg's luxd.
 func New(cfg api.Config) (*Client, error) {
@@ -104,6 +221,86 @@ func (c *Client) Validate(ctx context.Context, sp api.RunSpec) (*api.SubmitAnswe
 func (c *Client) Get(ctx context.Context, id string) (*api.Run, error) {
 	var r api.Run
 	if err := c.C.Do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(id), nil, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ErrRenameUnsupported is Rename's error for a luxd without
+// PATCH /v1/runs/{id}.
+var ErrRenameUnsupported = errors.New("this lux cannot rename Runs")
+
+// Rename sets Run id's name. Until the endpoint's support is known, one
+// caller probes and the others wait for it. Only 405, or 404 followed by a
+// successful GET of the Run, proves the route missing; 422, other errors
+// and a cancelled probe leave support unknown, so the next call probes.
+func (c *Client) Rename(ctx context.Context, id, name string) (*api.Run, error) {
+	s, err := c.renameSupport(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRenameSupport(s)
+	probe := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.noRename {
+			s.mu.Unlock()
+			return nil, ErrRenameUnsupported
+		}
+		if s.known {
+			s.mu.Unlock()
+			break
+		}
+		if s.probing == nil {
+			s.probing = make(chan struct{})
+			probe = true
+			s.mu.Unlock()
+			break
+		}
+		done := s.probing
+		s.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if probe {
+		// Waiters re-check known on close, whatever this call returns.
+		defer func() { s.mu.Lock(); close(s.probing); s.probing = nil; s.mu.Unlock() }()
+	}
+	select {
+	case s.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.slots }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var r api.Run
+	err = c.C.Do(ctx, http.MethodPatch, "/v1/runs/"+url.PathEscape(id), map[string]string{"name": name}, &r)
+	unsupported := IsStatus(err, http.StatusMethodNotAllowed)
+	if IsStatus(err, http.StatusNotFound) {
+		_, gerr := c.Get(ctx, id)
+		unsupported = gerr == nil
+	}
+	s.mu.Lock()
+	if err == nil {
+		s.known = true
+	}
+	if unsupported {
+		s.known = true
+		s.noRename = true
+	}
+	s.mu.Unlock()
+	if unsupported {
+		return nil, ErrRenameUnsupported
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &r, nil

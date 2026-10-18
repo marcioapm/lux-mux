@@ -33,6 +33,10 @@ type Window struct {
 	// its key's source, never the key. Nil (files from before endpoints):
 	// the lux CLI configuration's.
 	Endpoint *config.Endpoint `json:"endpoint,omitempty"`
+	// RenameRun: the Run's name on lux is due to become
+	// config.RunName(session, Name), which a rename that failed or a
+	// session renamed while detached leaves for the next attach.
+	RenameRun bool `json:"renameRun,omitempty"`
 }
 
 // EndpointOr is w's endpoint, def when it has none recorded.
@@ -63,6 +67,9 @@ type Session struct {
 	// lacks (files from before every slot recorded one) is the lux CLI
 	// configuration's at read time.
 	SpareEndpoints map[string]config.Endpoint `json:"spareEndpoints,omitempty"`
+	// SpareRenames are the slots whose spare is due a rename to
+	// config.RunName(Name, config.SpareWindow).
+	SpareRenames map[string]bool `json:"spareRenames,omitempty"`
 	// Unlisted are endpoints the session's Runs could not be listed on
 	// when it was rebuilt: their windows are added once one answers.
 	Unlisted []config.Endpoint `json:"unlisted,omitempty"`
@@ -410,9 +417,10 @@ type Listing struct {
 // RebuildFrom makes a session from what every endpoint lists for it
 // (Runs labelled with the session), for when its file is gone: its
 // non-terminated Runs that are not a waiting warm spare, oldest first.
-// Names are lost: each window is named after its profile. A Run whose
-// spec lux returns gets that spec as its window's (profiles: the
-// configuration's, by name). Each window and spare records the endpoint
+// A window is named after its Run's name when that is <session>/<window>
+// (windowOfRun), else after its window label (Runs whose spec lux
+// returns) or its profile. A Run whose spec lux returns gets that spec as
+// its window's (profiles: the configuration's, by name). Each window and spare records the endpoint
 // its Run was listed on, and each spare's slot is config.SpareSlot of its
 // spec on that endpoint (def: the lux CLI configuration's). A Run two
 // endpoints list (one lux, two key sources) is taken from the first.
@@ -464,6 +472,9 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 				s.Windows = append(s.Windows, window(prev, prof))
 			}
 			s.SetSpare(key, r.ID, epOf[r.ID])
+			if name != label && r.Name != config.RunName(name, config.SpareWindow) {
+				s.MarkSpareRename(key)
+			}
 			continue
 		}
 		s.Windows = append(s.Windows, window(r.ID, prof))
@@ -474,13 +485,31 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 		byID[r.ID] = r
 	}
 	for i, w := range s.Windows {
-		if r := byID[w.RunID]; r != nil && r.Spec.Image.Ref != "" {
+		r := byID[w.RunID]
+		if r != nil && r.Spec.Image.Ref != "" {
 			nw := WindowFromRun(r, profiles[w.Profile])
 			nw.Endpoint = w.Endpoint
 			s.Windows[i] = nw
 		}
+		if r != nil {
+			if n, ok := windowOfRun(r, name); ok {
+				s.Windows[i].Name = n
+				s.Windows[i].RenameRun = name != label && r.Name != config.RunName(name, n)
+			}
+		}
 	}
 	return s
+}
+
+// windowOfRun is the window name in Run r's name, when it has the form
+// config.RunName gives in session name or in its Runs' label: the name
+// may have been set on lux by hand, and is honoured.
+func windowOfRun(r *api.Run, name string) (string, bool) {
+	w, ok := config.WindowOfRunName(r.Name, name)
+	if !ok {
+		w, ok = config.WindowOfRunName(r.Name, r.Labels[config.LabelSession])
+	}
+	return w, ok
 }
 
 // WindowFromRun is the window of a Run luxmux did not record: its spec
@@ -639,10 +668,32 @@ func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
 	s.SpareEndpoints[slot] = ep
 }
 
-// DropSpare forgets slot's spare and its endpoint.
+// MarkRunRenames makes every window's Run and every waiting spare due a
+// rename, for a session renamed.
+func (s *Session) MarkRunRenames() {
+	for i := range s.Windows {
+		s.Windows[i].RenameRun = true
+	}
+	for slot, id := range s.Spares {
+		if id != "" && !IsLeftover(slot) {
+			s.MarkSpareRename(slot)
+		}
+	}
+}
+
+// MarkSpareRename makes slot's spare due a rename to <session>/spare.
+func (s *Session) MarkSpareRename(slot string) {
+	if s.SpareRenames == nil {
+		s.SpareRenames = map[string]bool{}
+	}
+	s.SpareRenames[slot] = true
+}
+
+// DropSpare forgets slot's spare, its endpoint and any rename due.
 func (s *Session) DropSpare(slot string) {
 	delete(s.Spares, slot)
 	delete(s.SpareEndpoints, slot)
+	delete(s.SpareRenames, slot)
 }
 
 // SpareEndpoint is the endpoint slot's spare lives on; def when the file

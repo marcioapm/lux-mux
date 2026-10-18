@@ -66,6 +66,8 @@ func (m *Mux) launch(w *Window) {
 		w.RunID = id
 		m.byRun[id] = w
 		w.steps.note("claimed warm spare " + id)
+		// The spare was named <session>/spare: it takes the window's name.
+		m.renameRunLocked(w, false)
 		m.saveLocked()
 		m.startSupervisor(w)
 		m.mu.Unlock()
@@ -78,14 +80,14 @@ func (m *Mux) launch(w *Window) {
 		return
 	}
 	m.mu.Lock()
-	spec, profile := w.Spec, w.Profile
+	spec, profile, runName := w.Spec, w.Profile, m.runNameLocked(w)
 	m.mu.Unlock()
 	secrets, err := spec.ResolveSecrets(m.opt.Lookup)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
 	}
-	sp, err := config.RunSpec(spec, config.Target{Session: m.label, Profile: profile}, secrets)
+	sp, err := config.RunSpec(spec, config.Target{Session: m.label, Profile: profile, Name: runName}, secrets)
 	if err != nil {
 		m.markDead(w, err.Error())
 		return
@@ -123,6 +125,11 @@ func (m *Mux) launch(w *Window) {
 	w.reason = ""
 	m.byRun[run.ID] = w
 	w.steps.note("submitted " + run.ID)
+	// A rename while the submit was in flight.
+	if runName != m.runNameLocked(w) {
+		w.runNamePending = true
+	}
+	m.sendRunNameLocked(w)
 	m.startSupervisor(w)
 	m.saveLocked()
 	m.mu.Unlock()
@@ -301,6 +308,9 @@ func (m *Mux) relaunch(w *Window) {
 		w.cancel()
 		w.cancel = nil
 	}
+	if w.runNameCancel != nil {
+		w.runNameCancel()
+	}
 	delete(m.byRun, old)
 	m.considerLocked(w.Endpoint, old)
 	m.dropClaimedLocked(old)
@@ -309,6 +319,8 @@ func (m *Mux) relaunch(w *Window) {
 	}
 	w.RunID = ""
 	w.nameSent = ""
+	// The new Run is submitted with the window's name.
+	w.runNamePending, w.runNameByUser = false, false
 	w.phase = phaseStarting
 	w.reason = ""
 	w.resumable = false
@@ -349,6 +361,16 @@ func (m *Mux) claimSpare(w *Window) string {
 		slot = config.SpareSlot(config.SpecKey(w.Spec), w.Endpoint, m.eps.Default())
 	}
 	id := ""
+	// A spare handed back stays due a rename if it was before the claim,
+	// and becomes due if the session was renamed while the claim held it.
+	pendingName, claimedAs := m.sess.SpareRenames[slot], m.name
+	handBackLocked := func() {
+		m.sess.SetSpare(slot, id, w.Endpoint)
+		if pendingName || m.name != claimedAs {
+			m.sess.MarkSpareRename(slot)
+		}
+		m.saveLocked()
+	}
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
@@ -376,8 +398,7 @@ func (m *Mux) claimSpare(w *Window) string {
 		if _, taken := m.sess.Spares[slot]; taken || m.ending {
 			m.keepLeftoverLocked(w.Endpoint, id, err)
 		} else {
-			m.sess.SetSpare(slot, id, w.Endpoint)
-			m.saveLocked()
+			handBackLocked()
 		}
 		m.mu.Unlock()
 		return ""
@@ -405,8 +426,7 @@ func (m *Mux) claimSpare(w *Window) string {
 			m.retire(w.Endpoint, id)
 			return ""
 		}
-		m.sess.SetSpare(slot, id, w.Endpoint)
-		m.saveLocked()
+		handBackLocked()
 		m.mu.Unlock()
 		return ""
 	}
@@ -481,12 +501,14 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		return
 	}
 	if _, ok := m.sess.Spares[slot]; ok {
+		m.sendSpareNamesLocked()
 		m.mu.Unlock()
 		return
 	}
 	// Reserved while submitting; the endpoint is recorded for every slot,
 	// the default lux's too, which may be another at the next attach.
 	m.sess.SetSpare(slot, "", ep)
+	spareName := m.spareRunNameLocked()
 	m.mu.Unlock()
 	lux, err := m.eps.Client(ep)
 	var run *api.Run
@@ -495,7 +517,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		secrets, err = p.ResolveSecrets(m.opt.Lookup)
 		if err == nil {
 			var sp api.RunSpec
-			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Spare: true}, secrets)
+			sp, err = config.RunSpec(p, config.Target{Session: m.label, Profile: name, Name: spareName, Spare: true}, secrets)
 			if err == nil {
 				// Not cancelled by a detach at once: lux may make the Run,
 				// and luxmux must learn its id to record it. A switch does
@@ -524,6 +546,10 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		return
 	}
 	m.sess.Spares[slot] = run.ID
+	if spareName != m.spareRunNameLocked() {
+		m.sess.MarkSpareRename(slot)
+		m.sendSpareNameLocked(slot)
+	}
 	m.saveLocked()
 }
 

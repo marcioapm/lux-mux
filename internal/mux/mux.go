@@ -159,6 +159,8 @@ type Mux struct {
 	// listing of one endpoint prunes only its own.
 	consideredOn map[string]config.Endpoint
 	byRun        map[string]*Window
+	// spareNames: Run IDs with a spare rename in flight (sendSpareNameLocked).
+	spareNames map[string]bool
 	// feeds are the endpoints whose event stream is followed: one each.
 	feeds map[config.Endpoint]bool
 	// listed is closed for an endpoint once its first listing of the
@@ -289,6 +291,7 @@ func (m *Mux) addWindowLocked(sw state.Window, profiles map[string]config.Profil
 	}
 	w := m.newWindow(sw.Name, sw.Profile, spec, ep)
 	w.RunID = sw.RunID
+	w.runNamePending = sw.RenameRun
 	m.windows = append(m.windows, w)
 	m.byRun[w.RunID] = w
 	return w
@@ -408,6 +411,7 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	for _, ep := range eps {
 		m.followEndpointLocked(ep)
 	}
+	m.sendSpareNamesLocked()
 	m.repaintLocked()
 	m.saveLocked()
 	if m.opt.Notice != "" {
@@ -785,7 +789,8 @@ func (m *Mux) saveLocked() {
 		}
 		spec := w.Spec
 		ep := w.Endpoint
-		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep})
+		s.Windows = append(s.Windows, state.Window{RunID: w.RunID, Name: w.Name, Profile: w.Profile, Spec: &spec, Endpoint: &ep,
+			RenameRun: w.runNamePending})
 	}
 	s.Active, s.Last = m.active, m.last
 	if m.opt.StateDir != "" {
@@ -931,6 +936,7 @@ func (m *Mux) Rename(i int, name string) {
 	if i >= 0 && i < len(m.windows) && name != "" {
 		m.windows[i].Name = name
 		m.sendNameLocked(m.windows[i])
+		m.renameRunLocked(m.windows[i], true)
 		m.saveLocked()
 	}
 }
@@ -978,6 +984,9 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) error {
 	}
 	if c := w.getConn(); c != nil {
 		c.CloseNow()
+	}
+	if w.runNameCancel != nil {
+		w.runNameCancel()
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)

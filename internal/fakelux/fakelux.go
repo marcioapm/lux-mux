@@ -125,6 +125,10 @@ type Server struct {
 	// failTerms: the status every terminate is answered with, 0 for none
 	// (FailTerminates).
 	failTerms int
+	// failRenames: the status every rename is answered with, 0 for none
+	// (FailRenames); renames: those taken.
+	failRenames int
+	renames     []RenameReq
 	// reqs are the requests received, "METHOD path" as sent.
 	reqs []string
 	// key is the one API key accepted; refused counts requests without it.
@@ -259,6 +263,7 @@ func NewWithKey(key string) *Server {
 	mux.HandleFunc("POST /v1/runs", s.submit)
 	mux.HandleFunc("GET /v1/runs", s.list)
 	mux.HandleFunc("GET /v1/runs/{id}", s.get)
+	mux.HandleFunc("PATCH /v1/runs/{id}", s.rename)
 	mux.HandleFunc("POST /v1/runs/{id}/terminate", s.terminate)
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resume)
 	mux.HandleFunc("GET /v1/runs/{id}/attach", s.attach)

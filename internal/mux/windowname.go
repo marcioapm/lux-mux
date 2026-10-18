@@ -3,14 +3,18 @@ package mux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/marcioapm/lux-mux/internal/config"
+	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
-// nameWriteFor bounds one write of a window's name into its Run.
+// nameWriteFor bounds one write of a window's name into its Run, and one
+// rename of its Run on lux.
 const nameWriteFor = 5 * time.Second
 
 // sendNameLocked writes w's name into its Run's .luxmux files (lux's exec
@@ -66,3 +70,135 @@ func envName(name string) string {
 }
 
 var errExecFailed = errors.New("writing the window name failed")
+
+// runNameLocked is the name w's Run is given on lux: the session's name
+// now and the window's.
+func (m *Mux) runNameLocked(w *Window) string { return config.RunName(m.name, w.Name) }
+
+// spareRunNameLocked is the name a waiting spare is given on lux.
+func (m *Mux) spareRunNameLocked() string { return config.RunName(m.name, config.SpareWindow) }
+
+// renameRunLocked marks w's Run as due a rename to runNameLocked and sends
+// it. byUser: the user renamed the window or the session, so a lux that
+// cannot rename is told of once (sendRunNameLocked).
+func (m *Mux) renameRunLocked(w *Window, byUser bool) {
+	w.runNamePending = true
+	w.runNameByUser = w.runNameByUser || byUser
+	m.sendRunNameLocked(w)
+}
+
+// sendRunNameLocked renames w's Run on lux, off the lock, while a rename
+// is due and none is in flight; the rename that ends checks again, so the
+// last rename wins. One that fails stays due, in the session file too, and
+// is sent at the next attach (beginAttach). A lux without the rename API
+// ends it: luxapi.Client remembers that per endpoint and asks no more, and
+// the first rename the user made there gets one notice in this process;
+// renames luxmux makes by itself (a claimed spare) get none.
+func (m *Mux) sendRunNameLocked(w *Window) {
+	if w.closed || m.indexLocked(w) < 0 || m.ctx.Err() != nil || m.ending || w.RunID == "" || w.runNameSending || !w.runNamePending || m.spareNames[w.RunID] {
+		return
+	}
+	id, ep, name, byUser := w.RunID, w.Endpoint, m.runNameLocked(w), w.runNameByUser
+	w.runNameSending, w.runNameByUser = true, false
+	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
+	w.runNameCancel = cancel
+	m.goSafe(func() {
+		defer cancel()
+		err := m.renameRun(ctx, ep, id, name)
+		unsupported := errors.Is(err, luxapi.ErrRenameUnsupported)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		w.runNameSending = false
+		live := m.ctx.Err() == nil && !m.ending
+		if w.RunID != id {
+			// Relaunched meanwhile: the new Run's rename may be due.
+			if live {
+				m.sendRunNameLocked(w)
+			}
+			return
+		}
+		switch {
+		case unsupported:
+			w.runNamePending = false
+			if byUser && live {
+				if lux, cerr := m.eps.Client(ep); cerr == nil && lux.FirstRenameRefusal() {
+					m.setNoticeLocked(fmt.Sprintf("%s cannot rename Runs: they keep the names they were made with", ep.Label()))
+				}
+			}
+		case err != nil:
+			w.runNameByUser = w.runNameByUser || byUser
+			if live && name != m.runNameLocked(w) {
+				m.sendRunNameLocked(w)
+			}
+			return
+		case name == m.runNameLocked(w):
+			w.runNamePending = false
+		}
+		if live {
+			m.saveLocked()
+			m.sendRunNameLocked(w)
+		}
+	})
+}
+
+func (m *Mux) renameRun(ctx context.Context, ep config.Endpoint, id, name string) error {
+	lux, err := m.eps.Client(ep)
+	if err != nil {
+		return err
+	}
+	_, err = lux.Rename(ctx, id, name)
+	return err
+}
+
+// sendSpareNamesLocked sends every spare rename due (state.Session's
+// SpareRenames).
+func (m *Mux) sendSpareNamesLocked() {
+	for slot := range m.sess.SpareRenames {
+		m.sendSpareNameLocked(slot)
+	}
+}
+
+// sendSpareNameLocked renames slot's waiting spare to spareRunNameLocked,
+// off the lock. spareNames[id] marks the flight until it completes: a
+// claim meanwhile hands the Run to its window, whose sendRunNameLocked
+// waits for the marker so an older <session>/spare PATCH cannot land after
+// the window's name; the completion then sends the window's. A spare still
+// waiting stays due until a rename to the latest name succeeds or lux
+// cannot rename; a spare retired or replaced meanwhile is left alone.
+func (m *Mux) sendSpareNameLocked(slot string) {
+	id := m.sess.Spares[slot]
+	if id == "" || state.IsLeftover(slot) || !m.sess.SpareRenames[slot] || m.spareNames[id] || m.ending || m.ctx.Err() != nil {
+		return
+	}
+	if m.spareNames == nil {
+		m.spareNames = map[string]bool{}
+	}
+	m.spareNames[id] = true
+	name, ep := m.spareRunNameLocked(), m.sess.SpareEndpoint(slot, m.eps.Default())
+	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
+	m.goSafe(func() {
+		defer cancel()
+		err := m.renameRun(ctx, ep, id, name)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.spareNames, id)
+		if m.ctx.Err() != nil || m.ending {
+			return
+		}
+		if w := m.byRun[id]; w != nil {
+			m.sendRunNameLocked(w)
+			return
+		}
+		if m.sess.Spares[slot] != id {
+			return
+		}
+		latest := m.spareRunNameLocked()
+		if errors.Is(err, luxapi.ErrRenameUnsupported) || (err == nil && name == latest) {
+			delete(m.sess.SpareRenames, slot)
+		}
+		m.saveLocked()
+		if name != latest {
+			m.sendSpareNameLocked(slot)
+		}
+	})
+}
