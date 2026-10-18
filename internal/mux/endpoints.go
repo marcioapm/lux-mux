@@ -229,7 +229,7 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 			continue
 		}
 		m.sess.SetSpare(slot, r.ID, ep)
-		if r.Name != config.RunName(m.name, config.SpareWindow) {
+		if r.Name != m.spareRunNameLocked() {
 			m.sess.MarkSpareRename(slot)
 		}
 	}

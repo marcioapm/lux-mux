@@ -159,7 +159,8 @@ type Mux struct {
 	// listing of one endpoint prunes only its own.
 	consideredOn map[string]config.Endpoint
 	byRun        map[string]*Window
-	spareNames   map[string]bool
+	// spareNames: Run IDs with a spare rename in flight (sendSpareNameLocked).
+	spareNames map[string]bool
 	// feeds are the endpoints whose event stream is followed: one each.
 	feeds map[config.Endpoint]bool
 	// listed is closed for an endpoint once its first listing of the

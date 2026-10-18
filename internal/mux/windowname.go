@@ -75,6 +75,9 @@ var errExecFailed = errors.New("writing the window name failed")
 // now and the window's.
 func (m *Mux) runNameLocked(w *Window) string { return config.RunName(m.name, w.Name) }
 
+// spareRunNameLocked is the name a waiting spare is given on lux.
+func (m *Mux) spareRunNameLocked() string { return config.RunName(m.name, config.SpareWindow) }
+
 // renameRunLocked marks w's Run as due a rename to runNameLocked and sends
 // it. byUser: the user renamed the window or the session, so a lux that
 // cannot rename is told of once (sendRunNameLocked).
@@ -147,14 +150,21 @@ func (m *Mux) renameRun(ctx context.Context, ep config.Endpoint, id, name string
 	return err
 }
 
-// A spare flight holds ownership until its completion. Claim transfers the
-// target, but the window sender waits here so an older PATCH cannot win.
+// sendSpareNamesLocked sends every spare rename due (state.Session's
+// SpareRenames).
 func (m *Mux) sendSpareNamesLocked() {
 	for slot := range m.sess.SpareRenames {
 		m.sendSpareNameLocked(slot)
 	}
 }
 
+// sendSpareNameLocked renames slot's waiting spare to spareRunNameLocked,
+// off the lock. spareNames[id] marks the flight until it completes: a
+// claim meanwhile hands the Run to its window, whose sendRunNameLocked
+// waits for the marker so an older <session>/spare PATCH cannot land after
+// the window's name; the completion then sends the window's. A spare still
+// waiting stays due until a rename to the latest name succeeds or lux
+// cannot rename; a spare retired or replaced meanwhile is left alone.
 func (m *Mux) sendSpareNameLocked(slot string) {
 	id := m.sess.Spares[slot]
 	if id == "" || state.IsLeftover(slot) || !m.sess.SpareRenames[slot] || m.spareNames[id] || m.ending || m.ctx.Err() != nil {
@@ -164,7 +174,7 @@ func (m *Mux) sendSpareNameLocked(slot string) {
 		m.spareNames = map[string]bool{}
 	}
 	m.spareNames[id] = true
-	name, ep := config.RunName(m.name, config.SpareWindow), m.sess.SpareEndpoint(slot, m.eps.Default())
+	name, ep := m.spareRunNameLocked(), m.sess.SpareEndpoint(slot, m.eps.Default())
 	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
 	m.goSafe(func() {
 		defer cancel()
@@ -182,7 +192,7 @@ func (m *Mux) sendSpareNameLocked(slot string) {
 		if m.sess.Spares[slot] != id {
 			return
 		}
-		latest := config.RunName(m.name, config.SpareWindow)
+		latest := m.spareRunNameLocked()
 		if errors.Is(err, luxapi.ErrRenameUnsupported) || (err == nil && name == latest) {
 			delete(m.sess.SpareRenames, slot)
 		}

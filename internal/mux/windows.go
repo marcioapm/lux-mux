@@ -361,9 +361,16 @@ func (m *Mux) claimSpare(w *Window) string {
 		slot = config.SpareSlot(config.SpecKey(w.Spec), w.Endpoint, m.eps.Default())
 	}
 	id := ""
-	// A session renamed while this claim held the spare leaves a returned
-	// spare due its new <session>/spare name.
+	// A spare handed back stays due a rename if it was before the claim,
+	// and becomes due if the session was renamed while the claim held it.
 	pendingName, claimedAs := m.sess.SpareRenames[slot], m.name
+	handBackLocked := func() {
+		m.sess.SetSpare(slot, id, w.Endpoint)
+		if pendingName || m.name != claimedAs {
+			m.sess.MarkSpareRename(slot)
+		}
+		m.saveLocked()
+	}
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
@@ -391,11 +398,7 @@ func (m *Mux) claimSpare(w *Window) string {
 		if _, taken := m.sess.Spares[slot]; taken || m.ending {
 			m.keepLeftoverLocked(w.Endpoint, id, err)
 		} else {
-			m.sess.SetSpare(slot, id, w.Endpoint)
-			if pendingName || m.name != claimedAs {
-				m.sess.MarkSpareRename(slot)
-			}
-			m.saveLocked()
+			handBackLocked()
 		}
 		m.mu.Unlock()
 		return ""
@@ -423,11 +426,7 @@ func (m *Mux) claimSpare(w *Window) string {
 			m.retire(w.Endpoint, id)
 			return ""
 		}
-		m.sess.SetSpare(slot, id, w.Endpoint)
-		if pendingName || m.name != claimedAs {
-			m.sess.MarkSpareRename(slot)
-		}
-		m.saveLocked()
+		handBackLocked()
 		m.mu.Unlock()
 		return ""
 	}
@@ -509,7 +508,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 	// Reserved while submitting; the endpoint is recorded for every slot,
 	// the default lux's too, which may be another at the next attach.
 	m.sess.SetSpare(slot, "", ep)
-	spareName := config.RunName(m.name, config.SpareWindow)
+	spareName := m.spareRunNameLocked()
 	m.mu.Unlock()
 	lux, err := m.eps.Client(ep)
 	var run *api.Run
@@ -547,7 +546,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		return
 	}
 	m.sess.Spares[slot] = run.ID
-	if spareName != config.RunName(m.name, config.SpareWindow) {
+	if spareName != m.spareRunNameLocked() {
 		m.sess.MarkSpareRename(slot)
 		m.sendSpareNameLocked(slot)
 	}

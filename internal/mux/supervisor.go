@@ -503,7 +503,7 @@ func (m *Mux) beginAttach(w *Window, run *api.Run, restoring bool) bool {
 	// A Run named as luxmux named every Run before window names reached
 	// lux, or a claimed spare still named as one, is renamed; a name set
 	// on lux by hand is left as it is.
-	if (run.Name == "luxmux-"+m.label || run.Name == config.RunName(m.name, config.SpareWindow)) && run.Name != m.runNameLocked(w) {
+	if (run.Name == "luxmux-"+m.label || run.Name == m.spareRunNameLocked()) && run.Name != m.runNameLocked(w) {
 		w.runNamePending = true
 	}
 	m.sendRunNameLocked(w)
