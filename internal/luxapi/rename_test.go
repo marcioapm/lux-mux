@@ -28,6 +28,21 @@ func renameClient(t *testing.T, endpoint string, rt roundTripFunc) *Client {
 	return c
 }
 
+// isolateRenameRegistry empties the package-global endpoint registry for
+// the test and again afterwards, so capacity checks do not depend on
+// entries left by other tests.
+func isolateRenameRegistry(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		renameEndpoints.Lock()
+		renameEndpoints.entries = make(map[renameKey]*renameSupport)
+		renameEndpoints.changed = make(chan struct{})
+		renameEndpoints.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
 func TestRenameDiscoverySingleflight(t *testing.T) {
 	for _, status := range []int{405, 404, 200} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -202,5 +217,77 @@ func TestRenameEndpointBoundAndCancel(t *testing.T) {
 	}
 	if peak.Load() > 8 {
 		t.Fatalf("peak=%d", peak.Load())
+	}
+}
+
+// With every entry referenced, the registry admits no new endpoint (the
+// caller waits until its deadline) and evicts none of the referenced ones.
+func TestRenameRegistryKeepsReferencedEntries(t *testing.T) {
+	isolateRenameRegistry(t)
+	ok := func(*http.Request) (*http.Response, error) { return renameResponse(200), nil }
+	held := renameClient(t, "http://referenced-held.invalid", ok)
+	s, err := held.renameSupport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := []*renameSupport{s}
+	for i := 1; i < renameCapacity; i++ {
+		r, err := renameClient(t, fmt.Sprintf("http://referenced-%d.invalid", i), ok).renameSupport(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs = append(refs, r)
+	}
+	defer func() {
+		for _, r := range refs {
+			releaseRenameSupport(r)
+		}
+	}()
+	// The held entry is the least recently used, so LRU eviction would pick it.
+	renameEndpoints.Lock()
+	s.used = time.Now().Add(-time.Minute)
+	renameEndpoints.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	extra := renameClient(t, "http://referenced-extra.invalid", ok)
+	if _, err := extra.renameSupport(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("full registry of referenced entries admitted another: %v", err)
+	}
+	again, err := held.renameSupport(context.Background())
+	if err != nil || again != s {
+		t.Fatalf("referenced entry evicted: %v", err)
+	}
+	refs = append(refs, again)
+	renameEndpoints.Lock()
+	n := len(renameEndpoints.entries)
+	renameEndpoints.Unlock()
+	if n > renameCapacity {
+		t.Fatalf("entries=%d, capacity %d", n, renameCapacity)
+	}
+}
+
+// A prober cancelled mid-PATCH leaves the capability unknown, so the next
+// caller probes again and gets the real 404-then-GET verdict.
+func TestRenameCancelledProbeStaysUnknown(t *testing.T) {
+	isolateRenameRegistry(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	c := renameClient(t, "http://"+t.Name()+".invalid", func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			cancel()
+			return nil, r.Context().Err()
+		}
+		if r.Method == http.MethodGet {
+			return renameResponse(200), nil
+		}
+		return renameResponse(404), nil
+	})
+	if _, err := c.Rename(ctx, "fixture", "name"); errors.Is(err, ErrRenameUnsupported) {
+		t.Fatal("cancelled probe marked the endpoint unsupported")
+	}
+	if _, err := c.Rename(context.Background(), "fixture", "name"); !errors.Is(err, ErrRenameUnsupported) || calls != 3 {
+		t.Fatalf("second probe: %v calls=%d, want ErrRenameUnsupported after PATCH+GET", err, calls)
 	}
 }
