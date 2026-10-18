@@ -177,8 +177,12 @@ func (m *Mux) addUnlisted(ep config.Endpoint, runs []*api.Run) {
 	for slot, id := range rb.Spares {
 		if _, ok := m.sess.Spares[slot]; !ok {
 			m.sess.SetSpare(slot, id, ep)
+			if rb.SpareRenames[slot] {
+				m.sess.MarkSpareRename(slot)
+			}
 		}
 	}
+	m.sendSpareNamesLocked()
 	m.saveLocked()
 	m.setNoticeLocked(fmt.Sprintf("lux %s answered: %d window(s) added", ep.Label(), added))
 }
@@ -225,7 +229,11 @@ func (m *Mux) adoptSpares(ep config.Endpoint, runs []*api.Run) {
 			continue
 		}
 		m.sess.SetSpare(slot, r.ID, ep)
+		if r.Name != config.RunName(m.name, config.SpareWindow) {
+			m.sess.MarkSpareRename(slot)
+		}
 	}
+	m.sendSpareNamesLocked()
 	if len(found) > len(extra) {
 		m.saveLocked()
 	}

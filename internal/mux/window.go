@@ -226,6 +226,7 @@ type Window struct {
 	runNamePending bool
 	runNameSending bool
 	runNameByUser  bool
+	runNameCancel  context.CancelFunc
 	cancel         context.CancelFunc
 	closed         bool
 

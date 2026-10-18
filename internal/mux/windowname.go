@@ -10,6 +10,7 @@ import (
 
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/state"
 )
 
 // nameWriteFor bounds one write of a window's name into its Run, and one
@@ -91,13 +92,16 @@ func (m *Mux) renameRunLocked(w *Window, byUser bool) {
 // the first rename the user made there gets one notice in this process;
 // renames luxmux makes by itself (a claimed spare) get none.
 func (m *Mux) sendRunNameLocked(w *Window) {
-	if w.closed || w.RunID == "" || w.runNameSending || !w.runNamePending {
+	if w.closed || m.indexLocked(w) < 0 || m.ctx.Err() != nil || m.ending || w.RunID == "" || w.runNameSending || !w.runNamePending || m.spareNames[w.RunID] {
 		return
 	}
 	id, ep, name, byUser := w.RunID, w.Endpoint, m.runNameLocked(w), w.runNameByUser
 	w.runNameSending, w.runNameByUser = true, false
+	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
+	w.runNameCancel = cancel
 	m.goSafe(func() {
-		err := m.renameRun(ep, id, name)
+		defer cancel()
+		err := m.renameRun(ctx, ep, id, name)
 		unsupported := errors.Is(err, luxapi.ErrRenameUnsupported)
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -120,6 +124,9 @@ func (m *Mux) sendRunNameLocked(w *Window) {
 			}
 		case err != nil:
 			w.runNameByUser = w.runNameByUser || byUser
+			if live && name != m.runNameLocked(w) {
+				m.sendRunNameLocked(w)
+			}
 			return
 		case name == m.runNameLocked(w):
 			w.runNamePending = false
@@ -131,13 +138,57 @@ func (m *Mux) sendRunNameLocked(w *Window) {
 	})
 }
 
-func (m *Mux) renameRun(ep config.Endpoint, id, name string) error {
+func (m *Mux) renameRun(ctx context.Context, ep config.Endpoint, id, name string) error {
 	lux, err := m.eps.Client(ep)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
-	defer cancel()
 	_, err = lux.Rename(ctx, id, name)
 	return err
+}
+
+// A spare flight holds ownership until its completion. Claim transfers the
+// target, but the window sender waits here so an older PATCH cannot win.
+func (m *Mux) sendSpareNamesLocked() {
+	for slot := range m.sess.SpareRenames {
+		m.sendSpareNameLocked(slot)
+	}
+}
+
+func (m *Mux) sendSpareNameLocked(slot string) {
+	id := m.sess.Spares[slot]
+	if id == "" || state.IsLeftover(slot) || !m.sess.SpareRenames[slot] || m.spareNames[id] || m.ending || m.ctx.Err() != nil {
+		return
+	}
+	if m.spareNames == nil {
+		m.spareNames = map[string]bool{}
+	}
+	m.spareNames[id] = true
+	name, ep := config.RunName(m.name, config.SpareWindow), m.sess.SpareEndpoint(slot, m.eps.Default())
+	ctx, cancel := context.WithTimeout(m.ctx, nameWriteFor)
+	m.goSafe(func() {
+		defer cancel()
+		err := m.renameRun(ctx, ep, id, name)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.spareNames, id)
+		if m.ctx.Err() != nil || m.ending {
+			return
+		}
+		if w := m.byRun[id]; w != nil {
+			m.sendRunNameLocked(w)
+			return
+		}
+		if m.sess.Spares[slot] != id {
+			return
+		}
+		latest := config.RunName(m.name, config.SpareWindow)
+		if errors.Is(err, luxapi.ErrRenameUnsupported) || (err == nil && name == latest) {
+			delete(m.sess.SpareRenames, slot)
+		}
+		m.saveLocked()
+		if name != latest {
+			m.sendSpareNameLocked(slot)
+		}
+	})
 }

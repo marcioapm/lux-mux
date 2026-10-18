@@ -159,6 +159,7 @@ type Mux struct {
 	// listing of one endpoint prunes only its own.
 	consideredOn map[string]config.Endpoint
 	byRun        map[string]*Window
+	spareNames   map[string]bool
 	// feeds are the endpoints whose event stream is followed: one each.
 	feeds map[config.Endpoint]bool
 	// listed is closed for an endpoint once its first listing of the
@@ -409,6 +410,7 @@ func (m *Mux) Run(ctx context.Context) (string, error) {
 	for _, ep := range eps {
 		m.followEndpointLocked(ep)
 	}
+	m.sendSpareNamesLocked()
 	m.repaintLocked()
 	m.saveLocked()
 	if m.opt.Notice != "" {
@@ -981,6 +983,9 @@ func (m *Mux) closeWindow(w *Window, terminate bool, notice string) error {
 	}
 	if c := w.getConn(); c != nil {
 		c.CloseNow()
+	}
+	if w.runNameCancel != nil {
+		w.runNameCancel()
 	}
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
 	delete(m.byRun, w.RunID)

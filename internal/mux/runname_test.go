@@ -1,17 +1,241 @@
 package mux
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/marcioapm/lux/api"
 
+	"context"
 	"github.com/marcioapm/lux-mux/internal/config"
 	"github.com/marcioapm/lux-mux/internal/fakelux"
+	"github.com/marcioapm/lux-mux/internal/luxapi"
+	"github.com/marcioapm/lux-mux/internal/sessions"
 	"github.com/marcioapm/lux-mux/internal/state"
 )
+
+type nameTransport func(*http.Request) (*http.Response, error)
+
+func (f nameTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func nameHarness(t *testing.T, cfg string, tr http.RoundTripper) *harness {
+	return newHarnessOpts(t, cfg, nil, func(o *Options) {
+		c, err := o.Endpoints.Client(o.Endpoints.Default())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.C.HTTP = &http.Client{Transport: tr}
+	})
+}
+
+func TestRunNameNewIntentAfterFailure(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	h := nameHarness(t, cfgNamed, nameTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPatch && calls.Add(1) == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return nil, errors.New("temporary failure")
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	}))
+	id := h.live(0)
+	defer h.detach()
+	h.m.Rename(0, "first")
+	<-entered
+	h.m.Rename(0, "latest")
+	close(release)
+	h.waitFor("newer intent delivered after failed flight", func() bool { return runName(h, id) == "s/latest" })
+	if calls.Load() != 2 {
+		t.Fatalf("PATCH calls=%d", calls.Load())
+	}
+}
+
+func TestRunNameRecoveryPending(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		t.Run(fmt.Sprint(lost), func(t *testing.T) {
+			h := newMulti(t)
+			id := h.make("b", "B")
+			if lost {
+				if err := state.Remove(h.dir, "b"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := state.SetRenamed(h.dir, "b", "c", "b"); err != nil {
+				t.Fatal(err)
+			}
+			h.attach("c")
+			h.on("c")
+			defer h.detach()
+			h.waitFor("recovered rename delivered", func() bool { return h.lux.Run(id).Name == "c/default" })
+		})
+	}
+}
+
+func TestRunNameWaitingSpare(t *testing.T) {
+	h := newHarness(t, cfgSpare, nil)
+	h.live(0)
+	defer h.detach()
+	var id string
+	h.waitFor("waiting spare", func() bool { id = spareOf(h); return id != "" })
+	if err := h.m.RenameSession("s", "new"); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("waiting spare renamed", func() bool { return runName(h, id) == "new/spare" })
+}
+
+func TestRunNameSpareRetryAndRecovery(t *testing.T) {
+	for _, mode := range []string{"failed", "detached", "interrupted", "lost"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newHarness(t, cfgSpare, nil)
+			h.live(0)
+			var id string
+			h.waitFor("spare", func() bool { id = spareOf(h); return id != "" })
+			if mode == "failed" {
+				h.lux.FailRenames(500)
+				if err := h.m.RenameSession("s", "new"); err != nil {
+					t.Fatal(err)
+				}
+				h.waitFor("spare attempted", func() bool { return patches(h.lux) >= 2 })
+				h.detach()
+				s, ok, err := state.Load(h.dir, "new")
+				if err != nil || !ok || len(s.SpareRenames) == 0 {
+					t.Fatalf("pending spare lost: %+v %v", s, err)
+				}
+				h.lux.FailRenames(0)
+			} else {
+				h.detach()
+				if mode == "lost" {
+					if err := state.Remove(h.dir, "s"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				if mode == "detached" {
+					err = sessions.Move(h.dir, "s", "new", "s")
+				} else {
+					err = state.SetRenamed(h.dir, "s", "new", "s")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			eps := luxapi.NewEndpoints(h.lux.Config(), nil)
+			sess, _, _, err := sessions.Reopen(context.Background(), sessions.Luxes{Eps: eps, Cfg: h.cfg}, h.dir, "new")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.opts = func(o *Options) { o.Session = "new" }
+			h.start(sess)
+			defer h.detach()
+			h.live(0)
+			h.waitFor("waiting spare delivered on attach", func() bool { return runName(h, id) == "new/spare" })
+			if h.lux.Run(id).State != "running" {
+				t.Fatal("spare workload restarted or ended")
+			}
+		})
+	}
+}
+
+func TestRunNameSpareClaimOrdering(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var target atomic.Value
+			target.Store("")
+			var first atomic.Bool
+			h := nameHarness(t, cfgSpare, nameTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPatch && r.URL.Path == "/v1/runs/"+target.Load().(string) && first.CompareAndSwap(false, true) {
+					close(entered)
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return nil, r.Context().Err()
+					}
+					if fail {
+						return nil, errors.New("temporary failure")
+					}
+				}
+				return http.DefaultTransport.RoundTrip(r)
+			}))
+			h.live(0)
+			defer h.detach()
+			var id string
+			h.waitFor("spare", func() bool { id = spareOf(h); return id != "" })
+			target.Store(id)
+			if err := h.m.RenameSession("s", "new"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("no spare rename")
+			}
+			h.type_("\x02c")
+			h.waitFor("spare ownership transferred", func() bool { return h.window(1) == id })
+			h.waitFor("window sender idle while spare flight held", func() bool { h.m.mu.Lock(); defer h.m.mu.Unlock(); return !h.m.windows[1].runNameSending })
+			close(release)
+			want := "new/" + h.windowName(1)
+			h.waitFor("claimed name delivered after spare flight", func() bool { return runName(h, id) == want })
+			h.waitFor("name delivery idle", func() bool {
+				h.m.mu.Lock()
+				defer h.m.mu.Unlock()
+				return !h.m.spareNames[id] && !h.m.windows[1].runNameSending
+			})
+			if got := runName(h, id); got != want {
+				t.Fatalf("stale spare overwrite: %q", got)
+			}
+		})
+	}
+}
+
+func TestRunNameEndpointFanout(t *testing.T) {
+	gate := make(chan struct{})
+	var current, peak atomic.Int32
+	h := nameHarness(t, cfgNamed, nameTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPatch {
+			v := current.Add(1)
+			for {
+				p := peak.Load()
+				if v <= p || peak.CompareAndSwap(p, v) {
+					break
+				}
+			}
+			defer current.Add(-1)
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	}))
+	h.live(0)
+	defer h.detach()
+	for i := 1; i < 32; i++ {
+		h.m.newWindowFrom("dev", h.cfg.Profiles["dev"], fmt.Sprint(i), false)
+		h.live(i)
+	}
+	if err := h.m.RenameSession("s", "new"); err != nil {
+		close(gate)
+		t.Fatal(err)
+	}
+	h.waitFor("requests entered", func() bool { return current.Load() > 0 })
+	close(gate)
+	h.waitFor("all names delivered", func() bool { return len(h.lux.Renames()) == 32 })
+	if peak.Load() > 8 {
+		t.Fatalf("peak HTTP calls=%d, want <=8", peak.Load())
+	}
+}
 
 const cfgNamed = `
 default_profile = "dev"

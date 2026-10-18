@@ -308,6 +308,9 @@ func (m *Mux) relaunch(w *Window) {
 		w.cancel()
 		w.cancel = nil
 	}
+	if w.runNameCancel != nil {
+		w.runNameCancel()
+	}
 	delete(m.byRun, old)
 	m.considerLocked(w.Endpoint, old)
 	m.dropClaimedLocked(old)
@@ -358,6 +361,7 @@ func (m *Mux) claimSpare(w *Window) string {
 		slot = config.SpareSlot(config.SpecKey(w.Spec), w.Endpoint, m.eps.Default())
 	}
 	id := ""
+	pendingName := m.sess.SpareRenames[slot]
 	if slot != "" {
 		id = m.sess.Spares[slot]
 		if id != "" {
@@ -386,6 +390,9 @@ func (m *Mux) claimSpare(w *Window) string {
 			m.keepLeftoverLocked(w.Endpoint, id, err)
 		} else {
 			m.sess.SetSpare(slot, id, w.Endpoint)
+			if pendingName {
+				m.sess.MarkSpareRename(slot)
+			}
 			m.saveLocked()
 		}
 		m.mu.Unlock()
@@ -415,6 +422,9 @@ func (m *Mux) claimSpare(w *Window) string {
 			return ""
 		}
 		m.sess.SetSpare(slot, id, w.Endpoint)
+		if pendingName {
+			m.sess.MarkSpareRename(slot)
+		}
 		m.saveLocked()
 		m.mu.Unlock()
 		return ""
@@ -490,6 +500,7 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		return
 	}
 	if _, ok := m.sess.Spares[slot]; ok {
+		m.sendSpareNamesLocked()
 		m.mu.Unlock()
 		return
 	}
@@ -534,6 +545,10 @@ func (m *Mux) ensureSpare(name string, p config.Profile) {
 		return
 	}
 	m.sess.Spares[slot] = run.ID
+	if spareName != config.RunName(m.name, config.SpareWindow) {
+		m.sess.MarkSpareRename(slot)
+		m.sendSpareNameLocked(slot)
+	}
 	m.saveLocked()
 }
 

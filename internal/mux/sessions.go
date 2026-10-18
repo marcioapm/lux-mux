@@ -458,6 +458,8 @@ func (m *Mux) RenameSession(old, new string) error {
 	for _, w := range m.windows {
 		m.renameRunLocked(w, true)
 	}
+	m.sess.MarkRunRenames()
+	m.sendSpareNamesLocked()
 	m.saveLocked()
 	m.overlayGoneLocked()
 	m.mu.Unlock()

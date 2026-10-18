@@ -137,10 +137,21 @@ the Run is submitted with that name, and renaming the window (`C-b ,`, the
 chooser's `,`) or the session (`$`) renames it. A waiting warm spare is
 named `<session>/spare` until a window takes it. Control characters become
 spaces and the name is cut to lux's 200 bytes. Renames are best effort,
-off the keyboard path, 5 s each: one that fails is recorded in the session
-file and tried again at the next attach. A lux from before Run renames
-(no `PATCH /v1/runs/{id}`) keeps the names Runs were made with: luxmux asks
-it once per process and says so once, the first time you rename there.
+off the keyboard path, with a 5 s overall deadline including queueing and at
+most eight active rename calls per lux URL and tenant. A failed intent stays
+recorded for the next attach; a newer name queued during that call is sent
+once immediately, without retrying unchanged failures in a loop. Waiting
+spares follow session renames too, without restarting their workloads. Claiming
+a spare waits for its older rename delivery before sending the window name.
+Only HTTP 405, or 404 followed by a successful GET, means unsupported; 422 is
+validation and does not disable later valid requests. Unsupported discovery is
+single-flight per endpoint, with cancelable waiters. Capability and concurrency
+state is shared process-wide by URL and tenant, not credentials. The registry
+holds at most 256 entries: idle entries expire after ten minutes, or the
+least-recently-used idle entry is evicted at capacity. Active entries cannot be
+evicted; callers wait cancelably if all 256 are active. A lux from before Run
+renames keeps the names Runs were made with; luxmux probes and notifies once
+while that endpoint capability remains cached.
 Labels never change: a renamed session's Runs keep their `luxmux-session`
 label (see below).
 

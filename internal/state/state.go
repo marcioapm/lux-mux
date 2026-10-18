@@ -67,6 +67,7 @@ type Session struct {
 	// lacks (files from before every slot recorded one) is the lux CLI
 	// configuration's at read time.
 	SpareEndpoints map[string]config.Endpoint `json:"spareEndpoints,omitempty"`
+	SpareRenames   map[string]bool            `json:"spareRenames,omitempty"`
 	// Unlisted are endpoints the session's Runs could not be listed on
 	// when it was rebuilt: their windows are added once one answers.
 	Unlisted []config.Endpoint `json:"unlisted,omitempty"`
@@ -469,6 +470,9 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 				s.Windows = append(s.Windows, window(prev, prof))
 			}
 			s.SetSpare(key, r.ID, epOf[r.ID])
+			if name != label && r.Name != config.RunName(name, config.SpareWindow) {
+				s.MarkSpareRename(key)
+			}
 			continue
 		}
 		s.Windows = append(s.Windows, window(r.ID, prof))
@@ -488,6 +492,7 @@ func RebuildLabelledFrom(name, label string, ls []Listing, def config.Endpoint, 
 		if r != nil {
 			if n, ok := windowOfRun(r, name); ok {
 				s.Windows[i].Name = n
+				s.Windows[i].RenameRun = name != label && r.Name != config.RunName(name, n)
 			}
 		}
 	}
@@ -661,10 +666,29 @@ func (s *Session) SetSpare(slot, id string, ep config.Endpoint) {
 	s.SpareEndpoints[slot] = ep
 }
 
+func (s *Session) MarkRunRenames() {
+	for i := range s.Windows {
+		s.Windows[i].RenameRun = true
+	}
+	for slot, id := range s.Spares {
+		if id != "" && !IsLeftover(slot) {
+			s.MarkSpareRename(slot)
+		}
+	}
+}
+
+func (s *Session) MarkSpareRename(slot string) {
+	if s.SpareRenames == nil {
+		s.SpareRenames = map[string]bool{}
+	}
+	s.SpareRenames[slot] = true
+}
+
 // DropSpare forgets slot's spare and its endpoint.
 func (s *Session) DropSpare(slot string) {
 	delete(s.Spares, slot)
 	delete(s.SpareEndpoints, slot)
+	delete(s.SpareRenames, slot)
 }
 
 // SpareEndpoint is the endpoint slot's spare lives on; def when the file
