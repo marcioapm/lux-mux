@@ -16,8 +16,10 @@ way: it is the `ghcr.io/marcioapm/luxmux` repository, so its Runs get the
 | C/C++ | Clang/LLVM `23` from apt.llvm.org: clang, clang++, lld, llvm tools, clang-format, clang-tidy, clangd, libc++; unversioned names in `/usr/local/bin`. `cc`/`c++` stay GCC. cmake, ninja, libssl-dev |
 | Gate | `diff-guard` in `/usr/local/bin` |
 
-Every version is a build `ARG` in the [Dockerfile](Dockerfile), and every
-download is checked against a sha256 pinned there (the LLVM apt key too).
+Every independently downloaded archive is checked against a sha256 pinned in
+the [Dockerfile](Dockerfile); the LLVM apt key is checked too. Tool and
+toolchain versions are build `ARG`s there, with the corresponding smoke-test
+expectations in `smoke.sh`.
 
 ## How it fits lux
 

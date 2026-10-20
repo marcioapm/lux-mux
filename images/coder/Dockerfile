@@ -60,7 +60,7 @@ RUN set -eux; \
 ARG RUSTUP_VERSION=1.29.1
 ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
-# The default toolchain, plus pinned ones repos name in rust-toolchain.toml
+# The default toolchain, plus ones pinned by repositories' rust-toolchain.toml
 # (llm-proxy: 1.94.0), preinstalled so a Run needs no download to build them.
 ARG RUST_VERSION=1.99.1
 ARG RUST_EXTRA_TOOLCHAINS=1.94.0
