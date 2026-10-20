@@ -38,8 +38,9 @@ download is checked against a sha256 pinned there (the LLVM apt key too).
 
 ## Updating
 
-Bump the `ARG`s in the Dockerfile, then the versions the smoke test checks
-(Java major, Clang major, the extra Rust toolchain):
+Bump the `ARG`s in the Dockerfile, then the matching `*_WANT` versions at the
+top of `smoke.sh`. Each toolchain is its own layer, ordered apt (JDK, LLVM),
+Go, Rust, so a Go or Rust bump never reruns apt:
 
 - `BASE_IMAGE`: the default image's new release, `docker buildx imagetools
   inspect ghcr.io/marcioapm/luxmux:<version>`, the index digest at the top.
@@ -79,12 +80,13 @@ docker run --rm --network none \
 ```
 
 The smoke test runs the default image's smoke test first, then, offline: every
-added tool is on the login shell's `PATH`; the Go, Java, Clang and Rust
-versions are the pinned ones; a Go program, a Java class, a C++23 program
-(with libstdc++ and lld, and with libc++), and a Cargo project on both the
-default and the preinstalled pinned toolchain build and run; diff-guard flags
-a source-inspection test and passes a clean tree; and no toolchain cache
-lands in the home.
+added tool is on the login shell's `PATH` and the LLVM tools, cmake and ninja
+start; Go, Java, Clang and the default and extra Rust toolchains are the
+pinned versions and `JAVA_HOME` holds a JDK; a Go program, a Java class, a
+C++23 program (with libstdc++ and lld, and with libc++), and a Cargo project on
+both the default and the pinned toolchain build and run; diff-guard flags a
+source-inspection test and passes a clean tree; and no toolchain cache or store
+lands in the home. Every command's exit status is checked before its output.
 
 Size at the versions above, amd64: about 4.7 GB unpacked, 2.5 GB more than
 the default image (mostly LLVM, the two Rust toolchains and the JDK).
