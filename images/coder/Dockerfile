@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1.7
+# The coder image: the default luxmux image plus the toolchains coding agents
+# build and test with (Go, Java, Rust, Clang/LLVM) and diff-guard.
+# Bump the base with `docker buildx imagetools inspect ghcr.io/marcioapm/luxmux:<version>`
+# (the multi-arch index digest), as the default image bumps Ubuntu.
+ARG BASE_IMAGE=ghcr.io/marcioapm/luxmux:0.4.0@sha256:704d8200499c05def47db3add629b4ec5ddace1393279574c3d5c697c2d6ea3e
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH
+# Go tarball hashes: https://go.dev/dl/?mode=json
+ARG GO_VERSION=1.27.3
+ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+# rustup-init hashes: https://static.rust-lang.org/rustup/archive/<version>/<target>/rustup-init.sha256
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+# The default toolchain, plus pinned ones repos name in rust-toolchain.toml
+# (llm-proxy: 1.94.0), preinstalled so a Run needs no download to build them.
+ARG RUST_VERSION=1.99.1
+ARG RUST_EXTRA_TOOLCHAINS=1.94.0
+# LLVM's own apt repository (apt.llvm.org): the newest stable major for this Ubuntu.
+# sha256 of https://apt.llvm.org/llvm-snapshot.gpg.key
+ARG LLVM_MAJOR=23
+ARG LLVM_KEY_SHA256=8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d
+# Java: Ubuntu's OpenJDK, the current LTS. Gradle comes from each repo's wrapper.
+ARG JDK_MAJOR=25
+
+USER root
+RUN set -eux; \
+    # An armored key in signed-by needs the .asc name; the base image has no gpg to dearmor it.
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /usr/share/keyrings/llvm-archive-keyring.asc; \
+    echo "$LLVM_KEY_SHA256  /usr/share/keyrings/llvm-archive-keyring.asc" | sha256sum -c -; \
+    . /etc/os-release; \
+    echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.asc] https://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_MAJOR} main" \
+      > /etc/apt/sources.list.d/llvm.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      "openjdk-${JDK_MAJOR}-jdk-headless" \
+      "clang-${LLVM_MAJOR}" "lld-${LLVM_MAJOR}" "llvm-${LLVM_MAJOR}" \
+      "clang-format-${LLVM_MAJOR}" "clang-tidy-${LLVM_MAJOR}" "clangd-${LLVM_MAJOR}" \
+      "libc++-${LLVM_MAJOR}-dev" "libc++abi-${LLVM_MAJOR}-dev" \
+      cmake ninja-build libssl-dev; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Unversioned names for the newest LLVM; cc and c++ stay GCC (build-essential).
+    for t in clang clang++ clang-cpp lld ld.lld llvm-ar llvm-nm llvm-objdump llvm-symbolizer clang-format clang-tidy clangd; do \
+      ln -s "/usr/bin/${t}-${LLVM_MAJOR}" "/usr/local/bin/${t}"; \
+    done; \
+    case "$TARGETARCH" in \
+      amd64) go_sha=$GO_SHA256_AMD64; rust_target=x86_64-unknown-linux-gnu; rustup_sha=$RUSTUP_SHA256_AMD64 ;; \
+      arm64) go_sha=$GO_SHA256_ARM64; rust_target=aarch64-unknown-linux-gnu; rustup_sha=$RUSTUP_SHA256_ARM64 ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz; \
+    echo "$go_sha  /tmp/go.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/go.tar.gz -C /usr/local --no-same-owner; \
+    curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rust_target}/rustup-init" -o /tmp/rustup-init; \
+    echo "$rustup_sha  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo /tmp/rustup-init -y --no-modify-path \
+      --profile minimal --component rustfmt,clippy --default-toolchain "$RUST_VERSION"; \
+    for tc in $RUST_EXTRA_TOOLCHAINS; do \
+      RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo /opt/cargo/bin/rustup toolchain install "$tc" \
+        --profile minimal --component rustfmt,clippy; \
+    done; \
+    # The workload user owns the toolchain store, so a repo pinning another
+    # toolchain can still install it (into the container layer, gone on stop).
+    chown -R agent:agent /opt/rustup; \
+    rm -rf /opt/rustup/downloads/* /opt/rustup/tmp/* /opt/cargo/registry /tmp/go.tar.gz /tmp/rustup-init \
+      /tmp/agent-cache /root/.cache
+
+COPY --chmod=0755 diff-guard.py /usr/local/bin/diff-guard
+
+# Toolchains stay outside the home; their caches and downloads go to the
+# discarded /tmp/agent-cache, like npm's and uv's in the default image, so a
+# stop never exports module caches or build outputs with the home volume.
+ENV JAVA_HOME=/usr/lib/jvm/java-${JDK_MAJOR}-openjdk-${TARGETARCH} \
+    RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:/usr/local/go/bin:/opt/npm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    GOTOOLCHAIN=local \
+    GOPATH=/tmp/agent-cache/go \
+    GOMODCACHE=/tmp/agent-cache/go/mod \
+    CARGO_HOME=/tmp/agent-cache/cargo \
+    GRADLE_USER_HOME=/tmp/agent-cache/gradle
+
+ARG VERSION=devel
+LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
+      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM and diff-guard" \
+      org.opencontainers.image.licenses="ELv2" \
+      org.opencontainers.image.version="${VERSION}"
+
+USER agent
+WORKDIR /home/agent
+CMD ["/bin/bash", "-l"]
