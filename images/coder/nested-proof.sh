@@ -28,6 +28,9 @@ PG=docker.io/library/postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae96875
 STORE=$HOME/.local/share/containers
 step() { echo; echo "### $*"; }
 die() { echo "NESTED FAIL: $*"; exit 1; }
+# bounded SECS CMD...: CMD gets SIGTERM after SECS and SIGKILL 10 s later.
+bounded() { local secs=$1; shift; timeout --kill-after=10s "$secs" "$@"; }
+rm_container() { bounded 30s podman rm -f -t 0 "$@" >/dev/null; }
 
 # Every resource is named after this run's id, so cleanup removes only its own.
 run_id=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n') && [ -n "$run_id" ] || die "run id"
@@ -36,13 +39,13 @@ probe_started=0 pg_started=0 compose_file='' compose_dir=''
 cleanup() {
 	local rc=0
 	if [ -n "$compose_file" ]; then
-		timeout --kill-after=5s 60s docker compose -f "$compose_file" down -t 1 >/dev/null 2>&1 || rc=1
+		bounded 60s docker compose -f "$compose_file" down -t 1 >/dev/null 2>&1 || rc=1
 	fi
 	if [ "$probe_started" = 1 ]; then
-		timeout --kill-after=5s 30s podman rm -f -t 0 --ignore "$probe" >/dev/null || rc=1
+		rm_container --ignore "$probe" || rc=1
 	fi
 	if [ "$pg_started" = 1 ]; then
-		timeout --kill-after=5s 30s podman rm -f -t 0 --ignore "$pg" >/dev/null || rc=1
+		rm_container --ignore "$pg" || rc=1
 	fi
 	if [ -n "$compose_dir" ]; then rm -rf "$compose_dir" || rc=1; fi
 	if [ "$rc" = 0 ]; then probe_started=0 pg_started=0 compose_file='' compose_dir=''; fi
@@ -91,7 +94,7 @@ if [ -e /images.tar ]; then
 	step "podman load /images.tar"
 	[ -n "${ALPINE_ID:-}" ] || die "ALPINE_ID is required with /images.tar"
 	[ -n "${PG_ID:-}" ] || die "PG_ID is required with /images.tar"
-	timeout --kill-after=10s 300s podman load -q -i /images.tar || die "podman load"
+	bounded 300s podman load -q -i /images.tar || die "podman load"
 	ALPINE=localhost/nested-proof/alpine:3.22 PG=localhost/nested-proof/postgres:18-alpine
 	for i in "$ALPINE=$ALPINE_ID" "$PG=$PG_ID"; do
 		want=${i#*=} got=$(podman image inspect --format '{{.Id}}' "${i%%=*}") || die "${i%%=*} not in /images.tar"
@@ -102,8 +105,8 @@ fi
 
 step "podman run alpine; overlay is $([ "$store_mounted" = 1 ] && echo native || echo fuse-overlayfs)"
 probe_started=1
-timeout --kill-after=10s 300s podman run -d --name "$probe" "$ALPINE" sleep 120 >/dev/null || die "podman run $probe"
-out=$(timeout --kill-after=5s 60s podman exec "$probe" echo nested-ok) || die "podman exec: $out"
+bounded 300s podman run -d --name "$probe" "$ALPINE" sleep 120 >/dev/null || die "podman run $probe"
+out=$(bounded 60s podman exec "$probe" echo nested-ok) || die "podman exec: $out"
 echo "$out"; [ "$out" = nested-ok ] || die "want nested-ok"
 if [ "$store_mounted" = 1 ]; then
 	! pgrep -x fuse-overlayfs >/dev/null || die "fuse-overlayfs is running on the engine-store mount"
@@ -112,12 +115,12 @@ else
 	pgrep -x fuse-overlayfs >/dev/null || die "fallback demo: no fuse-overlayfs process"
 	echo "fuse-overlayfs process running"
 fi
-timeout --kill-after=5s 30s podman rm -f -t 0 "$probe" >/dev/null || die "podman rm $probe"
+rm_container "$probe" || die "podman rm $probe"
 probe_started=0
 
 step "docker run (shim), default network: a non-loopback IPv4 address and a default route"
 # shellcheck disable=SC2016 # expanded by the inner container's sh
-timeout --kill-after=10s 120s docker run --rm "$ALPINE" sh -c '
+bounded 120s docker run --rm "$ALPINE" sh -c '
 	addrs=$(ip -4 -o addr show) || { echo "ip addr failed"; exit 1; }
 	printf "%s\n" "$addrs" | grep -v " lo " | grep -q " inet " || { echo "no non-loopback IPv4 address: $addrs"; exit 1; }
 	routes=$(ip -4 route show) || { echo "ip route failed"; exit 1; }
@@ -130,7 +133,7 @@ ls -li /usr/bin/pasta /usr/bin/passt
 
 step "postgres -p 55432:5432"
 pg_started=1
-timeout --kill-after=10s 300s podman run -d --name "$pg" -p 55432:5432 -e POSTGRES_PASSWORD=x "$PG" >/dev/null ||
+bounded 300s podman run -d --name "$pg" -p 55432:5432 -e POSTGRES_PASSWORD=x "$PG" >/dev/null ||
 	die "postgres run"
 for _ in $(seq 60); do pg_isready -t 3 -h 127.0.0.1 -p 55432 >/dev/null 2>&1 && break; sleep 1; done
 pg_isready -t 3 -h 127.0.0.1 -p 55432 || { podman logs "$pg" 2>&1 | tail; die "pg_isready"; }
@@ -145,7 +148,7 @@ for _ in $(seq 30); do
 done
 echo "psql select 1 -> $r"
 [ "$query_ok" = 1 ] && [ "$r" = 1 ] || die "psql: $r"
-timeout --kill-after=5s 30s podman rm -f -t 0 "$pg" >/dev/null || die "podman rm $pg"
+rm_container "$pg" || die "podman rm $pg"
 pg_started=0
 
 step "docker compose up (postgres + client resolving 'db')"
@@ -175,13 +178,13 @@ services:
         echo "select 40+2 -> \$\$r" && [ "\$\$r" = 42 ] && echo $marker
 EOF
 cd "$compose_dir" || die "cd $compose_dir"
-timeout --kill-after=10s 180s docker compose -f "$compose_file" up --abort-on-container-exit --exit-code-from client \
+bounded 180s docker compose -f "$compose_file" up --abort-on-container-exit --exit-code-from client \
 	>"$compose_dir/up.log" 2>&1
 rc=$?
 sed 's/\x1b\[[0-9;]*m//g' "$compose_dir/up.log" | grep -v '^\[db\]' | tail -15
 echo "compose exit: $rc"
 [ "$rc" = 0 ] || die "compose up failed or timed out: $rc"
-client_log=$(timeout --kill-after=5s 60s docker compose -f "$compose_file" logs client 2>&1) ||
+client_log=$(bounded 60s docker compose -f "$compose_file" logs client 2>&1) ||
 	die "compose logs client: $client_log"
 grep -Eq "(^|[[:space:]])$marker\$" <<<"$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' <<<"$client_log")" ||
 	die "compose client did not confirm its query (no $marker in its log)"
