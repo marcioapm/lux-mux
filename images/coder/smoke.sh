@@ -49,8 +49,10 @@ case "$v" in *"$RUST_EXTRA_WANT-"*) echo "ok: rust $RUST_EXTRA_WANT installed" ;
 v=$(bun --version 2>&1) || fail "'bun --version' exited non-zero: $v"
 [ "$v" = "$BUN_WANT" ] || fail "bun is '$v', want $BUN_WANT"
 echo "ok: bun $v"
-[ ! -u /usr/local/bin/bun ] && [ ! -g /usr/local/bin/bun ] && [ ! -O /usr/local/bin/bun ] ||
-	fail "/usr/local/bin/bun is setuid/setgid or owned by $(id -un), want a root-owned 0755 binary"
+# 755 and root: no setuid/setgid bit, and the workload cannot replace it.
+v=$(stat -Lc '%U %a' /usr/local/bin/bun 2>&1) || fail "stat /usr/local/bin/bun failed: $v"
+[ "$v" = "root 755" ] || fail "/usr/local/bin/bun is '$v', want 'root 755'"
+echo "ok: bun is root-owned, mode 755"
 
 # Headless Chromium: Playwright downloads the browser; the image has its libraries.
 ld=$(ldconfig -p 2>&1) || fail "'ldconfig -p' exited non-zero: $ld"
