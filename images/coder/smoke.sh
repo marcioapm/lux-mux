@@ -56,7 +56,6 @@ v=$(stat -Lc '%u %g %a' /usr/local/bin/bun 2>&1) || fail "stat /usr/local/bin/bu
 	fail "/usr/local/bin/bunx must be a symlink to bun"
 echo "ok: bun is root:root, mode 755; bunx -> bun"
 
-# Headless Chromium: Playwright downloads the browser; the image has its libraries.
 ld=$(ldconfig -p 2>&1) || fail "'ldconfig -p' exited non-zero: $ld"
 tab=$(printf '\t')
 for so in $CHROMIUM_SONAMES; do
