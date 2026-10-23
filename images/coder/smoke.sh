@@ -151,6 +151,26 @@ EOF
 printf '#!/bin/sh\necho shellcheck-ok\n' >ok.sh || fail "writing the shellcheck fixture failed"
 check "shellcheck" "" shellcheck ok.sh
 
+# runs NAME PREFIX CMD...: CMD must exit 0 and its first line start with PREFIX.
+runs() {
+	name=$1 prefix=$2
+	shift 2
+	got=$("$@" 2>&1) || fail "'$*' exited non-zero: $got"
+	case "$(echo "$got" | head -n 1)" in
+	"$prefix"*) echo "ok: $name" ;;
+	*) fail "'$*' printed '$got', want a first line starting '$prefix'" ;;
+	esac
+}
+runs psql "psql (PostgreSQL) " psql --version
+runs pg_isready "pg_isready (PostgreSQL) " pg_isready --version
+runs redis-cli "redis-cli " redis-cli --version
+runs socat "socat by " socat -V
+runs nc "OpenBSD netcat " nc -h
+runs dig "DiG " dig -v
+runs file "file-" file --version
+runs tree "tree v" tree --version
+runs rsync "rsync  version " rsync --version
+
 # podman re-execs itself in a user namespace for everything but --version, and
 # a plain `docker run` (CI) refuses one under its seccomp and AppArmor
 # profiles. There these checks are skipped, unless SMOKE_ENGINE=1 requires them.
