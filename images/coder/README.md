@@ -180,13 +180,22 @@ sudo podman run --rm --user root \
 
 (`apparmor=unconfined` only where the host sets
 `kernel.apparmor_restrict_unprivileged_userns=1`, as lux does.) It runs, as
-`agent` with no `XDG_RUNTIME_DIR`: `podman run alpine echo nested-ok`; a
-`docker run` on the default network; Postgres published on `-p 55432:5432`,
+`agent` with no `XDG_RUNTIME_DIR`. It requires the engine-store mount at
+`~/.local/share/containers`, with Podman's graphroot on it, the overlay
+driver, native overlay and no fuse-overlayfs. It then runs a container on
+that store; a `docker run` on the default network that has a non-loopback
+IPv4 address and a default route; Postgres published on `-p 55432:5432`,
 checked with `pg_isready` and `psql -c 'select 1'`; and a two-service compose
-file (Postgres and a client that reaches it as `db`) under
-`docker compose up --abort-on-container-exit`. It prints `NESTED PASS`. Images
-come from Docker Hub by digest, or from `/images.tar` (see its header) where
-the outer container has no egress.
+file (Postgres and a client that reaches it as `db`, checks `select 40+2` is
+42 and prints a per-run marker) under
+`docker compose up --abort-on-container-exit`, which must exit 0 within 180 s
+with the marker in the client's log. Every resource has a per-run name and is
+removed before it prints `NESTED PASS`. A failed cleanup is a failure.
+`ALLOW_NO_STORE_MOUNT=1` runs the fallback demo instead: no mount, and
+fuse-overlayfs is asserted. It ends in `FALLBACK DEMO PASS`, not
+`NESTED PASS`. Images come from Docker Hub by digest, or from `/images.tar`,
+which then needs `ALPINE_ID` and `PG_ID` (see its header), where the outer
+container has no egress.
 
 Size at the versions above, amd64: about 4.9 GB unpacked, 2.7 GB more than
 the default image (mostly LLVM, the two Rust toolchains and the JDK; Podman
