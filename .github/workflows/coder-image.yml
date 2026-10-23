@@ -66,6 +66,20 @@ jobs:
             -v "$PWD/images/default/smoke.sh:/smoke-default.sh:ro" \
             -v "$PWD/images/coder/smoke.sh:/smoke.sh:ro" \
             luxmux-coder-smoke:local sh /smoke.sh
+      # Podman needs a user namespace even for `podman info`, which Docker's
+      # default seccomp and AppArmor profiles refuse. With only those two
+      # relaxed (no capabilities, devices or nested-Run grants) the engine
+      # checks are required instead of skipped. Starting containers inside
+      # stays a manual step (images/coder/README.md, "Nested proof").
+      - name: Smoke test, engine checks required
+        run: |
+          docker run --rm --network none \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            -e SMOKE_ENGINE=1 \
+            --tmpfs /home/agent:uid=1000,gid=1000,mode=0700 \
+            -v "$PWD/images/default/smoke.sh:/smoke-default.sh:ro" \
+            -v "$PWD/images/coder/smoke.sh:/smoke.sh:ro" \
+            luxmux-coder-smoke:local sh /smoke.sh
 
   # On a coder-v* tag, after both smoke tests pass: the only jobs that may write
   # packages. Each arch is rebuilt from build's cache and pushed by digest;

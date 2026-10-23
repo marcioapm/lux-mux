@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # The coder image: the default luxmux image plus the toolchains coding agents
-# build and test with (Go, Java, Rust, Clang/LLVM) and diff-guard.
+# build and test with (Go, Java, Rust, Clang/LLVM), diff-guard, and rootless
+# Podman with a docker shim for nested lux Runs (sandbox.nestedContainers).
 # Bump the base with `docker buildx imagetools inspect ghcr.io/marcioapm/luxmux:<version>`
 # (the multi-arch index digest), as the default image bumps Ubuntu.
 ARG BASE_IMAGE=ghcr.io/marcioapm/luxmux:0.4.0@sha256:704d8200499c05def47db3add629b4ec5ddace1393279574c3d5c697c2d6ea3e
@@ -40,6 +41,44 @@ RUN set -eux; \
     for t in clang clang++ clang-cpp lld ld.lld llvm-ar llvm-nm llvm-objdump llvm-symbolizer clang-format clang-tidy clangd; do \
       ln -s "/usr/bin/${t}-${LLVM_MAJOR}" "/usr/local/bin/${t}"; \
     done
+
+# Rootless Podman for nested lux Runs (sandbox.nestedContainers), plus the
+# command-line tools agents reach for. This is the image's last apt step: the
+# pasta hard links and the setuid strip below must follow every apt install.
+# Its own layer, so a tool added here never reruns the JDK/LLVM layer above.
+# Podman's networking is Recommends and is listed explicitly: passt (pasta),
+# nftables (netavark's bridge networks, -p, compose), aardvark-dns (compose
+# service names), slirp4netns; catatonit backs `--init`.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      podman podman-docker podman-compose crun conmon catatonit \
+      passt nftables netavark aardvark-dns slirp4netns \
+      fuse-overlayfs uidmap libcap2-bin \
+      postgresql-client redis-tools sqlite3 socat netcat-openbsd bind9-dnsutils \
+      file tree rsync shellcheck yq; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    # AppArmor attaches by exec path: through Ubuntu's pasta -> passt symlink
+    # the host's passt profile applies, which cannot open Podman's netns.
+    ln -f /usr/bin/passt /usr/bin/pasta; \
+    if [ -e /usr/bin/passt.avx2 ]; then ln -f /usr/bin/passt.avx2 /usr/bin/pasta.avx2; fi; \
+    # A nested Run has no no-new-privileges, so a setuid program would make the
+    # workload root in its container. newuidmap/newgidmap keep only the file
+    # capability they need; setuid-root, they would fail to write agent's uid_map.
+    find / -xdev -perm /6000 -type f -exec chmod ug-s {} +; \
+    setcap cap_setuid=ep /usr/bin/newuidmap; \
+    setcap cap_setgid=ep /usr/bin/newgidmap; \
+    [ -z "$(find / -xdev -perm /6000 -type f)" ]; \
+    # A file capability is as good as setuid there: these two are the only ones.
+    [ "$(find / -xdev -type f -exec getcap {} + | LC_ALL=C sort)" = \
+      "$(printf '/usr/bin/newgidmap cap_setgid=ep\n/usr/bin/newuidmap cap_setuid=ep')" ]; \
+    # A lux Run maps only container ids 0-65535; useradd's 100000:65536 is outside it.
+    printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid; \
+    cp /etc/subuid /etc/subgid; \
+    # podman-docker's shim prints a notice on every call unless this exists.
+    touch /etc/containers/nodocker
+COPY --chmod=0644 containers.conf /etc/containers/containers.conf
 
 # Go tarball hashes: https://go.dev/dl/?mode=json
 ARG GO_VERSION=1.27.3
@@ -101,7 +140,7 @@ ENV JAVA_HOME=/usr/lib/jvm/java-${JDK_MAJOR}-openjdk-${TARGETARCH} \
 
 ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
-      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM and diff-guard" \
+      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM, diff-guard and rootless Podman" \
       org.opencontainers.image.licenses="ELv2" \
       org.opencontainers.image.version="${VERSION}"
 
