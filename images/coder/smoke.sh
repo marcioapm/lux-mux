@@ -13,6 +13,9 @@ LLVM_WANT=23
 RUST_WANT=1.99.1
 RUST_EXTRA_WANT=1.94.0
 PODMAN_WANT=5.7
+BUN_WANT=1.4.2
+# What headless Chromium (Playwright's Chrome for Testing) needs beyond the base image.
+CHROMIUM_SONAMES="libatk-1.0.so.0 libatk-bridge-2.0.so.0 libatspi.so.0 libXcomposite.so.1 libXdamage.so.1 libcups.so.2"
 
 fail() {
 	echo "smoke: FAIL: $*" >&2
@@ -21,7 +24,7 @@ fail() {
 
 sh /smoke-default.sh || fail "the default image's smoke test failed"
 
-for tool in go java javac rustc cargo rustup clang clang++ ld.lld clang-format clang-tidy clangd cmake ninja diff-guard; do
+for tool in go java javac rustc cargo rustup bun bunx clang clang++ ld.lld clang-format clang-tidy clangd cmake ninja diff-guard; do
 	command -v "$tool" >/dev/null 2>&1 || fail "$tool is not on PATH"
 	bash -lc "command -v $tool" >/dev/null 2>&1 || fail "$tool is not on the login shell's PATH"
 	echo "ok: $tool on PATH"
@@ -43,6 +46,28 @@ v=$(rustc --version 2>/dev/null) || fail "'rustc --version' exited non-zero"
 case "$v" in "rustc $RUST_WANT "*) echo "ok: $v" ;; *) fail "default rustc is '$v', want $RUST_WANT" ;; esac
 v=$(rustup toolchain list 2>/dev/null) || fail "'rustup toolchain list' exited non-zero"
 case "$v" in *"$RUST_EXTRA_WANT-"*) echo "ok: rust $RUST_EXTRA_WANT installed" ;; *) fail "rust toolchain $RUST_EXTRA_WANT is not installed" ;; esac
+v=$(bun --version 2>&1) || fail "'bun --version' exited non-zero: $v"
+[ "$v" = "$BUN_WANT" ] || fail "bun is '$v', want $BUN_WANT"
+echo "ok: bun $v"
+# 755 and root: no setuid/setgid bit, and the workload cannot replace it.
+v=$(stat -Lc '%u %g %a' /usr/local/bin/bun 2>&1) || fail "stat /usr/local/bin/bun failed: $v"
+[ "$v" = "0 0 755" ] || fail "/usr/local/bin/bun is '$v', want '0 0 755' (root:root, mode 755)"
+[ -L /usr/local/bin/bunx ] && [ "$(readlink /usr/local/bin/bunx)" = bun ] ||
+	fail "/usr/local/bin/bunx must be a symlink to bun"
+echo "ok: bun is root:root, mode 755; bunx -> bun"
+
+ld=$(ldconfig -p 2>&1) || fail "'ldconfig -p' exited non-zero: $ld"
+tab=$(printf '\t')
+for so in $CHROMIUM_SONAMES; do
+	# ldconfig -p lines: <tab><soname> (<abi>) => <path>
+	case "$ld" in
+	*"$tab$so ("*) ;;
+	*) fail "$so is not in the dynamic linker cache (Chromium needs it)" ;;
+	esac
+	python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$so" 2>&1 ||
+		fail "$so is in the linker cache but cannot be loaded"
+done
+echo "ok: Chromium's libraries resolve ($CHROMIUM_SONAMES)"
 
 out=$(mktemp -d) || fail "mktemp -d failed"
 trap 'rm -rf "$out"' 0
@@ -60,6 +85,7 @@ check() {
 printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("go-ok") }\n' >main.go &&
 	printf 'module smoke\n\ngo 1.27\n' >go.mod || fail "writing the Go fixture failed"
 check "go run" go-ok go run .
+check "bun runs JavaScript" bun-ok bun -e 'console.log("bun-ok")'
 
 printf 'public class Smoke { public static void main(String[] a) { System.out.println("java-ok"); } }\n' >Smoke.java ||
 	fail "writing the Java fixture failed"
@@ -95,13 +121,14 @@ echo "ok: diff-guard flags and clears"
 
 # Toolchain caches and stores must stay out of the persisted home, like npm's and uv's.
 # shellcheck disable=SC2016 # expanded by the login shell, not here
-for c in 'go env GOMODCACHE' 'go env GOCACHE' 'echo $CARGO_HOME' 'echo $RUSTUP_HOME' 'echo $GRADLE_USER_HOME'; do
+for c in 'go env GOMODCACHE' 'go env GOCACHE' 'echo $CARGO_HOME' 'echo $RUSTUP_HOME' 'echo $GRADLE_USER_HOME' \
+	'echo $BUN_INSTALL' 'echo $BUN_INSTALL_CACHE_DIR'; do
 	d=$(bash -lc "$c" 2>/dev/null) || fail "'$c' exited non-zero"
 	case "$d" in
 	"$HOME" | "$HOME"/* | '') fail "'$c' is '$d', want a path outside $HOME" ;;
 	esac
 done
-for d in go .cargo .rustup .gradle .cache; do
+for d in go .cargo .rustup .gradle .cache .bun; do
 	[ ! -e "$HOME/$d" ] || fail "a toolchain cache was created at $HOME/$d"
 done
 
@@ -183,6 +210,11 @@ if unshare --user true 2>/dev/null; then
 	*" $HOME/.local/share/containers/storage netavark /usr/bin/pasta") echo "ok: podman info ($v)" ;;
 	*) fail "podman info is '$v', want storage under $HOME/.local/share/containers, netavark and /usr/bin/pasta" ;;
 	esac
+	# Short names resolve to Docker Hub, as under Docker (registries.conf.d drop-in).
+	v=$(podman info --format '{{range .Registries.search}}{{.}} {{end}}' 2>&1) ||
+		fail "'podman info' (search registries) failed: $v"
+	[ "$v" = "docker.io " ] || fail "podman's search registries are '$v', want only docker.io"
+	echo "ok: podman search registries: docker.io"
 	v=$(docker compose version 2>&1) || fail "'docker compose version' exited non-zero: $v"
 	case "$v" in
 	*"podman-compose version "*) echo "ok: docker compose is podman-compose" ;;
@@ -191,6 +223,6 @@ if unshare --user true 2>/dev/null; then
 elif [ "${SMOKE_ENGINE:-0}" = 1 ]; then
 	fail "SMOKE_ENGINE=1 but no user namespace can be created here"
 else
-	echo "skip: podman info and docker compose (no user namespaces here; SMOKE_ENGINE=1 requires them)"
+	echo "skip: podman info, search registries and docker compose (no user namespaces here; SMOKE_ENGINE=1 requires them)"
 fi
 echo "smoke: PASS"

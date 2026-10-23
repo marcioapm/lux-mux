@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # The coder image: the default luxmux image plus the toolchains coding agents
-# build and test with (Go, Java, Rust, Clang/LLVM), diff-guard, and rootless
-# Podman with a docker shim for nested lux Runs (sandbox.nestedContainers).
+# build and test with (Go, Java, Rust, Clang/LLVM, Bun), diff-guard, the system
+# libraries headless Chromium needs, and rootless Podman with a docker shim for
+# nested lux Runs (sandbox.nestedContainers).
 # Bump the base with `docker buildx imagetools inspect ghcr.io/marcioapm/luxmux:<version>`
 # (the multi-arch index digest), as the default image bumps Ubuntu.
 ARG BASE_IMAGE=ghcr.io/marcioapm/luxmux:0.4.0@sha256:704d8200499c05def47db3add629b4ec5ddace1393279574c3d5c697c2d6ea3e
@@ -12,8 +13,8 @@ USER root
 
 # One layer per toolchain, each with its ARGs declared just before it. An ARG
 # in scope is part of every later RUN's cache key, so the layers go from the
-# slowest-moving and heaviest (apt) to the most often bumped (Rust): a Go or
-# Rust bump never reruns apt.
+# slowest-moving and heaviest (apt) to the most often bumped (Rust, then Bun):
+# a Go, Rust or Bun bump never reruns apt.
 
 # LLVM's own apt repository (apt.llvm.org): the newest stable major for this Ubuntu.
 # sha256 of https://apt.llvm.org/llvm-snapshot.gpg.key
@@ -49,6 +50,8 @@ RUN set -eux; \
 # Podman's networking is Recommends and is listed explicitly: passt (pasta),
 # nftables (netavark's bridge networks, -p, compose), aardvark-dns (compose
 # service names), slirp4netns; catatonit backs `--init`.
+# The last line: the libraries in Playwright's ubuntu26.04 Chromium table that
+# the base image lacks, so Playwright's Chrome for Testing starts headless.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -56,7 +59,8 @@ RUN set -eux; \
       passt nftables netavark aardvark-dns slirp4netns \
       fuse-overlayfs uidmap libcap2-bin \
       postgresql-client redis-tools sqlite3 socat netcat-openbsd bind9-dnsutils \
-      file tree rsync shellcheck yq; \
+      file tree rsync shellcheck yq \
+      libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 libxcomposite1 libxdamage1 libcups2t64; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*; \
     # AppArmor attaches by exec path: through Ubuntu's pasta -> passt symlink
@@ -79,6 +83,8 @@ RUN set -eux; \
     # podman-docker's shim prints a notice on every call unless this exists.
     touch /etc/containers/nodocker
 COPY --chmod=0644 containers.conf /etc/containers/containers.conf
+# Short names resolve to docker.io, as under Docker.
+COPY --chmod=0644 registries-docker-io.conf /etc/containers/registries.conf.d/50-docker-io.conf
 
 # Go tarball hashes: https://go.dev/dl/?mode=json
 ARG GO_VERSION=1.27.3
@@ -124,6 +130,25 @@ RUN set -eux; \
     rm -rf /opt/rustup/downloads/* /opt/rustup/tmp/* /opt/cargo/registry /tmp/rustup-init \
       /tmp/agent-cache /root/.cache
 
+# Bun zip hashes: https://github.com/oven-sh/bun/releases/download/bun-v<version>/SHASUMS256.txt
+# bunx is Bun's own argv[0] alias, a plain symlink.
+ARG BUN_VERSION=1.4.2
+ARG BUN_SHA256_AMD64=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
+ARG BUN_SHA256_ARM64=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) bun_arch=x64; bun_sha=$BUN_SHA256_AMD64 ;; \
+      arm64) bun_arch=aarch64; bun_sha=$BUN_SHA256_ARM64 ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bun_arch}.zip" -o /tmp/bun.zip; \
+    echo "$bun_sha  /tmp/bun.zip" | sha256sum -c -; \
+    unzip -q -d /tmp/bun /tmp/bun.zip "bun-linux-${bun_arch}/bun"; \
+    install -o root -g root -m 0755 "/tmp/bun/bun-linux-${bun_arch}/bun" /usr/local/bin/bun; \
+    ln -s bun /usr/local/bin/bunx; \
+    [ "$(/usr/local/bin/bun --version)" = "$BUN_VERSION" ]; \
+    rm -rf /tmp/bun /tmp/bun.zip /tmp/agent-cache /root/.bun /root/.cache
+
 COPY --chmod=0755 diff-guard.py /usr/local/bin/diff-guard
 
 # Toolchains stay outside the home; their caches and downloads go to the
@@ -136,11 +161,13 @@ ENV JAVA_HOME=/usr/lib/jvm/java-${JDK_MAJOR}-openjdk-${TARGETARCH} \
     GOPATH=/tmp/agent-cache/go \
     GOMODCACHE=/tmp/agent-cache/go/mod \
     CARGO_HOME=/tmp/agent-cache/cargo \
-    GRADLE_USER_HOME=/tmp/agent-cache/gradle
+    GRADLE_USER_HOME=/tmp/agent-cache/gradle \
+    BUN_INSTALL=/tmp/agent-cache/bun \
+    BUN_INSTALL_CACHE_DIR=/tmp/agent-cache/bun/install/cache
 
 ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
-      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM, diff-guard and rootless Podman" \
+      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM, Bun, diff-guard, headless-Chromium libraries and rootless Podman" \
       org.opencontainers.image.licenses="ELv2" \
       org.opencontainers.image.version="${VERSION}"
 
