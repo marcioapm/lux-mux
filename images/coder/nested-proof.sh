@@ -30,7 +30,7 @@ step() { echo; echo "### $*"; }
 die() { echo "NESTED FAIL: $*"; exit 1; }
 # bounded SECS CMD...: CMD gets SIGTERM after SECS and SIGKILL 10 s later.
 bounded() { local secs=$1; shift; timeout --kill-after=10s "$secs" "$@"; }
-rm_container() { bounded 30s podman rm -f -t 0 "$@" >/dev/null; }
+rm_container() { bounded 30s podman rm -f -v -t 0 "$@" >/dev/null; }
 
 # Every resource is named after this run's id, so cleanup removes only its own.
 run_id=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n') && [ -n "$run_id" ] || die "run id"
@@ -39,7 +39,7 @@ probe_started=0 pg_started=0 compose_file='' compose_dir=''
 cleanup() {
 	local rc=0
 	if [ -n "$compose_file" ]; then
-		bounded 60s docker compose -f "$compose_file" down -t 1 >/dev/null 2>&1 || rc=1
+		bounded 60s docker compose -p "$project" -f "$compose_file" down -v -t 1 >/dev/null 2>&1 || rc=1
 	fi
 	if [ "$probe_started" = 1 ]; then
 		rm_container --ignore "$probe" || rc=1
@@ -103,6 +103,8 @@ if [ -e /images.tar ]; then
 	podman images
 fi
 
+volumes_before=$(podman volume ls -q | sort) || die "podman volume ls"
+
 step "podman run alpine; overlay is $([ "$store_mounted" = 1 ] && echo native || echo fuse-overlayfs)"
 probe_started=1
 bounded 300s podman run -d --name "$probe" "$ALPINE" sleep 120 >/dev/null || die "podman run $probe"
@@ -133,14 +135,14 @@ ls -li /usr/bin/pasta /usr/bin/passt
 
 step "postgres -p 55432:5432"
 pg_started=1
-bounded 300s podman run -d --name "$pg" -p 55432:5432 -e POSTGRES_PASSWORD=x "$PG" >/dev/null ||
+bounded 300s podman run -d --name "$pg" -p 55432:5432 --tmpfs /var/lib/postgresql -e POSTGRES_PASSWORD=x "$PG" >/dev/null ||
 	die "postgres run"
 for _ in $(seq 60); do pg_isready -t 3 -h 127.0.0.1 -p 55432 >/dev/null 2>&1 && break; sleep 1; done
 pg_isready -t 3 -h 127.0.0.1 -p 55432 || { podman logs "$pg" 2>&1 | tail; die "pg_isready"; }
 # The image's init restarts the server once; retry until a query lands.
 query_ok=0
 for _ in $(seq 30); do
-	if r=$(PGCONNECT_TIMEOUT=3 PGPASSWORD=x psql -h 127.0.0.1 -p 55432 -U postgres -v ON_ERROR_STOP=1 -tAc 'select 1' 2>&1); then
+	if r=$(PGCONNECT_TIMEOUT=3 PGPASSWORD=x bounded 10s psql -h 127.0.0.1 -p 55432 -U postgres -v ON_ERROR_STOP=1 -tAc 'select 1' 2>&1); then
 		query_ok=1
 		break
 	fi
@@ -160,10 +162,12 @@ name: $project
 services:
   db:
     image: $PG
+    tmpfs: [/var/lib/postgresql]
     environment:
       POSTGRES_PASSWORD: x
   client:
     image: $PG
+    tmpfs: [/var/lib/postgresql]
     depends_on: [db]
     environment:
       PGPASSWORD: x
@@ -178,13 +182,13 @@ services:
         echo "select 40+2 -> \$\$r" && [ "\$\$r" = 42 ] && echo $marker
 EOF
 cd "$compose_dir" || die "cd $compose_dir"
-bounded 180s docker compose -f "$compose_file" up --abort-on-container-exit --exit-code-from client \
+bounded 180s docker compose -p "$project" -f "$compose_file" up --abort-on-container-exit --exit-code-from client \
 	>"$compose_dir/up.log" 2>&1
 rc=$?
 sed 's/\x1b\[[0-9;]*m//g' "$compose_dir/up.log" | grep -v '^\[db\]' | tail -15
 echo "compose exit: $rc"
 [ "$rc" = 0 ] || die "compose up failed or timed out: $rc"
-client_log=$(bounded 60s docker compose -f "$compose_file" logs client 2>&1) ||
+client_log=$(bounded 60s docker compose -p "$project" -f "$compose_file" logs client 2>&1) ||
 	die "compose logs client: $client_log"
 grep -Eq "(^|[[:space:]])$marker\$" <<<"$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' <<<"$client_log")" ||
 	die "compose client did not confirm its query (no $marker in its log)"
@@ -199,6 +203,9 @@ left=$(podman ps -a --format '{{.Names}}' --filter "name=$run_id") || die "podma
 [ -z "$left" ] || die "containers left: $left"
 left=$(podman network ls --format '{{.Name}}' --filter "name=$run_id") || die "podman network ls"
 [ -z "$left" ] || die "networks left: $left"
-echo "removed this run's containers, network and $removed_dir"
+volumes_after=$(podman volume ls -q | sort) || die "podman volume ls"
+left=$(comm -13 <(printf '%s\n' "$volumes_before") <(printf '%s\n' "$volumes_after"))
+[ -z "$left" ] || die "volumes left: $left"
+echo "removed this run's containers, volumes, network and $removed_dir"
 echo
 if [ "$store_mounted" = 1 ]; then echo "NESTED PASS"; else echo "FALLBACK DEMO PASS (no engine-store mount: not a proof of a lux placement)"; fi

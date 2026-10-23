@@ -189,7 +189,8 @@ file (Postgres and a client that reaches it as `db`, checks `select 40+2` is
 42 and prints a per-run marker) under
 `docker compose up --abort-on-container-exit`, which must exit 0 within 180 s
 with the marker in the client's log. Every resource has a per-run name and is
-removed before it prints `NESTED PASS`. A failed cleanup is a failure.
+removed (the compose project pinned with `-p`; Postgres data on a tmpfs, so no
+anonymous volume is created, and none may be left) before it prints `NESTED PASS`. A failed cleanup is a failure.
 `ALLOW_NO_STORE_MOUNT=1` runs the fallback demo instead: no mount, and
 fuse-overlayfs is asserted. It ends in `FALLBACK DEMO PASS`, not
 `NESTED PASS`. Images come from Docker Hub by digest, or from `/images.tar`,
