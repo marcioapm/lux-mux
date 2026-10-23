@@ -50,9 +50,8 @@ RUN set -eux; \
 # Podman's networking is Recommends and is listed explicitly: passt (pasta),
 # nftables (netavark's bridge networks, -p, compose), aardvark-dns (compose
 # service names), slirp4netns; catatonit backs `--init`.
-# The last line is what Playwright's own ubuntu26.04 table lists for Chromium
-# that the base image lacks (the other 15 are already in it): with these, the
-# Chrome for Testing build Playwright downloads starts headless.
+# The last line: the libraries in Playwright's ubuntu26.04 Chromium table that
+# the base image lacks, so Playwright's Chrome for Testing starts headless.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -84,8 +83,7 @@ RUN set -eux; \
     # podman-docker's shim prints a notice on every call unless this exists.
     touch /etc/containers/nodocker
 COPY --chmod=0644 containers.conf /etc/containers/containers.conf
-# Docker resolves a short name (`versity/versitygw:v1.7.0`) to docker.io; with
-# docker.io as the only search registry Podman does the same, without prompting.
+# Short names resolve to docker.io, as under Docker.
 COPY --chmod=0644 registries-docker-io.conf /etc/containers/registries.conf.d/50-docker-io.conf
 
 # Go tarball hashes: https://go.dev/dl/?mode=json
@@ -132,10 +130,7 @@ RUN set -eux; \
     rm -rf /opt/rustup/downloads/* /opt/rustup/tmp/* /opt/cargo/registry /tmp/rustup-init \
       /tmp/agent-cache /root/.cache
 
-# Bun: the release zips' hashes from
-# https://github.com/oven-sh/bun/releases/download/bun-v<version>/SHASUMS256.txt
-# Last, as the most often bumped: a Bun release never reruns the Rust layer.
-# One root-owned binary in /usr/local/bin, outside the home like Go and Node;
+# Bun zip hashes: https://github.com/oven-sh/bun/releases/download/bun-v<version>/SHASUMS256.txt
 # bunx is Bun's own argv[0] alias, a plain symlink.
 ARG BUN_VERSION=1.4.2
 ARG BUN_SHA256_AMD64=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
