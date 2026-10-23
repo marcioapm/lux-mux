@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # The coder image: the default luxmux image plus the toolchains coding agents
-# build and test with (Go, Java, Rust, Clang/LLVM) and diff-guard.
+# build and test with (Go, Java, Rust, Clang/LLVM), diff-guard, and rootless
+# Podman with a docker shim for nested lux Runs (sandbox.nestedContainers).
 # Bump the base with `docker buildx imagetools inspect ghcr.io/marcioapm/luxmux:<version>`
 # (the multi-arch index digest), as the default image bumps Ubuntu.
 ARG BASE_IMAGE=ghcr.io/marcioapm/luxmux:0.4.0@sha256:704d8200499c05def47db3add629b4ec5ddace1393279574c3d5c697c2d6ea3e
@@ -136,7 +137,7 @@ ENV JAVA_HOME=/usr/lib/jvm/java-${JDK_MAJOR}-openjdk-${TARGETARCH} \
 
 ARG VERSION=devel
 LABEL org.opencontainers.image.source="https://github.com/marcioapm/lux-mux" \
-      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM and diff-guard" \
+      org.opencontainers.image.description="luxmux coder image: the default luxmux image plus Go, Java (OpenJDK), Rust (rustup), Clang/LLVM, diff-guard and rootless Podman" \
       org.opencontainers.image.licenses="ELv2" \
       org.opencontainers.image.version="${VERSION}"
 

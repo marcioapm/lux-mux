@@ -69,8 +69,8 @@ espeak-ng is the offline fallback.
   and the bundling behind `lux push` run it), `bash` for luxmux's login
   shell, `git` for checkouts and `lux push`, and coreutils.
 - **Not included:** nested containers (`sandbox.nestedContainers`) need an
-  engine, `fuse-overlayfs` and `newuidmap`; build on this image if you need
-  them.
+  engine, `fuse-overlayfs` and `newuidmap`; the [coder image](../coder/README.md)
+  has them (rootless Podman), or build on this image.
 
 ## Credentials and network
 
