@@ -50,9 +50,11 @@ v=$(bun --version 2>&1) || fail "'bun --version' exited non-zero: $v"
 [ "$v" = "$BUN_WANT" ] || fail "bun is '$v', want $BUN_WANT"
 echo "ok: bun $v"
 # 755 and root: no setuid/setgid bit, and the workload cannot replace it.
-v=$(stat -Lc '%U %a' /usr/local/bin/bun 2>&1) || fail "stat /usr/local/bin/bun failed: $v"
-[ "$v" = "root 755" ] || fail "/usr/local/bin/bun is '$v', want 'root 755'"
-echo "ok: bun is root-owned, mode 755"
+v=$(stat -Lc '%u %g %a' /usr/local/bin/bun 2>&1) || fail "stat /usr/local/bin/bun failed: $v"
+[ "$v" = "0 0 755" ] || fail "/usr/local/bin/bun is '$v', want '0 0 755' (root:root, mode 755)"
+[ -L /usr/local/bin/bunx ] && [ "$(readlink /usr/local/bin/bunx)" = bun ] ||
+	fail "/usr/local/bin/bunx must be a symlink to bun"
+echo "ok: bun is root:root, mode 755; bunx -> bun"
 
 # Headless Chromium: Playwright downloads the browser; the image has its libraries.
 ld=$(ldconfig -p 2>&1) || fail "'ldconfig -p' exited non-zero: $ld"
@@ -63,6 +65,8 @@ for so in $CHROMIUM_SONAMES; do
 	*"$tab$so ("*) ;;
 	*) fail "$so is not in the dynamic linker cache (Chromium needs it)" ;;
 	esac
+	python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$so" 2>&1 ||
+		fail "$so is in the linker cache but cannot be loaded"
 done
 echo "ok: Chromium's libraries resolve ($CHROMIUM_SONAMES)"
 
@@ -82,6 +86,7 @@ check() {
 printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("go-ok") }\n' >main.go &&
 	printf 'module smoke\n\ngo 1.27\n' >go.mod || fail "writing the Go fixture failed"
 check "go run" go-ok go run .
+check "bun runs JavaScript" bun-ok bun -e 'console.log("bun-ok")'
 
 printf 'public class Smoke { public static void main(String[] a) { System.out.println("java-ok"); } }\n' >Smoke.java ||
 	fail "writing the Java fixture failed"
@@ -117,13 +122,14 @@ echo "ok: diff-guard flags and clears"
 
 # Toolchain caches and stores must stay out of the persisted home, like npm's and uv's.
 # shellcheck disable=SC2016 # expanded by the login shell, not here
-for c in 'go env GOMODCACHE' 'go env GOCACHE' 'echo $CARGO_HOME' 'echo $RUSTUP_HOME' 'echo $GRADLE_USER_HOME'; do
+for c in 'go env GOMODCACHE' 'go env GOCACHE' 'echo $CARGO_HOME' 'echo $RUSTUP_HOME' 'echo $GRADLE_USER_HOME' \
+	'echo $BUN_INSTALL' 'echo $BUN_INSTALL_CACHE_DIR'; do
 	d=$(bash -lc "$c" 2>/dev/null) || fail "'$c' exited non-zero"
 	case "$d" in
 	"$HOME" | "$HOME"/* | '') fail "'$c' is '$d', want a path outside $HOME" ;;
 	esac
 done
-for d in go .cargo .rustup .gradle .cache; do
+for d in go .cargo .rustup .gradle .cache .bun; do
 	[ ! -e "$HOME/$d" ] || fail "a toolchain cache was created at $HOME/$d"
 done
 
