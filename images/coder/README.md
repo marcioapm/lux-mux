@@ -46,16 +46,15 @@ expectations in `smoke.sh`.
 
 ## Browsers
 
-The image ships no browser. Playwright downloads its own (`playwright install
-chromium` fetches Chrome for Testing and its headless shell into
-`/tmp/agent-cache/ms-playwright`, so `cdn.playwright.dev` and PyPI or npm,
-for Playwright itself, must be in the Run's egress), and the image
-provides the system libraries it links: the base image's, plus
-`libatk1.0-0t64`, `libatk-bridge2.0-0t64`, `libatspi2.0-0t64`,
-`libxcomposite1`, `libxdamage1` and `libcups2t64` from Playwright's
-ubuntu26.04 table. A Run has no root, so `playwright install --with-deps`
-cannot add them. There is no Google Chrome: it has no arm64 Linux build.
-Headless Chromium works; headed mode needs an X server, which the image lacks.
+The image ships no browser, only the system libraries Playwright's Chromium
+links: the base image's, plus `libatk1.0-0t64`, `libatk-bridge2.0-0t64`,
+`libatspi2.0-0t64`, `libxcomposite1`, `libxdamage1` and `libcups2t64` from
+Playwright's ubuntu26.04 table. A Run has no root, so `playwright install
+--with-deps` cannot add them. `playwright install chromium` downloads Chrome
+for Testing and its headless shell into `/tmp/agent-cache/ms-playwright`,
+so the Run's egress needs `cdn.playwright.dev`, plus PyPI or npm for
+Playwright itself. There is no Google Chrome (no arm64 Linux build), and
+headed mode needs an X server, which the image lacks.
 
 ## Containers in a Run
 
@@ -76,12 +75,10 @@ containers.
   no socket either. Services resolve each other by name through
   aardvark-dns; `depends_on` orders starts but does not wait for health.
 - **Short names resolve to Docker Hub**, as under Docker:
-  `/etc/containers/registries.conf.d/50-docker-io.conf` sets
-  `unqualified-search-registries = ["docker.io"]`, so `docker run
-  versity/versitygw:v1.7.0` pulls `docker.io/versity/versitygw:v1.7.0`.
-  With one search registry Podman never prompts; `short-name-mode` is
-  unchanged, and the aliases in Podman's `shortnames.conf` (`alpine`,
-  `ubuntu`, …) still apply first.
+  `/etc/containers/registries.conf.d/50-docker-io.conf` makes `docker.io`
+  the only search registry, so `docker run versity/versitygw:v1.7.0` pulls
+  `docker.io/versity/versitygw:v1.7.0` without a prompt. The aliases in
+  Podman's `shortnames.conf` (`alpine`, `ubuntu`, …) still apply first.
 - **Storage.** lux mounts an ephemeral volume at
   `~/.local/share/containers`, where Podman's default store gets native
   kernel overlay. Nothing configures another graphroot or a
@@ -185,9 +182,9 @@ docker run --rm --network none \
 The smoke test runs the default image's smoke test first, then, offline: every
 added tool is on the login shell's `PATH` and the LLVM tools, cmake and ninja
 start; Go, Java, Clang and the default and extra Rust toolchains are the
-pinned versions and `JAVA_HOME` holds a JDK; `bun --version` is exactly the
-pinned one and the binary is root-owned and not setuid; the six sonames
-Chromium needs beyond the base image are in `ldconfig -p`; a Go program, a Java class, a
+pinned versions and `JAVA_HOME` holds a JDK; `bun` is the pinned version,
+root-owned `0755`, with `bunx` → `bun`; the six sonames Chromium needs beyond
+the base image are in `ldconfig -p` and load; a Go program, Bun JavaScript, a Java class, a
 C++23 program (with libstdc++ and lld, and with libc++), and a Cargo project on
 both the default and the pinned toolchain build and run; diff-guard flags a
 source-inspection test and passes a clean tree; and no toolchain cache or store
