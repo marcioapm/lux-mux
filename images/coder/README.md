@@ -15,7 +15,9 @@ way: it is the `ghcr.io/marcioapm/luxmux` repository, so its Runs get the
 | Rust | rustup `1.29.1` in `/opt/cargo`, default toolchain `1.99.1`, plus `1.94.0` preinstalled (`RUST_EXTRA_TOOLCHAINS`), each with rustfmt and clippy |
 | C/C++ | Clang/LLVM `23` from apt.llvm.org: clang, clang++, lld, llvm tools, clang-format, clang-tidy, clangd, libc++; unversioned names in `/usr/local/bin`. `cc`/`c++` stay GCC. cmake, ninja, libssl-dev |
 | Gate | `diff-guard` in `/usr/local/bin` |
-| Containers | rootless Podman `5.7` (Ubuntu's), `docker` → podman (`podman-docker`), `docker compose` / `podman compose` → `podman-compose` `1.5`; crun, conmon, catatonit (`--init`), netavark, aardvark-dns, nftables, passt/pasta, slirp4netns, fuse-overlayfs, uidmap |
+| Bun | `1.4.2` from the GitHub release, root-owned in `/usr/local/bin` (`bunx` → `bun`); `BUN_INSTALL` and its cache under `/tmp/agent-cache` |
+| Browsers | the system libraries Playwright's Chromium needs (see "Browsers"); no browser |
+| Containers | rootless Podman `5.7` (Ubuntu's), `docker` → podman (`podman-docker`), `docker compose` / `podman compose` → `podman-compose` `1.5`; crun, conmon, catatonit (`--init`), netavark, aardvark-dns, nftables, passt/pasta, slirp4netns, fuse-overlayfs, uidmap; short names resolve to `docker.io` |
 | CLI tools | `psql`/`pg_isready` (postgresql-client), `redis-cli`, `sqlite3`, `socat`, `nc` (OpenBSD), `dig` (bind9-dnsutils), `file`, `tree`, `rsync`, `shellcheck`, `yq` (the jq wrapper) |
 
 Every independently downloaded archive is checked against a sha256 pinned in
@@ -39,6 +41,21 @@ expectations in `smoke.sh`.
   `cargo install` goes to `$CARGO_HOME/bin`, which is not on `PATH`.
 - **Go** never downloads a newer toolchain on its own (`GOTOOLCHAIN=local`):
   a module whose `go` line is newer than the image's fails loudly instead.
+- **Bun** is a single root-owned binary, like Go and Node. A `bun install -g`
+  goes to `$BUN_INSTALL` under `/tmp/agent-cache`, not the home.
+
+## Browsers
+
+The image ships no browser. Playwright downloads its own (`playwright install
+chromium` fetches Chrome for Testing and its headless shell into
+`/tmp/agent-cache/ms-playwright`, so `cdn.playwright.dev` and PyPI or npm,
+for Playwright itself, must be in the Run's egress), and the image
+provides the system libraries it links: the base image's, plus
+`libatk1.0-0t64`, `libatk-bridge2.0-0t64`, `libatspi2.0-0t64`,
+`libxcomposite1`, `libxdamage1` and `libcups2t64` from Playwright's
+ubuntu26.04 table. A Run has no root, so `playwright install --with-deps`
+cannot add them. There is no Google Chrome: it has no arm64 Linux build.
+Headless Chromium works; headed mode needs an X server, which the image lacks.
 
 ## Containers in a Run
 
@@ -58,6 +75,13 @@ containers.
   `/etc/containers/containers.conf`. It drives the podman CLI, so it needs
   no socket either. Services resolve each other by name through
   aardvark-dns; `depends_on` orders starts but does not wait for health.
+- **Short names resolve to Docker Hub**, as under Docker:
+  `/etc/containers/registries.conf.d/50-docker-io.conf` sets
+  `unqualified-search-registries = ["docker.io"]`, so `docker run
+  versity/versitygw:v1.7.0` pulls `docker.io/versity/versitygw:v1.7.0`.
+  With one search registry Podman never prompts; `short-name-mode` is
+  unchanged, and the aliases in Podman's `shortnames.conf` (`alpine`,
+  `ubuntu`, …) still apply first.
 - **Storage.** lux mounts an ephemeral volume at
   `~/.local/share/containers`, where Podman's default store gets native
   kernel overlay. Nothing configures another graphroot or a
@@ -92,7 +116,8 @@ containers.
 
 Bump the `ARG`s in the Dockerfile, then the matching `*_WANT` versions at the
 top of `smoke.sh`. Each toolchain is its own layer, ordered apt (JDK, LLVM),
-apt (Podman and CLI tools), Go, Rust, so a Go or Rust bump never reruns apt:
+apt (Podman, CLI tools and browser libraries), Go, Rust, Bun, so a Go, Rust
+or Bun bump never reruns apt, and a Bun bump reruns nothing else:
 
 - `BASE_IMAGE`: the default image's new release, `docker buildx imagetools
   inspect ghcr.io/marcioapm/luxmux:<version>`, the index digest at the top.
@@ -105,10 +130,17 @@ apt (Podman and CLI tools), Go, Rust, so a Go or Rust bump never reruns apt:
   `https://apt.llvm.org/<codename>/dists/`. The packages are LLVM's own
   builds of the current point release.
 - `JDK_MAJOR`: the current OpenJDK LTS in Ubuntu.
-- Podman and the CLI tools are Ubuntu's, unpinned, and move when that layer
-  rebuilds (a `BASE_IMAGE` bump or an edit to the step). Set `PODMAN_WANT`
-  in `smoke.sh` to the new major.minor. Keep this step the image's last apt
-  step: the pasta links and the setuid strip must come after every install.
+- `BUN_VERSION` and its hashes: the `bun-linux-x64.zip` and
+  `bun-linux-aarch64.zip` lines of
+  `https://github.com/oven-sh/bun/releases/download/bun-v<version>/SHASUMS256.txt`;
+  `BUN_WANT` in `smoke.sh`.
+- Podman, the CLI tools and the browser libraries are Ubuntu's, unpinned,
+  and move when that layer rebuilds (a `BASE_IMAGE` bump or an edit to the
+  step). Set `PODMAN_WANT` in `smoke.sh` to the new major.minor. Keep this
+  step the image's last apt step: the pasta links and the setuid strip must
+  come after every install. When Playwright is bumped, compare its
+  `ubuntu26.04` Chromium dependency table with the libraries here and
+  `CHROMIUM_SONAMES` in `smoke.sh`.
 - `diff-guard.py`: copied from its source when it changes.
 
 ## Tags and publishing
@@ -118,17 +150,26 @@ with its own tags so the two images release independently:
 
 - a `coder-vX.Y.Z` tag pushes `:coder-X.Y.Z`, and moves `:coder` only if it
   is the highest `coder-vX.Y.Z` tag;
-- a pre-release tag (`coder-v0.2.0-rc.1`) pushes `:coder-0.2.0-rc.1` and
+- a pre-release tag (`coder-v0.3.0-rc.1`) pushes `:coder-0.3.0-rc.1` and
   leaves `:coder`;
 - every push to `main` and every pull request touching `images/coder/**`,
   the default smoke test or the workflow builds and smoke-tests both
   architectures without pushing.
 
-Current release: `coder-v0.2.0` (`:coder-0.2.0`, Podman and CLI tools added
-to `coder-0.1.0`). To release, tag `coder-v0.2.0` on `main`; the
-`VERSION` build arg labels the image `0.2.0` from the tag. The repository
-stays `ghcr.io/marcioapm/luxmux`, so luxmux still recognises the image as its
-own (`IsDefaultImage`) and its Runs keep the `/home/agent` volume.
+Current release: `coder-v0.3.0` (`:coder-0.3.0`). To release, tag
+`coder-v0.3.0` on `main`; the `VERSION` build arg labels the image `0.3.0`
+from the tag. The repository stays `ghcr.io/marcioapm/luxmux`, so luxmux
+still recognises the image as its own (`IsDefaultImage`) and its Runs keep
+the `/home/agent` volume. A release that adds a capability is a minor bump;
+one that only moves pinned versions is a patch.
+
+- `coder-0.3.0`: the system libraries headless Chromium needs (Playwright's
+  own browser download now starts), podman short names resolve to
+  `docker.io`, and Bun `1.4.2`.
+- `coder-0.2.0`: rootless Podman, the docker shim, podman-compose and the
+  CLI tools (`index sha256:7bdcfced86fda50db04e3430a4a5c2613c9af393c705a149aee069370d01e3c6`).
+- `coder-0.1.0`: the default image plus Go, Java, Rust, Clang/LLVM and
+  diff-guard.
 
 ## Building and testing locally
 
@@ -144,7 +185,9 @@ docker run --rm --network none \
 The smoke test runs the default image's smoke test first, then, offline: every
 added tool is on the login shell's `PATH` and the LLVM tools, cmake and ninja
 start; Go, Java, Clang and the default and extra Rust toolchains are the
-pinned versions and `JAVA_HOME` holds a JDK; a Go program, a Java class, a
+pinned versions and `JAVA_HOME` holds a JDK; `bun --version` is exactly the
+pinned one and the binary is root-owned and not setuid; the six sonames
+Chromium needs beyond the base image are in `ldconfig -p`; a Go program, a Java class, a
 C++23 program (with libstdc++ and lld, and with libc++), and a Cargo project on
 both the default and the pinned toolchain build and run; diff-guard flags a
 source-inspection test and passes a clean tree; and no toolchain cache or store
@@ -154,10 +197,12 @@ newgidmap file capabilities and that no other file has one, that no setuid or
 setgid file exists, and the exact subuid/subgid lines; every added CLI tool
 runs (`sqlite3`, `yq` and `shellcheck` on a fixture, the rest print their
 version). Where the container may create a user namespace it also runs
-`podman info` as a Run starts it (no `XDG_RUNTIME_DIR`) and `docker compose
-version`; elsewhere it skips those two, unless `SMOKE_ENGINE=1` requires them
+`podman info` as a Run starts it (no `XDG_RUNTIME_DIR`), checks that
+`docker.io` is its only search registry, and runs `docker compose
+version`; elsewhere it skips those, unless `SMOKE_ENGINE=1` requires them
 (CI's second smoke step, which relaxes only seccomp and AppArmor). Every
-command's exit status is checked before its output.
+command's exit status is checked before its output. A third CI step, with
+network, installs Playwright 1.64.1's Chromium and renders a page headless.
 
 ### Nested proof
 
@@ -197,6 +242,7 @@ fuse-overlayfs is asserted. It ends in `FALLBACK DEMO PASS`, not
 which then needs `ALPINE_ID` and `PG_ID` (see its header), where the outer
 container has no egress.
 
-Size at the versions above, amd64: about 4.9 GB unpacked, 2.7 GB more than
+Size at `coder-0.2.0`, amd64: about 4.9 GB unpacked, 2.7 GB more than
 the default image (mostly LLVM, the two Rust toolchains and the JDK; Podman
-and the CLI tools are 175 MB of it).
+and the CLI tools are 175 MB of it). `coder-0.3.0` adds about 85 MB (arm64:
+Bun 79 MB, the browser libraries 5 MB).
