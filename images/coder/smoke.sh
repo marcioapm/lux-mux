@@ -12,6 +12,7 @@ JDK_WANT=25
 LLVM_WANT=23
 RUST_WANT=1.99.1
 RUST_EXTRA_WANT=1.94.0
+PODMAN_WANT=5.7
 
 fail() {
 	echo "smoke: FAIL: $*" >&2
@@ -103,4 +104,68 @@ done
 for d in go .cargo .rustup .gradle .cache; do
 	[ ! -e "$HOME/$d" ] || fail "a toolchain cache was created at $HOME/$d"
 done
+
+# The nested engine. Nothing here starts a container: that needs a nested
+# Run's grants (the nested proof in README.md).
+for tool in podman docker podman-compose pasta passt newuidmap newgidmap fuse-overlayfs slirp4netns crun catatonit nft \
+	psql pg_isready redis-cli sqlite3 socat nc dig file tree rsync shellcheck yq; do
+	command -v "$tool" >/dev/null 2>&1 || fail "$tool is not on PATH"
+done
+echo "ok: engine and CLI tools on PATH"
+v=$(podman --version 2>/dev/null) || fail "'podman --version' exited non-zero"
+case "$v" in "podman version $PODMAN_WANT".*) echo "ok: $v" ;; *) fail "podman is '$v', want $PODMAN_WANT.x" ;; esac
+check "docker shim (no notice on stderr)" "$v" docker --version
+v=$(pasta --version 2>/dev/null) || fail "'pasta --version' exited non-zero"
+echo "ok: $(echo "$v" | head -n 1)"
+
+# AppArmor picks the profile by exec path: pasta must be passt's inode, not a symlink to it.
+for p in pasta pasta.avx2; do
+	t=/usr/bin/passt${p#pasta}
+	[ -e "$t" ] || [ -e "/usr/bin/$p" ] || continue
+	[ ! -L "/usr/bin/$p" ] || fail "/usr/bin/$p is a symlink, want a hard link to $t"
+	[ "/usr/bin/$p" -ef "$t" ] || fail "/usr/bin/$p is not a hard link to $t"
+	echo "ok: /usr/bin/$p is a hard link to $t"
+done
+
+check "newuidmap capability" "/usr/bin/newuidmap cap_setuid=ep" getcap /usr/bin/newuidmap
+check "newgidmap capability" "/usr/bin/newgidmap cap_setgid=ep" getcap /usr/bin/newgidmap
+# Unreadable directories are skipped; the build asserts the same as root.
+s=$(find / -xdev -perm /6000 -type f 2>/dev/null)
+[ -z "$s" ] || fail "setuid/setgid files: $(echo "$s" | tr '\n' ' ')"
+echo "ok: no setuid or setgid files"
+for f in /etc/subuid /etc/subgid; do
+	[ "$(cat "$f")" = "$(printf 'agent:1:999\nagent:1001:64535')" ] ||
+		fail "$f is '$(cat "$f")', want agent:1:999 and agent:1001:64535 (a lux Run maps ids 0-65535 only)"
+done
+echo "ok: subordinate ids inside 0-65535"
+
+check "sqlite3" 2 sqlite3 :memory: 'select 1+1'
+check "yq" 1 yq -r .a <<EOF
+a: 1
+EOF
+printf '#!/bin/sh\necho shellcheck-ok\n' >ok.sh || fail "writing the shellcheck fixture failed"
+check "shellcheck" "" shellcheck ok.sh
+
+# podman re-execs itself in a user namespace for everything but --version, and
+# a plain `docker run` (CI) refuses one under its seccomp and AppArmor
+# profiles. There these checks are skipped, unless SMOKE_ENGINE=1 requires them.
+if unshare --user true 2>/dev/null; then
+	# Exactly as a Run starts it: no XDG_RUNTIME_DIR, nothing in the home.
+	v=$(env -u XDG_RUNTIME_DIR -u CONTAINERS_CONF -u CONTAINERS_STORAGE_CONF podman info \
+		--format '{{.Host.RemoteSocket.Path}} {{.Store.GraphRoot}} {{.Host.NetworkBackend}} {{.Host.Pasta.Executable}}' 2>&1) ||
+		fail "'podman info' without XDG_RUNTIME_DIR failed: $v"
+	case "$v" in
+	*" $HOME/.local/share/containers/storage netavark /usr/bin/pasta") echo "ok: podman info ($v)" ;;
+	*) fail "podman info is '$v', want storage under $HOME/.local/share/containers, netavark and /usr/bin/pasta" ;;
+	esac
+	v=$(docker compose version 2>&1) || fail "'docker compose version' exited non-zero: $v"
+	case "$v" in
+	*"podman-compose version "*) echo "ok: docker compose is podman-compose" ;;
+	*) fail "'docker compose version' printed '$v'" ;;
+	esac
+elif [ "${SMOKE_ENGINE:-0}" = 1 ]; then
+	fail "SMOKE_ENGINE=1 but no user namespace can be created here"
+else
+	echo "skip: podman info and docker compose (no user namespaces here; SMOKE_ENGINE=1 requires them)"
+fi
 echo "smoke: PASS"

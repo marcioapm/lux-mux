@@ -41,6 +41,41 @@ RUN set -eux; \
       ln -s "/usr/bin/${t}-${LLVM_MAJOR}" "/usr/local/bin/${t}"; \
     done
 
+# Rootless Podman for nested lux Runs (sandbox.nestedContainers), plus the
+# command-line tools agents reach for. This is the image's last apt step: the
+# pasta hard links and the setuid strip below must follow every apt install.
+# Its own layer, so a tool added here never reruns the JDK/LLVM layer above.
+# Podman's networking is Recommends and is listed explicitly: passt (pasta),
+# nftables (netavark's bridge networks, -p, compose), aardvark-dns (compose
+# service names), slirp4netns; catatonit backs `--init`.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      podman podman-docker podman-compose crun conmon catatonit \
+      passt nftables netavark aardvark-dns slirp4netns \
+      fuse-overlayfs uidmap libcap2-bin \
+      postgresql-client redis-tools sqlite3 socat netcat-openbsd bind9-dnsutils \
+      file tree rsync shellcheck yq; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    # AppArmor attaches by exec path: through Ubuntu's pasta -> passt symlink
+    # the host's passt profile applies, which cannot open Podman's netns.
+    ln -f /usr/bin/passt /usr/bin/pasta; \
+    if [ -e /usr/bin/passt.avx2 ]; then ln -f /usr/bin/passt.avx2 /usr/bin/pasta.avx2; fi; \
+    # A nested Run has no no-new-privileges, so a setuid program would make the
+    # workload root in its container. newuidmap/newgidmap keep only the file
+    # capability they need; setuid-root, they would fail to write agent's uid_map.
+    find / -xdev -perm /6000 -type f -exec chmod ug-s {} +; \
+    setcap cap_setuid=ep /usr/bin/newuidmap; \
+    setcap cap_setgid=ep /usr/bin/newgidmap; \
+    [ -z "$(find / -xdev -perm /6000 -type f)" ]; \
+    # A lux Run maps only container ids 0-65535; useradd's 100000:65536 is outside it.
+    printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid; \
+    cp /etc/subuid /etc/subgid; \
+    # podman-docker's shim prints a notice on every call unless this exists.
+    touch /etc/containers/nodocker
+COPY --chmod=0644 containers.conf /etc/containers/containers.conf
+
 # Go tarball hashes: https://go.dev/dl/?mode=json
 ARG GO_VERSION=1.27.3
 ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
