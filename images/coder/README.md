@@ -153,12 +153,11 @@ shim, the pasta hard links (same inode, not a symlink), the newuidmap and
 newgidmap file capabilities and that no other file has one, that no setuid or
 setgid file exists, and the exact subuid/subgid lines; every added CLI tool
 runs (`sqlite3`, `yq` and `shellcheck` on a fixture, the rest print their
-version). Where the
-container may create a user namespace it also runs `podman info` as a Run
-starts it (no `XDG_RUNTIME_DIR`) and `docker compose version`; elsewhere it
-skips those two, unless `SMOKE_ENGINE=1` requires them (CI's second smoke
-step, which relaxes only seccomp and AppArmor). Every command's exit status
-is checked before its output.
+version). Where the container may create a user namespace it also runs
+`podman info` as a Run starts it (no `XDG_RUNTIME_DIR`) and `docker compose
+version`; elsewhere it skips those two, unless `SMOKE_ENGINE=1` requires them
+(CI's second smoke step, which relaxes only seccomp and AppArmor). Every
+command's exit status is checked before its output.
 
 ### Nested proof
 
@@ -179,8 +178,8 @@ sudo podman run --rm --user root \
 ```
 
 (`apparmor=unconfined` only where the host sets
-`kernel.apparmor_restrict_unprivileged_userns=1`, as lux does.) It runs, as
-`agent` with no `XDG_RUNTIME_DIR`. It requires the engine-store mount at
+`kernel.apparmor_restrict_unprivileged_userns=1`, as lux does.) It runs as
+`agent`, with no `XDG_RUNTIME_DIR`. It requires the engine-store mount at
 `~/.local/share/containers`, with Podman's graphroot on it, the overlay
 driver, native overlay and no fuse-overlayfs. It then runs a container on
 that store; a `docker run` on the default network that has a non-loopback
