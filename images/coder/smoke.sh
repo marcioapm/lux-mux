@@ -129,6 +129,11 @@ done
 
 check "newuidmap capability" "/usr/bin/newuidmap cap_setuid=ep" getcap /usr/bin/newuidmap
 check "newgidmap capability" "/usr/bin/newgidmap cap_setgid=ep" getcap /usr/bin/newgidmap
+# A file capability is as good as setuid in a nested Run: these two are the only ones.
+c=$(getcap -r /usr /bin /sbin /opt 2>/dev/null | LC_ALL=C sort)
+[ "$c" = "$(printf '/usr/bin/newgidmap cap_setgid=ep\n/usr/bin/newuidmap cap_setuid=ep')" ] ||
+	fail "file capabilities are '$(echo "$c" | tr '\n' ' ')', want only newuidmap cap_setuid=ep and newgidmap cap_setgid=ep"
+echo "ok: no other file capabilities"
 # Unreadable directories are skipped; the build asserts the same as root.
 s=$(find / -xdev -perm /6000 -type f 2>/dev/null)
 [ -z "$s" ] || fail "setuid/setgid files: $(echo "$s" | tr '\n' ' ')"

@@ -70,6 +70,9 @@ RUN set -eux; \
     setcap cap_setuid=ep /usr/bin/newuidmap; \
     setcap cap_setgid=ep /usr/bin/newgidmap; \
     [ -z "$(find / -xdev -perm /6000 -type f)" ]; \
+    # A file capability is as good as setuid there: these two are the only ones.
+    [ "$(find / -xdev -type f -exec getcap {} + | LC_ALL=C sort)" = \
+      "$(printf '/usr/bin/newgidmap cap_setgid=ep\n/usr/bin/newuidmap cap_setuid=ep')" ]; \
     # A lux Run maps only container ids 0-65535; useradd's 100000:65536 is outside it.
     printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid; \
     cp /etc/subuid /etc/subgid; \

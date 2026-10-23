@@ -79,7 +79,12 @@ containers.
   any setuid program (`su`, `passwd`, `mount`) would make the agent root in
   its container. The build strips every setuid/setgid bit and fails if one
   remains; `newuidmap`/`newgidmap` get `cap_setuid`/`cap_setgid` as file
-  capabilities instead. There is no sudo.
+  capabilities instead, and the build fails if any other file has one.
+  There is no sudo. Those two capabilities are safe only inside a user
+  namespace, as every lux Run has: in the host's initial namespace they let
+  `agent` act as host uids 1–65535. Outside lux, run the image with
+  `--userns` (or under a rootless engine), or with
+  `--security-opt no-new-privileges`, which also disables nested Podman.
 - Inner containers have the Run's egress rules, and share its CPU and memory
   limits unless the Run also sets `sandbox.cgroupDelegation: true`.
 
@@ -145,8 +150,10 @@ both the default and the pinned toolchain build and run; diff-guard flags a
 source-inspection test and passes a clean tree; and no toolchain cache or store
 lands in the home. For the engine it checks the Podman version, the `docker`
 shim, the pasta hard links (same inode, not a symlink), the newuidmap and
-newgidmap file capabilities, that no setuid or setgid file exists, and the
-exact subuid/subgid lines; `sqlite3`, `yq` and `shellcheck` run. Where the
+newgidmap file capabilities and that no other file has one, that no setuid or
+setgid file exists, and the exact subuid/subgid lines; every added CLI tool
+runs (`sqlite3`, `yq` and `shellcheck` on a fixture, the rest print their
+version). Where the
 container may create a user namespace it also runs `podman info` as a Run
 starts it (no `XDG_RUNTIME_DIR`) and `docker compose version`; elsewhere it
 skips those two, unless `SMOKE_ENGINE=1` requires them (CI's second smoke
