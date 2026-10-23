@@ -80,6 +80,28 @@ jobs:
             -v "$PWD/images/default/smoke.sh:/smoke-default.sh:ro" \
             -v "$PWD/images/coder/smoke.sh:/smoke.sh:ro" \
             luxmux-coder-smoke:local sh /smoke.sh
+      # A real headless launch, not just the sonames: Playwright downloads its
+      # own Chromium (Chrome for Testing) and the image must have the system
+      # libraries it links. Needs the network for the download; runs as the
+      # image's USER. The image has uv but no uvx, hence `uv tool run`.
+      - name: Headless Chromium (Playwright 1.64.1, image USER, network)
+        run: |
+          docker run --rm -i \
+            --tmpfs /home/agent:uid=1000,gid=1000,mode=0700 \
+            luxmux-coder-smoke:local bash -euo pipefail -s <<'EOF'
+          uv tool run --from playwright==1.64.1 playwright install chromium
+          uv tool run --from playwright==1.64.1 python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page()
+              page.goto("data:text/html,<h1>ok</h1>")
+              text = page.inner_text("h1")
+              assert text == "ok", f"rendered {text!r}, want 'ok'"
+              print(f"chromium {browser.version}: rendered {text!r}")
+              browser.close()
+          PY
+          EOF
 
   # On a coder-v* tag, after both smoke tests pass: the only jobs that may write
   # packages. Each arch is rebuilt from build's cache and pushed by digest;
